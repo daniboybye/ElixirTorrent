@@ -3,6 +3,5 @@ defmodule Bittorent.PeerDiscovery.State do
     peers: %{info_hash => [peer]}
     requests: %{ref => from}
   """
-  @enforce_keys [:port,:peer_id]
-  defstruct [:port, :peer_id, peers: %{}, requests: %{}]
+  defstruct [peers: %{}, requests: %{}]
 end

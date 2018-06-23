@@ -6,8 +6,8 @@ defmodule Bittorrent.PeerDiscovery.Controller do
 
   @timeout_refresh 600_000 #10minutes
 
-  def start_link(args) do
-    GenServer.start_link(__MODULE__,args, name: __MODULE__)
+  def start_link() do
+    GenServer.start_link(__MODULE__,:ok, name: __MODULE__)
   end
 
   def first_request(file_name) do
@@ -30,13 +30,9 @@ defmodule Bittorrent.PeerDiscovery.Controller do
     GenServer.cast(__MODULE__,{:delete,key})
   end
 
-  def init({port,peer_id}) do
+  def init(:ok) do
     send(self(), :refresh) 
-    {:ok, %State{
-      port: port, 
-      peer_id: peer_id
-      }
-    }
+    {:ok, %State{}}
   end
 
   def handle_call({:get,info_hash},_,%State{peers: peers} = state) do
@@ -44,14 +40,14 @@ defmodule Bittorrent.PeerDiscovery.Controller do
   end
 
   def handle_call({:first_request, file_name},from, 
-  %State{
-    peer_id: peer_id, 
-    port: port,
-    requests: requests} = state) do
+  %State{requests: requests} = state) do
     %Task{ref: ref} =
       Task.Supervisor.async_nolink(
         Requests, 
-        Tracker, :first_request!, [file_name,peer_id,port],
+        Tracker, :first_request!,
+        [file_name,
+        PeerDiscovery.peer_id(),
+        PeerDiscovery.port()],
         shitdown: :infinity)
 
     {:noreply, %State{state | requests: Map.new(requests,ref,from) }}
@@ -65,13 +61,15 @@ defmodule Bittorrent.PeerDiscovery.Controller do
     {:noreply, %State{state | peers: Map.delete(peers,info_hash) }}
   end
 
-  def handle_info(:refresh,%State{port: port,peer_id: peer_id} = state) do
+  def handle_info(:refresh,%State{} = state) do
     Registry.get()
-    |> Enum.map(fn %Torrent.Struct{info_hash: info_hash} = torrent ->
+    |> Enum.each(fn %Torrent.Struct{info_hash: info_hash} = torrent ->
       Task.Supervisor.start_child(
         Requests,
         fn -> 
-          {info_hash, Tracker.request!(torrent,peer_id,port)
+          {info_hash, Tracker.request!(torrent,
+          PeerDiscovery.peer_id(),
+          PeerDiscovery.port())
           |> put() end,
         shitdown: :infinity
         ) end
@@ -95,5 +93,4 @@ defmodule Bittorrent.PeerDiscovery.Controller do
       requests: requests, 
       peers: Map.new(map,torrent.info_hash,peers)}}
   end
-
 end

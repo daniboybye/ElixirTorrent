@@ -3,8 +3,8 @@ defmodule Bittorrent.Registry do
 
   import Bittorrent
 
-  def start_link(args) do
-    GenServer.start_link(__MODULE__, args, name: __MODULE__)
+  def start_link() do
+    GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
   end
 
   def get() do
@@ -19,26 +19,53 @@ defmodule Bittorrent.Registry do
     GenServer.cast(__MODULE__,{:start_torrent, torrent})
   end
 
-  def init(_), do: {:ok, []}
+  def get_torrent(info_hash) do
+    GenServer.call(__MODULE__,{:get_torrent,info_hash})
+  end
+
+  def init(:ok), do: {:ok, []}
 
   def handle_call(:get,_,state) do
     {:reply,state,state}
   end
 
-  def handle_call({:get, name},_,state) do
-    {:reply,get(name,state),state}
+  def handle_call({:get, name},_,list) do
+    {:reply,get_by_name(name,),list}
+  end
+
+  def handle_call({:get_torrent,info_hash},_,list) do
+    case get_by_hash(list,info_hash) do
+      nil -> 
+        {:reply,:error,list}
+      torrent ->
+        server = Torrent.Struct.get_server(torrent)
+        {:reply,{:ok,server},list}
+    end
   end
 
   def handle_cast({:start_torrent, torrent}, state) do
-    {:ok, _} = Dynamicsupervisor.start_child(
+    {:ok, pid} = Dynamicsupervisor.start_child(
       Torrents,
       {Torrent,torrent.struct["info"]["name"]}
     )
-    {:noreply,[torrent | state]}
+    Procces.monitor(pid)
+    {:noreply,[%Torrent.Struct{torrent | pid: pid} | state]}
   end
 
-  defp get(name,list) do
+  def handle_info({:DOWN, _ref, :process, pid, _},state) do
+    {torrent, list} = state
+    |> Enum.find(fn x -> x.pid == pid end)
+    |> (&List.pop_at(state,&1)).()
+    
+    IO.puts("problem with ",torrent.struct["info"]["name"])
+    {:noreply,list}
+  end
+
+  defp get_by_name(name, list) do
     Enum.find(list,fn x -> x.struct["info"]["name"] == name end)
   end
 
+  defp get_by_hash(hash,list) do
+    Enum.find(list, fn torrent -> torrent.info_hash == hash end)
+  end
 end

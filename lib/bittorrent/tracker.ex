@@ -16,7 +16,7 @@ defmodule Bittorrent.Tracker do
       downloaded: 0,
       pieces_size: pieces_size
     } 
-    peers = request!(torrent, peer_id, port, "started"),
+    peers = request!(torrent, peer_id, port, "started")
     
     {torrent, peers}
   end
