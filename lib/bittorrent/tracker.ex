@@ -5,16 +5,13 @@ defmodule Bittorrent.Tracker do
     |> File.read!()
     |> Bencode.decode!()
          
-    info_hash = hash(struct)
-    bytes = all_bytes_in_torrent(struct)
-    pieces_size = struct["info"]["pieces"] |> byte_size() |> div(20)
     torrent = %Bittorrent.Torrent.Struct{
-      info_hash: info_hash,
-      bytes: bytes,
+      info_hash: hash(struct),
+      bytes: all_bytes_in_torrent(struct),
       struct: struct,
       uploaded: 0, 
       downloaded: 0,
-      pieces_size: pieces_size
+      pieces_size: struct["info"]["pieces"] |> byte_size() |> div(20)
     } 
     peers = request!(torrent, peer_id, port, "started")
     

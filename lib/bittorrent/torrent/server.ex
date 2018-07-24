@@ -2,14 +2,15 @@ defmodule Bittorrent.Torrent.Server do
   use GenServer
 
   import Bittorrent
+  require Via
 
-  def start_link(args) do
-    GenServer.start_link(__MODULE__, args)
-  end
+  Via.make()
 
-  def add_peer(server,socket,peer_id) do
-    GenServer.cast(server,{:add_peer,{socket,peer_id}})
-  end
+  @doc """
+  key = info_hash 
+  """
+
+  def start_link(key), do: GenServer.start_link(__MODULE__, key, via(key))
 
   def get_pieces_size(server) do
     GenServer.call(server,:get_pices_size)
@@ -45,12 +46,5 @@ defmodule Bittorrent.Torrent.Server do
     )
 
     {:noreply, {swarm,file_handle,state} }
-  end
-
-  defp get_swarm_filehandle(parent) do
-    list = Supervisor.which_child(parent)
-    
-    {Enum.find(list,fn {x,_,_,_} -> x == DynamicSupervisor end),
-    Enum.find(list,fn {x,_,_,_} -> x == Torrent.FileHandle end)}
   end
 end

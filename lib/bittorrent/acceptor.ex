@@ -1,11 +1,11 @@
 defmodule Bittorent.Acceptor do
-  use Supervisor
+  use Supervisor, type: :supervisor
 
   def start_link() do
-    Supervisor.start_link(__MODULE__, :ok)
+    Supervisor.start_link(__MODULE__, nil)
   end
 
-  def init(:ok) do
+  def init(_) do
     [
       {Tast.Supervisor, name: __MODULE__.Handshakes}
       __MODULE__.BlackList,

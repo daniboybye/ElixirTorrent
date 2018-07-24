@@ -10,10 +10,10 @@ defmodule Bittorent.Acceptor.BlackList do
   end
 
   def start_link() do
-    GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+    GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   end
 
-  def init(:ok), do: {:ok, MapSet.new()}
+  def init(_), do: {:ok, MapSet.new()}
 
   def handle_call({:member?, peer_id}, _, state) do
     {:reply, MapSet.member?(state, peer_id), state}

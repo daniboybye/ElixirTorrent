@@ -7,7 +7,7 @@ defmodule Bittorrent.PeerDiscovery.Controller do
   @timeout_refresh 600_000 #10minutes
 
   def start_link() do
-    GenServer.start_link(__MODULE__,:ok, name: __MODULE__)
+    GenServer.start_link(__MODULE__,nil, name: __MODULE__)
   end
 
   def first_request(file_name) do
@@ -18,19 +18,13 @@ defmodule Bittorrent.PeerDiscovery.Controller do
     )
   end
 
-  def get(key) do
-    GenServer.call(__MODULE__,{:get,key})
-  end
+  def get(key), do: GenServer.call(__MODULE__,{:get,key})
 
-  def put(pair) do
-    GenServer.cast(__MODULE__,{:put,pair})
-  end
+  def put(pair), do: GenServer.cast(__MODULE__,{:put,pair})
 
-  def delete(key) do
-    GenServer.cast(__MODULE__,{:delete,key})
-  end
+  def delete(key), do: GenServer.cast(__MODULE__,{:delete,key})
 
-  def init(:ok) do
+  def init(_) do
     send(self(), :refresh) 
     {:ok, %State{}}
   end
@@ -44,12 +38,10 @@ defmodule Bittorrent.PeerDiscovery.Controller do
     %Task{ref: ref} =
       Task.Supervisor.async_nolink(
         Requests, 
-        Tracker, :first_request!,
-        [file_name,
-        PeerDiscovery.peer_id(),
-        PeerDiscovery.port()],
-        shitdown: :infinity)
-
+        Tracker, 
+        :first_request!,
+        [file_name, PeerDiscovery.peer_id(),PeerDiscovery.port()]
+      )
     {:noreply, %State{state | requests: Map.new(requests,ref,from) }}
   end
 
@@ -61,20 +53,29 @@ defmodule Bittorrent.PeerDiscovery.Controller do
     {:noreply, %State{state | peers: Map.delete(peers,info_hash) }}
   end
 
-  def handle_info(:refresh,%State{} = state) do
-    Registry.get()
+  def handle_info(:refresh, %State{} = state) do
+    RegistryTorrents.get()
     |> Enum.each(fn %Torrent.Struct{info_hash: info_hash} = torrent ->
       Task.Supervisor.start_child(
         Requests,
         fn -> 
-          {info_hash, Tracker.request!(torrent,
-          PeerDiscovery.peer_id(),
-          PeerDiscovery.port())
-          |> put() end,
-        shitdown: :infinity
+          {
+            info_hash, 
+            Tracker.request!(
+              torrent, 
+              PeerDiscovery.peer_id(),
+              PeerDiscovery.port()
+            )
+          }
+          |> put()
+        end,
         ) end
       )
     send_after(self(),:refresh, @timeout_refresh)
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, _, :process, _, :normal}, state) do
     {:noreply, state}
   end
 
@@ -86,11 +87,15 @@ defmodule Bittorrent.PeerDiscovery.Controller do
 
   def handle_info({ref, {torrent, peers}}, %State{requests: requests, peers: map} = state) do
     {from, requests} = Map.pop(requests,ref)
-    Registry.start_torrent(torrent)
+    RegistryTorrents.start_torrent(torrent)
     GenServer.reply(from,torrent.struct["info"]["name"])
     
-    {:noreply,%State{state | 
-      requests: requests, 
-      peers: Map.new(map,torrent.info_hash,peers)}}
+    {
+      :noreply,
+      %State{state | 
+        requests: requests, 
+        peers: Map.new(map,torrent.info_hash,peers)
+      }
+    }
   end
 end

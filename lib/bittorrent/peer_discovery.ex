@@ -1,20 +1,22 @@
 defmodule Bittorrent.PeerDiscovery do
-  use Supervisor
+  use Supervisor, type: :supervisor
 
-  @port 6881
-  @peer_id "-DANIBOYBYE_ELIXIR3-"
-
-  def port(), do: @port
+  def port(), do: 6881
   
-  def peer_id(), do: @peer_id
+  def peer_id(), do: "-DANIBOYBYE_ELIXIR3-"
 
-  def start_link(args) do
-    Supervisor.start_link(__MODULE__, args)
+  def start_link() do
+    Supervisor.start_link(__MODULE__, nil)
   end
 
-  def init(args) do
+  def init(_) do
     [
-      {Task.Supervisor, name: __MODULE__.Requests, strategy: :one_for_one},
+      {
+        Task.Supervisor, 
+        name: __MODULE__.Requests,
+        strategy: :one_for_one, 
+        max_restarts: 0
+      },
       __MODULE__.Controller
     ]
     |> Supervisor.init(strategy: :one_for_all)

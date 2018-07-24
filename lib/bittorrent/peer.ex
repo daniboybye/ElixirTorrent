@@ -1,15 +1,14 @@
 defmodule Bittorent.Peer do
-  use Supervisor
+  use Supervisor, restart: :temporary, type: :supervisor
 
-  def start_link(args) do
-    Supervisor.start_link(__MODULE__, args)
-  end
+  def start_link(args), do: Supervisor.start_link(__MODULE__, args)
 
-  def init({torrent,{socket,peer_id}}) do
+  def init({key,_socket} = args) do
     [
-      {__MODULE__.Transmitter, socket},
-      {__MODULE__.Receiver, socket },
-      {__MODULE__.Controller, {torrent,peer_id,self()} }
+      {__MODULE__.Transmitter, key},
+      {__MODULE__.Sender, args},
+      {__MODULE__.Controller, key},
+      {__MODULE__.Receiver, args}
     ]
     |> Supervisor.init(strategy: :one_for_all, max_restart: 0)
   end

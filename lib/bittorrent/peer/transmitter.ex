@@ -1,75 +1,75 @@
 defmodule Bittorrent.Peer.Transmitter do
   use GenServer
 
-  @timeout 100_000
-  @keeplive <<0,0,0,0>>
+  import Bittorrent
+  import Bittorrent.Peer
+  require Via
 
-  def start_link(args) do
-    GenServer.start_link(__MODULE__,args)    
+  Via.make()
+
+  @doc """
+  key = {peer_id, info_hash} 
+  """
+
+  def start_link(key) do
+    GenServer.start_link( __MODULE__,key,name: via(key))    
   end
 
-  def send(transmitter) do
-    GenServer.cast(transmitter,:send)
+  def send(key), do: GenServer.cast(via(key), :send)
+
+  def push_front_send(key, message), do: Sender.send(key, message)
+
+  def member?(key,message) do
+    GenServer.call(via(key), {:member?, message})
   end
 
-  def push_front_send(message,transmitter) do
-    GenServer.cast(transmitter,{:send,message})
+  def empty?(key), do: GenServer.call(via(key),:empty?)
+
+  def push_back(key,message) do
+    GenServer.cast(via(key),{:push_back, message})
   end
 
-  def member?(transmitter,message) do
-    GenServer.call(transmitter,{:member?, message})
+  def push_front(key,message) do
+    GenServer.cast(via(key),{:push_front, message})
   end
 
-  def empty?(transmitter) do
-    GenServer.call(transmitter,:empty?)
-  end
+  def pop(key), do: GenServer.call(via(key), :pop)
 
-  def push_back(transmitter,message) do
-    GenServer.cast(transmitter,{:push_back, message})
-  end
-
-  def push_front(transmitter,message) do
-    GenServer.cast(transmitter,{:push_front, message})
-  end
-
-  def init(socket) do
-    {:ok,{socket, :queue.new()},@timeout}
+  def init(key) do
+    {:ok,{key, :queue.new()}}
   end
 
   def handle_call({:member?,message},{_,queue} = state) do
-    {:reply, :queue.member?(message,queue),state, @timeout}
+    {:reply, :queue.member?(message,queue),state}
   end
 
   def handle_call({:empty?,message},{_,queue} = state) do
-    {:reply, :queue.empty?(queue),state, @timeout}
+    {:reply, :queue.empty?(queue),state}
   end
 
-  def handle_cast(:send,{socket,queue} = state) do
-    {{:value, message},new_queue} = :queue.out(queue)
-    :gen_tcp.send(socket,message)
-    {:noreply,{socket,new_queue},@timeout}
+  def handle_call(:pop, {key,queue} = state) do
+    case :queue.out(queue) do
+      {{:value, message},queue} -> {:reply, message, {key, queue}}
+      {:empty,_} -> {:reply,nil,state}
+    end
   end
 
-  def handle_cast({:send,message},{socket,_} = state) do
-    :gen_tcp.send(socket,message)
-    {:noreply,state,@timeout}
+  def handle_cast(:send,{key,queue}) do
+    {{:value, message}, queue} = :queue.out(queue)
+    Sender.send(key, message)
+    {:noreply, {key, queue}}
   end
 
-  def handle_cast({:push_back,message},{socket,queue}) do
-    {:noreply, {socket,:queue.in(message,queue)},@timeout}
+  def handle_cast({:send,message},{key,_} = state) do
+    Sender.send(key, message)
+    {:noreply, state}
   end
 
-  def handle_cast({:push_front,message},{socket,queue}) do
-    {:noreply, {socket,:queue.in_r(message,queue)},@timeout}
+  def handle_cast({:push_back,message},{key,queue}) do
+    {:noreply, {key,:queue.in(message,queue)}}
   end
 
-  def handle_info(:timeout,{socket,{[],[]}} = state) do
-    :gen_tcp.send(socket,@keeplive)
-    {:noreply,state,@timeout}
-  end
-
-  def handle_info(:timeout,state) do
-    __MODULE__.send(self())
-    {:noreply,state}
+  def handle_cast({:push_front,message},{key,queue}) do
+    {:noreply, {key,:queue.in_r(message,queue)}}
   end
 end

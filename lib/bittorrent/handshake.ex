@@ -18,12 +18,13 @@ defmodule Bittorrent.Handshake do
       info_hash::binary,
       my_peer_id::binary>>
     :gen_tcp.send(socket, message)
+
     case recv(socket, byte_size(message), 20_000) do
       {:ok,
       <<@pstrlen, @pstr, _::bytes-size(8), ^info_hash::bytes-size(20),
         ^peer_id::bytes-size(20)>>} ->
         
-        Torrent.Server.add_peer(server,socker,peer_id)
+        Torrent.Swarm.add_peer(info_hash,peer_id,socket)
         :ok
 
       {:error, :closed} ->
@@ -43,14 +44,14 @@ defmodule Bittorrent.Handshake do
           <<@pstrlen, @pstr, _::bytes-size(8), info_hash::bytes-size(20),
             peer_id::bytes-size(20)>>} <- :gen_tcp.recv(socket, 68, 10_000),
          false <- Acceptor.BlackList.member?(peer_id),
-         {:ok, torrent} <- Registry.get_torrent(info_hash),
+         true <- RegistryTorrent.has_hash?(info_hash),
          :ok <-
            :gen_tcp.send(
              socket,
              <<@pstrlen, @pstr, @reserved, info_hash::binary, my_peer_id::binary>>
            ) 
     do
-      Torrent.Server.add_peer(torrent,socket,peer_id)
+      Torrent.Swarm.add_peer(info_hash,peer_id,socket)
       :ok
     else
     _ ->
