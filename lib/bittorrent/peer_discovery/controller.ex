@@ -18,6 +18,10 @@ defmodule Bittorrent.PeerDiscovery.Controller do
     )
   end
 
+  def has_hash?(hash) do
+    GenServer.call(__MODULE__,{:has_hash?,hash})
+  end
+
   def get(key), do: GenServer.call(__MODULE__,{:get,key})
 
   def put(pair), do: GenServer.cast(__MODULE__,{:put,pair})
@@ -29,8 +33,12 @@ defmodule Bittorrent.PeerDiscovery.Controller do
     {:ok, %State{}}
   end
 
-  def handle_call({:get,info_hash},_,%State{peers: peers} = state) do
-    {:reply,Map.get(peers,info_hash),state}
+  def handle_call({:has_hash?,hash},_,%State{peers: map} = state) do
+    {:reply,Map.has_key?(map,hash),state}
+  end
+
+  def handle_call({:get,hash},_,%State{peers: peers} = state) do
+    {:reply,Map.get(peers,hash),state}
   end
 
   def handle_call({:first_request, file_name},from, 
@@ -45,22 +53,24 @@ defmodule Bittorrent.PeerDiscovery.Controller do
     {:noreply, %State{state | requests: Map.new(requests,ref,from) }}
   end
 
-  def handle_cast({:put,{info_hash,peers}},%State{peers: map} = state) do
-    {:noreply, %State{state | peers: Map.new(map,info_hash,peers) }}
+  def handle_cast({:put,{hash,peers}},%State{peers: map} = state) do
+    {:noreply, %State{state | peers: Map.new(map,hash,peers) }}
   end
 
-  def handle_cast({:delete,info_hash},%State{peers: peers} = state) do
-    {:noreply, %State{state | peers: Map.delete(peers,info_hash) }}
+  def handle_cast({:delete,hash},%State{peers: peers} = state) do
+    {:noreply, %State{state | peers: Map.delete(peers,hash) }}
   end
 
-  def handle_info(:refresh, %State{} = state) do
-    RegistryTorrents.get()
-    |> Enum.each(fn %Torrent.Struct{info_hash: info_hash} = torrent ->
+  def handle_info(:refresh, %State{peers: map} = state) do
+    map
+    |> Map.keys()
+    |> Torrent.get()
+    |> Enum.each(fn %Torrent.Struct{hash: hash} = torrent ->
       Task.Supervisor.start_child(
         Requests,
         fn -> 
           {
-            info_hash, 
+            hash, 
             Tracker.request!(
               torrent, 
               PeerDiscovery.peer_id(),
@@ -87,14 +97,14 @@ defmodule Bittorrent.PeerDiscovery.Controller do
 
   def handle_info({ref, {torrent, peers}}, %State{requests: requests, peers: map} = state) do
     {from, requests} = Map.pop(requests,ref)
-    RegistryTorrents.start_torrent(torrent)
-    GenServer.reply(from,torrent.struct["info"]["name"])
+    Torrents.start_torrent(torrent)
+    GenServer.reply(from, torrent.hash)
     
     {
       :noreply,
       %State{state | 
         requests: requests, 
-        peers: Map.new(map,torrent.info_hash,peers)
+        peers: Map.new(map,torrent.hash,peers)
       }
     }
   end

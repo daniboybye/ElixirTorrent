@@ -6,23 +6,32 @@ defmodule Bittorent.Torrent.FileHandle do
 
   Via.make()
 
-  @subpiece_size :math.pow(2,14)
-
   @doc """
-  key = info_hash 
+  key = hash 
+
+  FileHandle controls File.io_device() 
+  and do not need to be closed manually
   """
 
-  def start_link(key), do: GenServer.start_link(__MODULE__, key, via(key))
+  def start_link({key,args}) do 
+    GenServer.start_link(__MODULE__, args, via(key))
+  end
 
-  def check_hash(key, index), do: GenServer.call(via(key), index)
-
-  def save(key, index, begin, block) do
-    GenServer.cast(via(key), {index, begin, block})
+  def check_hash(key, index) do 
+    GenServer.call(via(key), {:check, index})
   end
   
-  def init(key) do
-    info = RegirstryTorrents.get_info(key)
+  def read(key, index, begin, length) do
+    GenServer.call(via(key),{:read, index,begin,length})
+  end
 
+  def write(key, index, begin, block) do
+    GenServer.cast(via(key), {index, begin, block})
+  end
+
+  def size(key), do: GenServer.call(via(key),:size)
+  
+  def init(info) do
     info["files"]
     |> Enum.map(&Map.fetch!(&1, "length"))
     |> Enum.scan(&(&1 + &2))
@@ -30,51 +39,62 @@ defmodule Bittorent.Torrent.FileHandle do
     |> (& {:ok, Map.put(info, "files", &1)}).()
   end
 
-  def terminate(_, %{"files" => files}) do
-    Enum.each(files, fn {_,{pid,_}} -> File.close(pid) end)
+  def handle_call(:size,_,%{"files" => files} = state) do
+    size = files |> List.last() |> elem(0)
+    {:reply,size, state}
   end
 
-  def handle_call(index, _, %{"files" => files, 
+  def handle_call({:check, index}, _, %{"files" => files, 
     "piece length" => len, "pieces" => pieces} = state) do
 
-    {offset, files} = offset_files(index, files, len)
-    res = check(offset,len,files,binary_part(pices, index*20, 20))
+    {offset, files1} = offset_files(index, files, len)
+    hash = binary_part(pieces, index*20, 20)
+    piece = do_read(offset,len,files1)
+    res = hash === :crypto.hash(:sha, piece)
     {:reply, res, state}
   end
 
-  def handle_cast({index, begin, block},%{"files" => files} = state) do
-    {offset, files} = offset_files(index, files, len, begin)
-    do_save(offset, files, block)
+  def handle_call({:read,index,begin,length},_,
+  %{"files" => files, "piece length" => piece_len} = state) do
+    {offset, files1} = offset_files(index, files, piece_len, begin)
+    res = do_read(offset, length, files)
+    {:reply, res, state}
+  end
+
+  def handle_cast({index, begin, block},
+    %{"files" => files, "piece length" => len} = state) do
+    {offset, files1} = offset_files(index, files, len, begin)
+    do_write(offset, files1, block)
     {:noreply, state}
   end
 
-  defp offset_files(index, files, len, offset // 0) do
+  defp offset_files(index, files, piece_len, offset // 0) do
     {left, right} = Enum.split_while(files, 
-      fn {x,_} -> x <= index * len + offset end)
+      fn {x,_} -> x <= index * piece_len + offset end)
     {
-      index * len - elem(List.last(left), 0),
+      index * piece_len - elem(List.last(left), 0),
       right 
-      |> Enum.take_while(fn {x,_} -> x <= index * (len + 1) end)
+      |> Enum.take_while(fn {x,_} -> x <= index * (piece_len + 1) end)
       |> Keyword.values()
     }
   end
 
-  defp do_save(_,_,<<>>), do: :ok
+  defp do_read(offset, length, files, res // <<>>)
 
-  defp do_save(offset,[{pid, len} | files], bin) do
-    s = byte_size(bin)
-    n = min(s, len - offset)
-    :file.pwrite(pid,{:bof,offset}, n)
-    save(0,files, binary_part(bin, n, s - n)
+  defp do_read(_,0,_,res), do: res
+
+  defp do_read(offset, length, [{pid,_} | files] , res) do
+    {:ok, block} = :file.pread(pid, {:bof,offset}, length)
+    do_read(0,length - byte_size(block) ,files, res <> block)
   end
 
-  defp check(offset, len, file, hash, bin // <<>>)
+  defp do_write(_,_,<<>>), do: :ok
 
-  defp check(_, _, [], hash, bin), do: hash == :crypto.hash(:sha, bin)
-
-  defp check(offset, len, [{pid,_} | files], hash, bin) do
-    tbin = :file.pread(pid,{:bof,offset},len)
-    check(0,len - byte_size(pbin), files, bin <> tbin)
+  defp do_write(offset,[{pid, len} | files], bin) do
+    s = byte_size(bin)
+    n = min(s, len - offset)
+    :ok = :file.pwrite(pid,{:bof,offset}, n)
+    do_write(0,files, binary_part(bin, n, s - n))
   end
 
   defp make_file(%{"length" => length, "path" => path}) do

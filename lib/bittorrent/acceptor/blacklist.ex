@@ -1,9 +1,7 @@
 defmodule Bittorent.Acceptor.BlackList do
   use GenServer
 
-  def put(peer_id) do
-    GenServer.cast(__MODULE__, {:put, peer_id})
-  end
+  def put(peer_id), do: GenServer.cast(__MODULE__, {:put, peer_id})
 
   def member?(peer_id) do
     GenServer.call(__MODULE__, {:member?, peer_id})

@@ -1,25 +1,35 @@
 defmodule Bittorrent.Torrent.Swarm do
-  use DynamicSupervisor, type: :supervisor
-
   import Bittorrent
   require Via
 
   Via.make()
 
   @doc """
-  key = info_hash 
+  key = hash 
   """
 
   def start_link(key) do
-    DynamicSupervisor.start_child(__MODULE__, nil, name: vie(key))
+    DynamicSupervisor.start_link(
+      name: via(key),
+      strategy: :one_for_one,
+      max_restarts: 0
+    )
   end
 
-  def add_peer(info_hash,peer_id,socket) do
-    via(info_hash)
-    |> DynamicSupervisor.start_child({{peer_id,info_hash},socket})
+  def interested(key, index) do
+    DynamicSupervisor.which_children(via(key))
+    |> Enum.each(&Peer.interested(&1, index))
   end
 
-  def init(_) do
-    DynamicSupervisor.init(strategy: :one_for_one, max_restarts: 0)
+  def broadcast_have(key, index) do
+    DynamicSupervisor.which_children(via(key))
+    |> Enum.each(&Peer.have(&1, index))
   end
+
+  def add_peer(hash,peer_id,socket) do
+    child = {Peer, {{peer_id,hash},socket}}
+    DynamicSupervisor.start_child(via(hash), child)
+  end
+
+  def download(key, index) do
 end

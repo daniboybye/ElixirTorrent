@@ -1,8 +1,6 @@
 defmodule Bittorent.Torrent.Struct do
-  defstruct [info_hash: nil, struct: nil, 
-  bytes: nil, uploaded: nil, downloaded: nil, status: nil,
-  pieces_size: nil,
-  bitfield: nil,
-  pid: nil,
-  peer_id: nil]
+  @enforce_keys [:hash, :struct, :bytes,:pieces_count]
+  defstruct [:hash, :struct, :bytes,
+   uploaded: 0, downloaded: 0, status: "started",
+   :pieces_count]
 end

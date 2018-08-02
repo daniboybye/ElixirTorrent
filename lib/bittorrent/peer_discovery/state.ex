@@ -1,6 +1,6 @@
 defmodule Bittorent.PeerDiscovery.State do
   @doc """
-    peers: %{info_hash => [peer]}
+    peers: %{hash => [peer]}
     requests: %{ref => from}
   """
   defstruct [peers: %{}, requests: %{}]

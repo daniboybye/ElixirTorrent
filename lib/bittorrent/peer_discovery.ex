@@ -1,13 +1,21 @@
 defmodule Bittorrent.PeerDiscovery do
   use Supervisor, type: :supervisor
 
+  def start_link(), do: Supervisor.start_link(__MODULE__, nil)
+  
   def port(), do: 6881
   
   def peer_id(), do: "-DANIBOYBYE_ELIXIR3-"
 
-  def start_link() do
-    Supervisor.start_link(__MODULE__, nil)
-  end
+  defdelegate has_hash?(hash), to: __MODULE__.Controller
+
+  defdelegate first_request(file_name), to: __MODULE__.Controller
+
+  defdelegate get(key), to: __MODULE__.Controller
+
+  defdelegate put(pair), to: __MODULE__.Controller
+
+  defdelegate delete(key), to: __MODULE__.Controller
 
   def init(_) do
     [

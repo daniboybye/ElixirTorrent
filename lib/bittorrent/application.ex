@@ -3,15 +3,9 @@ defmodule Bittorrent.Application do
 
   def start(_type, _args) do
     [
-      {Registry, keys: :unique, name: RegistryProcesses},
-      {
-        DynamicSupervisor, 
-        strategy: :one_for_one, 
-        name: Bittorent.Torrents, 
-        max_restarts: 0
-      },
-      Bittorent.Acceptor,
-      Bittorrent.RegistryTorrents,
+      {Registry, keys: :unique, name: Registry},
+      Bittorrent.Torrents, 
+      Bittorrent.Acceptor,
       Bittorrent.PeerDiscovery
     ]
     |> Supervisor.start_link([strategy: :one_for_all, name: Bittorrent])
