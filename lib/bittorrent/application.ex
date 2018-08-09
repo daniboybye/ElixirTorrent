@@ -4,10 +4,10 @@ defmodule Bittorrent.Application do
   def start(_type, _args) do
     [
       {Registry, keys: :unique, name: Registry},
-      Bittorrent.Torrents, 
-      Bittorrent.Acceptor,
-      Bittorrent.PeerDiscovery
+      Torrents,
+      PeerDiscovery,
+      Acceptor
     ]
-    |> Supervisor.start_link([strategy: :one_for_all, name: Bittorrent])
+    |> Supervisor.start_link(strategy: :one_for_all)
   end
 end

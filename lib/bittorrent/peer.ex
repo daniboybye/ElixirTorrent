@@ -1,39 +1,70 @@
-defmodule Bittorent.Peer do
+defmodule Peer do
   use Supervisor, restart: :temporary, type: :supervisor
 
-  import __MODULE__
+  require Via
+  Via.make()
 
-  def start_link(args), do: Supervisor.start_link(__MODULE__, args)
+  @type peer_id :: <<_::20>>
+  @type peer :: %{required(binary()) => peer_id, required(binary()) => Acceptor.port_number(), required(binary()) => binary()}
+  @type key :: {Peer.peer_id(), Torrent.hash()}
 
+  @spec start_link({peer_id(), Acceptor.socket()}) :: Supervisor.on_start()
+  def start_link({key, _socket} = args) do
+    Supervisor.start_link(__MODULE__, args, name: via(key))
+  end
+
+  @spec whereis(Torrent.hash(), peer_id()) :: pid() | {atom(), node()} | nil
+  def whereis(hash, peer_id), do: GenServer.whereis(via({peer_id, hash}))
+
+  @spec have(pid(), Torrent.index()) :: :ok | no_return()
   def have(pid, index) do
-    pid
-    |> Supervisor.which_children()
-    |> Enum.find(&module?(&1,Sender))
-    |> elem(1)
-    |> Sender.have(index)
+    [{key, _} | _] = Registry.keys(Registry, pid)
+    __MODULE__.Controller.have(key, index)
   end
 
+  @spec interested(pid(), Torrent.index()) :: :ok | no_return()
   def interested(pid, index) do
-    pid
-    |> Supervisor.which_children()
-    |> Enum.find(&module?(&1,Controller))
-    |> elem(1)
-    |> Controller.interested(index)
+    [{key, _} | _] = Registry.keys(Registry, pid)
+    __MODULE__.Controller.interested(key, index)
   end
 
-  def init({key,_socket} = args) do
+  @spec piece(pid(), peer_id(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
+  def piece(hash, peer_id, index, begin, block) do
+    key = {peer_id, hash}
+    __MODULE__.Controller.upload(key, byte_size(block))
+    __MODULE__.Sender.piece(key, index, begin, block)
+  end
+
+  defdelegate cancel(hash, peer_id, index, begin, length), to: __MODULE__.Controller
+
+  @spec reset_rank(pid()) :: :ok | no_return()
+  def reset_rank(pid) do
+    [{key, _} | _] = Registry.keys(Registry, pid)
+    __MODULE__.Controller.reset_rank(key)
+  end
+
+  defdelegate choke(hash, peer_id), to: __MODULE__.Controller
+
+  @spec want_unchoke(pid()) :: __MODULE__.Controller.want_unchoke_return() | no_return()
+  def want_unchoke(pid) do
+    [{key, _} | _] = Registry.keys(Registry, pid)
+    __MODULE__.Controller.want_unchoke(key)
+  end
+
+  defdelegate unchoke(hash, peer_id), to: __MODULE__.Controller
+
+  @spec seed(pid()) :: :ok | no_return()
+  def seed(pid) do
+    [{key, _} | _] = Registry.keys(Registry, pid)
+    __MODULE__.Controller.seed(key)
+  end
+
+  def init({key, _socket} = args) do
     [
-      #{Transmitter, key},
-      {Sender, args},
-      {Controller, key},
-      Receiver, args}
+      {__MODULE__.Sender, args},
+      {__MODULE__.Controller, key},
+      {__MODULE__.Receiver, args}
     ]
     |> Supervisor.init(strategy: :one_for_all, max_restart: 0)
   end
-
-  defp module?({_,_,_,[m]},module) when module === m,  do: true
-  
-  defp module?(_,_), do: false
-
-
 end

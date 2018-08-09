@@ -1,18 +1,19 @@
-defmodule Bittorent.Acceptor.Listen do
+defmodule Acceptor.Listen do
   use GenServer
 
-  import Bittorent
+  require Logger
 
   @doc """
   Listen controls a :gen_tcp.listen 
   and do not need to be closed manually
   """
 
-  def start_link(), do: GenServer.start_link(__MODULE__, nil)
+  @spec start_link(any()) :: GenServer.on_start()
+  def start_link(_), do: GenServer.start_link(__MODULE__, nil)
 
   def init(_) do
-    PeerDiscovery.port()
-    |> :gen_tcp.listen([:binary, active: false, reuseaddr: true])
+    Acceptor.port()
+    |> :gen_tcp.listen(Acceptor.socket_options())
     |> case do
       {:ok, _} = x ->
         send(self(), :loop)
@@ -27,6 +28,8 @@ defmodule Bittorent.Acceptor.Listen do
 
   defp loop(socket) do
     {:ok, client} = :gen_tcp.accept(socket)
+    Logger.info("new client")
+    Acceptor.Pool.give_control(client)
     Acceptor.recv(client)
     loop(socket)
   end

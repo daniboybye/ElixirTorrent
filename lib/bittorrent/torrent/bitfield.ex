@@ -1,48 +1,50 @@
-defmodule Bittorent.Torrent.Bitfield do
+defmodule Torrent.Bitfield do
   use GenServer
 
-  import Bittorrent
   require Via
-
   Via.make()
 
-  @doc """
-  key = hash 
-  """
-
-  def start_link({key,args}) do
-    GenServer.start_link(__MODULE__, args, via(key))
+  @spec start_link(Torrent.Struct.t()) :: GenServer.on_start()
+  def start_link(%Torrent.Struct{hash: hash, last_index: index}) do
+    GenServer.start_link(__MODULE__, index + 1, name: via(hash))
   end
 
-  def get(key), do: GenServer.call(via(key),:get)
-  
-  def add_bit(key,index), do: GenServer.cast(via(key),index)
-
-  def check?(key,index), do: GenServer.call(via(key),index)
-
-  def init(count) do
-    count = Float.ceil(count/8) |> trunc()
-    
-    Stream.cycle([0])
-    |> Stream.take(count)
+  @spec make(pos_integer()) :: Torrent.bitfield()
+  def make(count) do
+    count
+    |> size()
+    |> (&List.duplicate(0, &1)).()
     |> List.to_string()
-    |> (&{:ok, &1}).()
   end
 
-  def handle_call(:get,_, bitfield) do
+  @spec get(Torrent.hash()) :: Torrent.bitfield()
+  def get(hash), do: GenServer.call(via(hash), :get)
+
+  @spec add_bit(Torrent.hash(), Torrent.index()) :: :ok
+  def add_bit(hash, index), do: GenServer.cast(via(hash), index)
+
+  @spec check?(Torrent.hash(), Torrent.index()) :: boolean()
+  def check?(hash, index), do: GenServer.call(via(hash), index)
+
+  def init(count), do: {:ok, __MODULE__.make(count)}
+
+  def handle_call(:get, _, bitfield) do
     {:reply, bitfield, bitfield}
   end
 
-  def handle_call(index,<<_::index,1::1,_::bits>> = state) do
-    {:reply, true, state}
-  end
-    
-  def handle_call(_,_,state), do: {:reply,false,state }
-
-  def handle_cast(index,<<prefix::index,0::1,indextfix::bits>>) do
-    {:noreply, <<prefix::bits,1::1,indextfix::bits>>}
+  def handle_call(index, _, state) do
+    <<_::bits-size(index), x::1, _::bits>> = state
+    {:reply, x == 1, state}
   end
 
-  def handle_cast(_,state), do: {:noreply, state}
-  
+  def handle_cast(index, state) do
+    <<prefix::bits-size(index), _::1, postfix::bits>> = state
+    {:noreply, <<prefix::bits, 1::1, postfix::bits>>}
+  end
+
+  defp size(pieces_count) do
+    (pieces_count / 8)
+    |> Float.ceil()
+    |> trunc()
+  end
 end

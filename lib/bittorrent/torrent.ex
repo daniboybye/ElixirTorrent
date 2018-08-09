@@ -1,26 +1,36 @@
-defmodule Bittorrent.Torrent do 
+defmodule Torrent do
   use Supervisor, type: :supervisor, restart: :transient
 
-  import __MODULE__
+  require Logger
 
+  @type hash :: <<_::20>>
+  @type index :: non_neg_integer()
+  @type begin :: non_neg_integer()
+  @type length :: pos_integer()
+  @type block :: binary()
+  @type bitfield :: binary()
+
+  @spec start_link(Torrent.Struct.t()) :: Supervisor.on_start()
   def start_link(args), do: Supervisor.start_link(__MODULE__, args)
 
-  defdelegate add_peer(hash,peer_id,socket), to: Swarm
+  defdelegate add_peer(hash, peer_id, socket), to: __MODULE__.Swarm
 
-  defdelegate get(hash), to: Server
+  defdelegate get(hash), to: __MODULE__.Server
 
-  defdelegate size(hash), to: FileHandle
+  defdelegate torrent_downloaded?(hash), to: __MODULE__.Server
 
-  def init(%Struct{hash: hash,struct: %{"info" => info},
-    pieces_count: pieces_count} = torrent) do
+  defdelegate size(hash), to: __MODULE__.Server
+
+  def init(torrent) do
     [
-      {FileHandle,      {hash, info}},
-      {Bitfield,        {hash, pieces_count}},
-      {Swarm.Statistic, {hash, pieces_count}},
-      {Swarm,           hash},
-      {Downloads,       hash},
-      {Server,          torrent}
+      {__MODULE__.FileHandle, torrent},
+      {__MODULE__.Bitfield, torrent},
+      {__MODULE__.PiecesStatistic, torrent},
+      {__MODULE__.Uploader, torrent},
+      {__MODULE__.Swarm, torrent},
+      {__MODULE__.Downloads, torrent},
+      {__MODULE__.Server, torrent}
     ]
-    |> Supervisor.init(strategy: :one_for_all)
+    |> Supervisor.init(strategy: :one_for_all, max_restart: 0)
   end
 end
