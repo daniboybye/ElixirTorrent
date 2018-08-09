@@ -99,7 +99,8 @@ defmodule Torrent.Server do
   def handle_info({:speed,downloaded, uploaded}, state) do
     Process.send_after(self(),{:speed, state.downloaded, state.uploaded}, @speed_time)
     %{active: count_peers} = Torrent.Swarm.count(state.hash)
-    Logger.info "#{state.struct["info"]["name"]},
+    Logger.info "
+    #{state.struct["info"]["name"]},
     download: #{(state.downloaded - downloaded)/@speed_time}KB/s,
     upload: #{(state.uploaded - uploaded)/@speed_time}KB/s,
     peers: #{count_peers}"

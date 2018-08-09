@@ -5,7 +5,7 @@ defmodule Bittorrent.MixProject do
     [
       app: :bittorrent,
       version: "0.1.0",
-      elixir: "~> 1.6",
+      elixir: "~> 1.7.2",
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]
@@ -22,8 +22,10 @@ defmodule Bittorrent.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:bencode, github: "gausby/bencode"},
+      {:logger_file_backend, "~> 0.0.10", github: "onkel-dirtus/logger_file_backend"},
       {:httpoison, "~> 1.1"},
-      {:dialyxir, "~> 0.4", only: [:dev]}
+      {:dialyxir, "~> 0.5", only: [:dev]}
       # {:dep_from_hexpm, "~> 0.3.0"},
       # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"},
     ]
