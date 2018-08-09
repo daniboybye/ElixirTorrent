@@ -13,6 +13,12 @@ defmodule Peer do
     Supervisor.start_link(__MODULE__, args, name: via(key))
   end
 
+  @spec get_id(pid()) :: Peer.peer_id()
+  def get_id(pid) do
+    [{{_,peer_id}, _} | _] = Registry.keys(Registry, pid)
+    peer_id
+  end
+
   @spec whereis(Torrent.hash(), peer_id()) :: pid() | {atom(), node()} | nil
   def whereis(hash, peer_id), do: GenServer.whereis(via({peer_id, hash}))
 
@@ -27,6 +33,8 @@ defmodule Peer do
     [{key, _} | _] = Registry.keys(Registry, pid)
     __MODULE__.Controller.interested(key, index)
   end
+
+  defdelegate request(hash,peer_id,index,begin,length), to: __MODULE__.Controller
 
   @spec piece(pid(), peer_id(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
   def piece(hash, peer_id, index, begin, block) do

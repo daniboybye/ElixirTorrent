@@ -26,12 +26,10 @@ defmodule Torrent.Downloads.Piece do
     GenServer.cast(via({index, hash}), :download)
   end
 
-  @spec get_request(Torrent.hash(), Torrent.index(), Peer.peer_id()) ::
+  @spec want_request(Torrent.hash(), Torrent.index(), Peer.peer_id()) ::
           {Torrent.begin(), Torrent.length()} | nil
-  def get_request(hash, index, peer_id) do
-    if pid = GenServer.whereis(via({index, hash})) do
-      GenServer.call(pid, {:get_request, peer_id})
-    end
+  def want_request(hash, index, peer_id) do
+      GenServer.cast(via({index,hash}), {:want_request, peer_id})
   end
 
   @spec request_response(
@@ -52,11 +50,12 @@ defmodule Torrent.Downloads.Piece do
     {:ok, %__MODULE__.State{index: index, hash: hash, waiting: make_subpieces([], length, 0)}}
   end
 
-  def handle_call({:get_request, _}, _, %__MODULE__.State{waiting: []} = state) do
-    {:reply, nil, state}
+  def handle_cast({:want_request, _}, %__MODULE__.State{waiting: []} = state) do
+    {:noreply, state}
   end
 
-  def handle_call({:get_request, peer_id}, _, %__MODULE__.State{waiting: [_]} = state) do
+  def handle_cast({:want_request, peer_id}, %__MODULE__.State{waiting: [{begin, length}]} = state) do
+    Peer.request(state.hash,peer_id, state.index, begin, length)
     Torrent.Server.next_piece(state.hash)
 
     state
@@ -64,13 +63,16 @@ defmodule Torrent.Downloads.Piece do
       :ok = cancel_timer(timer, :timeout)
       nil
     end)
-    |> do_get_request(peer_id)
+    |> monitor_request(peer_id)
   end
 
-  def handle_call({:get_request, peer_id}, _, state) do
+  def handle_cast({:want_request, peer_id}, state) do
+    [{begin, length} | _] = state.waiting
+    Peer.request(state.hash,peer_id, state.index, begin, length)
+    
     state
     |> update_timer()
-    |> do_get_request(peer_id)
+    |> monitor_request(peer_id)
   end
 
   def handle_cast(
@@ -138,7 +140,7 @@ defmodule Torrent.Downloads.Piece do
 
   def handle_info(_, state), do: {:noreply, state}
 
-  defp do_get_request(%__MODULE__.State{waiting: [subpiece | tail]} = state, peer_id) do
+  defp monitor_request(%__MODULE__.State{waiting: [subpiece | tail]} = state, peer_id) do
     ref =
       state.hash
       |> Peer.whereis(peer_id)
@@ -157,7 +159,7 @@ defmodule Torrent.Downloads.Piece do
         requests: [request | state.requests]
     }
 
-    {:reply, subpiece, state}
+    {:noreply, state}
   end
 
   defp do_down(state, ref) do

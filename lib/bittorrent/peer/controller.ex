@@ -49,6 +49,11 @@ defmodule Peer.Controller do
   @spec reset_rank(Peer.key()) :: :ok
   def reset_rank(key), do: GenServer.cast(via(key), :reset_rank)
 
+  @spec request(Torrent.hash(),Peer.peer_id(),Torrent.index(),Torrent.begin(),Torrent.length()) :: :ok
+  def request(hash,peer_id,index,begin,length) do
+    GenServer.cast(via({peer_id,hash}),{:request,index,begin,length})
+  end
+
   @spec handle_choke(Peer.key()) :: :ok
   def handle_choke(key), do: GenServer.cast(via(key), :handle_choke)
 
@@ -152,30 +157,41 @@ defmodule Peer.Controller do
   def handle_cast({:cancel, index, begin, length}, state) do
     Peer.Sender.cancel(state.key, index, begin, length)
 
-    state
-    |> Map.update!(:requests, &List.delete(&1, {index, begin, length}))
-    |> make_requests()
+    new_state = Map.update!(state,:requests, &List.delete(&1, {index, begin, length}))
+    make_request(new_state)
+    {:noreply, new_state}
+  end
+
+  def handle_cast({:request,index,begin,length}, state) do
+    Peer.Sender.request(state.key, index, begin, length)
+    new_state =  Map.update!(state, :requests, &[{index, begin, length} | &1])
+    make_request(new_state)
+    {:noreply, new_state}
   end
 
   def handle_cast(:seed, %__MODULE__.State{interested: true} = state) do
     Peer.Sender.interested(state.key, false)
     do_seed(state)
   end
-
+  
   def handle_cast(:seed, state), do: do_seed(state)
-
-  def handle_cast(:handle_choke, state) do
-    {:noreply, %__MODULE__.State{state | choke_me: true}}
+  
+  def handle_cast({:upload, n}, %__MODULE__.State{status: :seed} = state) do
+    {:noreply, Map.update!(state, :rank, &(&1 + n))}
   end
 
+  def handle_cast({:upload, _}, state), do: {:noreply, state}
+
+  def handle_cast(:handle_choke, state), do: {:noreply, Map.put(state, :choke_me, true)}
+
   def handle_cast(:handle_unchoke, state) do
-    state
-    |> Map.put(:choke_me, false)
-    |> make_requests()
+    new_state = Map.put(state, :choke_me, false)
+    make_request(new_state)
+    {:noreply, new_state}
   end
 
   def handle_cast(:handle_interested, state) do
-    {:noreply, %__MODULE__.State{state | interested_of_me: true}}
+    {:noreply, Map.put(state, :interested_of_me, true)}
   end
 
   def handle_cast(:handle_not_interested, %__MODULE__.State{choke: false} = state) do
@@ -248,12 +264,13 @@ defmodule Peer.Controller do
     if Enum.find_value(state.requests, &(&1 == value)) do
       Torrent.Downloads.request_response(hash, index, peer_id, begin, block)
 
-      %__MODULE__.State{
+      new_state = %__MODULE__.State{
         state
         | requests: List.delete(state.requests, value),
           rank: state.rank + length
       }
-      |> make_requests()
+      make_request(new_state)
+      {:noreply, new_state}
     else
       {:stop, :protocol_error, state}
     end
@@ -264,17 +281,11 @@ defmodule Peer.Controller do
     {:noreply, state}
   end
 
-  def handle_cast({:upload, n}, %__MODULE__.State{status: :seed} = state) do
-    {:noreply, Map.update!(state, :rank, &(&1 + n))}
-  end
-
-  def handle_cast({:upload, _}, state), do: {:noreply, state}
-
   defp do_seed(state) do
     {:noreply, %__MODULE__.State{state | bitfield: nil, status: :seed, interested: false}}
   end
 
-  defp make_requests(
+  defp make_request(
          %__MODULE__.State{
            interested: true,
            choke_me: false,
@@ -283,20 +294,13 @@ defmodule Peer.Controller do
          } = state
        )
        when is_integer(status) do
-    with len when len < @max_unanswered_requests <- length(state.requests),
-         {begin, length} <- Torrent.Downloads.get_request(hash, status, peer_id) do
-      Peer.Sender.request(state.key, status, begin, length)
-
-      state
-      |> Map.update!(:requests, &[{status, begin, length} | &1])
-      |> make_requests()
-    else
-      _ ->
-        {:noreply, state}
+    with len when len < @max_unanswered_requests <- length(state.requests) do
+        Torrent.Downloads.want_request(hash, status, peer_id)
     end
+    :ok
   end
 
-  defp make_requests(state), do: {:noreply, state}
+  defp make_request(_), do: :ok
 
   defp check_interested(%__MODULE__.State{status: status} = state)
        when is_integer(status) do
@@ -306,9 +310,9 @@ defmodule Peer.Controller do
       Peer.Sender.interested(state.key, interested)
     end
 
-    state
-    |> Map.put(:interested, interested)
-    |> make_requests()
+    new_state = Map.put(state,:interested, interested)
+    make_request(new_state)
+    {:noreply, new_state}
   end
 
   defp check_interested(state), do: {:noreply, state}
@@ -324,7 +328,7 @@ defmodule Peer.Controller do
   end
 
   defp do_has_index?(index, state) do
-    with <<_::bits-size(index), 1::1, _::bits>> <- state.bitfield() do
+    with <<_::bits-size(index), 1::1, _::bits>> <- state.bitfield do
       true
     else
       _ ->

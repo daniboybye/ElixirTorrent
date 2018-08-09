@@ -29,7 +29,7 @@ defmodule Torrent.Downloads do
     __MODULE__.Piece.download(hash, index)
   end
 
-  defdelegate get_request(hash, index, peer_id), to: __MODULE__.Piece
+  defdelegate want_request(hash, index, peer_id), to: __MODULE__.Piece
 
   defdelegate request_response(hash, index, peer_id, begin, block), to: __MODULE__.Piece
 

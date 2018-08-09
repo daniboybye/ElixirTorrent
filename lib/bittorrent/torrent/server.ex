@@ -116,7 +116,7 @@ defmodule Torrent.Server do
         Torrent.Swarm.seed(temp.hash)
         #Torrent.Downloads.stop(temp.hash)
         #Torrent.PiecesStatistic.stop(temp.hash)
-        {:noreply, %Torrent.Struct{temp | status: "completed", peer_status: :seed}}
+        %Torrent.Struct{temp | status: "completed", peer_status: :seed}
       end
 
     {:noreply, new_state}
