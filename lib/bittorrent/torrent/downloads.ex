@@ -14,19 +14,14 @@ defmodule Torrent.Downloads do
   @spec stop(Torrent.hash()) :: :ok
   def stop(hash), do: DynamicSupervisor.stop(via(hash))
 
-  @spec piece(Torrent.hash(), Torrent.index(), Torrent.length()) :: :ok
-  def piece(hash, index, length) do
-    Logger.info("current piece download #{index}")
-
-    # unless __MODULE__.Piece.run?(hash, index) do
+  @spec piece(Torrent.hash(), Torrent.index(), Torrent.length(), __MODULE__.Piece.mode()) :: :ok
+  def piece(hash, index, length, mode) do
+    #Logger.info("current piece download #{index}")
     DynamicSupervisor.start_child(
       via(hash),
       {__MODULE__.Piece, {index, hash, length}}
     )
-
-    # end
-
-    __MODULE__.Piece.download(hash, index)
+    __MODULE__.Piece.download(hash, index, mode)
   end
 
   defdelegate want_request(hash, index, peer_id), to: __MODULE__.Piece

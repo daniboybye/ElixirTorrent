@@ -4,6 +4,8 @@ defmodule Peer.Receiver do
   require Peer.Const
   require Logger
 
+  alias Peer.Controller
+
   Peer.Const.message_id()
   @max_length trunc(:math.pow(2, 14))
 
@@ -31,10 +33,10 @@ defmodule Peer.Receiver do
 
   defp get_message(_, 0), do: {:ok, <<>>}
 
-  defp get_message(socket, len), do: :gen_tcp.recv(socket, len, 60_000)
+  defp get_message(socket, len), do: :gen_tcp.recv(socket, len, @timeout_recv)
 
   defp loop(socket, key) do
-    with {:ok, <<len::32>>} <- :gen_tcp.recv(socket, 4, @timeout),
+    with {:ok, <<len::32>>} <- :gen_tcp.recv(socket, 4, @timeout_recv),
          {:ok, message} <- get_message(socket, len),
          :ok <- handle(message, key) do
       loop(socket, key)
@@ -43,39 +45,39 @@ defmodule Peer.Receiver do
 
   defp handle(<<>>, _), do: :ok
 
-  defp handle(<<@choke_id>>, key), do: Peer.Controller.handle_choke(key)
+  defp handle(<<@choke_id>>, key), do: Controller.handle_choke(key)
 
-  defp handle(<<@unchoke_id>>, key), do: Peer.Controller.handle_unchoke(key)
+  defp handle(<<@unchoke_id>>, key), do: Controller.handle_unchoke(key)
 
-  defp handle(<<@interested_id>>, key), do: Peer.Controller.handle_interested(key)
+  defp handle(<<@interested_id>>, key), do: Controller.handle_interested(key)
 
   defp handle(<<@not_interested_id>>, key) do
-    Peer.Controller.handle_not_interested(key)
+    Controller.handle_not_interested(key)
   end
 
   defp handle(<<@have_id, index::32>>, key) do
-    Peer.Controller.handle_have(key, index)
+    Controller.handle_have(key, index)
   end
 
   defp handle(<<@bitfield_id, bitfield::binary>>, key) do
-    Peer.Controller.handle_bitfield(key, bitfield)
+    Controller.handle_bitfield(key, bitfield)
   end
 
   defp handle(<<@request_id, index::32, begin::32, length::32>>, key)
        when length <= @max_length do
-    Peer.Controller.handle_request(key, index, begin, length)
+    Controller.handle_request(key, index, begin, length)
   end
 
   defp handle(<<@piece_id, index::32, begin::32, block::binary>>, key) do
-    Peer.Controller.handle_piece(key, index, begin, block)
+    Controller.handle_piece(key, index, begin, block)
   end
 
   defp handle(<<@cancel_id, index::32, begin::32, length::32>>, key) do
-    Peer.Controller.handle_cancel(key, index, begin, length)
+    Controller.handle_cancel(key, index, begin, length)
   end
 
   defp handle(<<@port_id, port::16>>, key) do
-    Peer.Controller.handle_port(key, port)
+    Controller.handle_port(key, port)
   end
 
   defp handle(_, _), do: :ok

@@ -8,10 +8,6 @@ defmodule Peer.Sender do
   Via.make()
   Peer.Const.message_id()
 
-  @doc """
-  key = {peer_id, hash} 
-  """
-
   @spec start_link({Peer.key(), Acceptor.socket()}) :: GenServer.on_start()
   def start_link({key, socket}) do
     GenServer.start_link(__MODULE__, socket, name: via(key))
@@ -54,7 +50,7 @@ defmodule Peer.Sender do
   @spec port(Peer.key(), Acceptor.port_number()) :: :ok
   def port(key, port), do: GenServer.cast(via(key), {:port, port})
 
-  def init(socket), do: {:ok, socket, @timeout}
+  def init(socket), do: {:ok, socket, @timeout_keeplive}
 
   def handle_cast(:choke, socket) do
     do_send(socket, <<@choke_id>>)
@@ -100,6 +96,6 @@ defmodule Peer.Sender do
 
   defp do_send(socket, message) do
     :gen_tcp.send(socket, <<byte_size(message)::32, message::binary>>)
-    {:noreply, socket, @timeout - 1_000}
+    {:noreply, socket, @timeout_keeplive - 10_000}
   end
 end

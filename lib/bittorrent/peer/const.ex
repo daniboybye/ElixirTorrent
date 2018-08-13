@@ -12,7 +12,8 @@ defmodule Peer.Const do
       @cancel_id 8
       @port_id 9
 
-      @timeout 120_000
+      @timeout_recv 150_000
+      @timeout_keeplive 90_000
     end
   end
 end

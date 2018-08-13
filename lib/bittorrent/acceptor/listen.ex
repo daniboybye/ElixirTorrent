@@ -28,7 +28,7 @@ defmodule Acceptor.Listen do
 
   defp loop(socket) do
     {:ok, client} = :gen_tcp.accept(socket)
-    Logger.info("new client")
+    Logger.info "new client"
     Acceptor.Pool.give_control(client)
     Acceptor.recv(client)
     loop(socket)

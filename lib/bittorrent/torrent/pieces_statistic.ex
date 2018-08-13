@@ -33,6 +33,11 @@ defmodule Torrent.PiecesStatistic do
     GenServer.cast(via(hash), {:update, bitfield, size})
   end
 
+  @spec delete(Torrent.hash(),Torrent.index()) :: :ok
+  def delete(hash, index) do 
+    GenServer.cast(via(hash),{:delete,index})
+  end
+
   @spec stop(Torrent.hash()) :: :ok
   def stop(hash), do: GenServer.stop(via(hash))
 
@@ -44,7 +49,7 @@ defmodule Torrent.PiecesStatistic do
 
   defp do_get(state, algorithm) do
     state
-    |> Enum.filter(&(elem(&1, 1) != 0))
+    |> Enum.filter(&(elem(&1, 1) > 0))
     |> Enum.shuffle()
     |> case do
       [] ->
@@ -62,9 +67,13 @@ defmodule Torrent.PiecesStatistic do
     with nil <- Enum.find(list, &(elem(&1, 1) === :priority)) do
       list
       |> Enum.sort_by(&elem(&1, 1))
-      |> Enum.take(5)
+      |> Enum.take(4)
       |> Enum.random()
     end
+  end
+
+  def handle_cast({:delete,index},state) do
+    {:noreply, Map.delete(state,index)}
   end
 
   def handle_cast({:update, bitfield, size}, state) do

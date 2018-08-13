@@ -3,6 +3,7 @@ defmodule Torrent.FileHandle do
 
   require Via
   require Logger
+  alias Torrent.{Struct, Bitfield}
 
   Via.make()
 
@@ -11,19 +12,22 @@ defmodule Torrent.FileHandle do
   and do not need to be closed manually
   """
 
-  @spec start_link(Torrent.Struct.t()) :: GenServer.on_start()
-  def start_link(%Torrent.Struct{hash: hash, struct: %{"info" => info}}) do
+  @spec start_link(Struct.t()) :: GenServer.on_start()
+  def start_link(%Struct{hash: hash, struct: %{"info" => info}}) do
     GenServer.start_link(__MODULE__, info, name: via(hash))
   end
 
   @spec check?(Torrent.hash(), Torrent.index()) :: boolean()
   def check?(hash, index) do
-    GenServer.call(via(hash), {:check, index}, 100_000)
+    if res = GenServer.call(via(hash), {:check, index}, 120_000) do
+      Bitfield.add_bit(hash, index)
+    end
+    res
   end
 
   @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.length()) :: binary()
   def read(hash, index, begin, length) do
-    GenServer.call(via(hash), {:read, index, begin, length}, 100_000)
+    GenServer.call(via(hash), {:read, index, begin, length}, 120_000)
   end
 
   @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok

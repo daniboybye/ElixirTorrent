@@ -5,6 +5,7 @@ defmodule Peer do
   Via.make()
 
   @type peer_id :: <<_::20>>
+  #peer -> %{"peer id" => _, "port" => _, "ip" => _}
   @type peer :: %{required(binary()) => peer_id, required(binary()) => Acceptor.port_number(), required(binary()) => binary()}
   @type key :: {Peer.peer_id(), Torrent.hash()}
 

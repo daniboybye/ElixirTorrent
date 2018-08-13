@@ -30,6 +30,10 @@ defmodule Handshake do
              Torrent.add_peer(hash, peer_id, socket) do
         elem(res, 1)
       else
+        #{:ok, <<@pstrlen, @pstr, _::bytes-size(8), ^hash::bytes-size(20), id::bytes-size(20)>>} ->
+        #  Logger.info "peer id not match"
+        #  IO.inspect(id,label: "before")
+        #  IO.inspect(peer_id,label: "after") 
         _ ->
           Acceptor.Pool.close(socket)
           :error

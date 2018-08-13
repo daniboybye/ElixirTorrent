@@ -1,3 +1,3 @@
 defmodule Bittorrent do
-  defdelegate download(file_name), to: Torrents
+  defdelegate download(path, options), to: Torrents
 end

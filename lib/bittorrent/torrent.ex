@@ -10,7 +10,7 @@ defmodule Torrent do
   @type block :: binary()
   @type bitfield :: binary()
 
-  @spec start_link(Torrent.Struct.t()) :: Supervisor.on_start()
+  @spec start_link({Path.t(),Keyword.t()}) :: Supervisor.on_start()
   def start_link(args), do: Supervisor.start_link(__MODULE__, args)
 
   defdelegate add_peer(hash, peer_id, socket), to: __MODULE__.Swarm
@@ -21,7 +21,36 @@ defmodule Torrent do
 
   defdelegate size(hash), to: __MODULE__.Server
 
-  def init(torrent) do
+  @spec get_hash(pid()) :: Torrent.hash()
+  def get_hash(pid) do
+    Supervisor.which_children(pid)
+    |> hd()
+    |> elem(1)
+    |> __MODULE__.Server.get_hash()
+  end
+
+  def init({path, options}) do
+    struct =
+      path
+      |> File.read!()
+      |> Bencode.decode!()
+
+    bytes = all_bytes_in_torrent(struct)
+
+    last_index =
+      struct["info"]["pieces"]
+      |> byte_size()
+      |> div(20)
+      |> Kernel.-(1)
+
+    torrent = %Torrent.Struct{
+      hash: info_hash(struct),
+      left: bytes,
+      last_piece_length: bytes - last_index * struct["info"]["piece length"],
+      struct: struct,
+      last_index: last_index
+    }
+
     [
       {__MODULE__.FileHandle, torrent},
       {__MODULE__.Bitfield, torrent},
@@ -29,8 +58,20 @@ defmodule Torrent do
       {__MODULE__.Uploader, torrent},
       {__MODULE__.Swarm, torrent},
       {__MODULE__.Downloads, torrent},
-      {__MODULE__.Server, torrent}
+      {__MODULE__.Server, {torrent, options}}
     ]
     |> Supervisor.init(strategy: :one_for_all, max_restart: 0)
+  end
+
+  defp info_hash(%{"info" => info}) do
+    info
+    |> Bencode.encode!()
+    |> (&:crypto.hash(:sha, &1)).()
+  end
+
+  defp all_bytes_in_torrent(%{"info" => %{"length" => length}}), do: length
+
+  defp all_bytes_in_torrent(%{"info" => %{"files" => list}}) do
+    Enum.reduce(list, 0, fn %{"length" => x}, acc -> x + acc end)
   end
 end
