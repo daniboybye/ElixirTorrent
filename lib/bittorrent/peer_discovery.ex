@@ -5,7 +5,7 @@ defmodule PeerDiscovery do
   def start_link(_), do: Supervisor.start_link(__MODULE__, nil)
 
   @spec peer_id() :: Peer.peer_id()
-  def peer_id(), do: "-DANIBOYBYE_ELIXIR3-"
+  def peer_id(), do: "E0-1-0-DANIBOYBYE356"
 
   defdelegate has_hash?(hash), to: __MODULE__.Controller
 

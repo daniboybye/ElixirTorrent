@@ -5,15 +5,15 @@ defmodule Torrent.Server do
   require Logger
 
   @next_piece_timeout 3_000
-  @speed_time 30_000
+  @speed_time 60_000
   @until_endgame 0
 
   alias Torrent.{Swarm, Struct, FileHandle, PiecesStatistic, Downloads}
 
   Via.make()
 
-  @spec start_link({Torrent.Struct.t(),Keyword.t()}) :: GenServer.on_start()
-  def start_link({torrent,_}=args) do
+  @spec start_link({Torrent.Struct.t(), Keyword.t()}) :: GenServer.on_start()
+  def start_link({torrent, _} = args) do
     GenServer.start_link(__MODULE__, args, name: via(torrent.hash))
   end
 
@@ -31,7 +31,7 @@ defmodule Torrent.Server do
   end
 
   @spec size(Torrent.hash()) :: pos_integer() | nil
-  def size(hash) do 
+  def size(hash) do
     if pid = GenServer.whereis(via(hash)) do
       GenServer.call(pid, :size)
     end
@@ -41,7 +41,12 @@ defmodule Torrent.Server do
   def get(hash) do
     if pid = GenServer.whereis(via(hash)) do
       GenServer.call(pid, :get, 10_000)
-    end 
+    end
+  end
+
+  @spec new_peers(Torrent.hash()) :: :ok
+  def new_peers(hash) do
+    GenServer.cast(via(hash), :new_peers)
   end
 
   @spec downloaded(Torrent.hash(), Torrent.index()) :: :ok
@@ -51,31 +56,30 @@ defmodule Torrent.Server do
 
   @spec uploaded(Torrent.hash(), non_neg_integer()) :: :ok
   def uploaded(hash, bytes_size) do
-    Logger.info("uploaded #{bytes_size}")
     GenServer.cast(via(hash), {:uploaded, bytes_size})
   end
 
   @spec next_piece(Torrent.hash()) :: :ok
   def next_piece(hash), do: GenServer.cast(via(hash), :next_piece)
 
-  def init({torrent,options}) do 
+  def init({torrent, options}) do
     torrent =
-    if Keyword.get(options,:check, false) do
-      check(torrent)
-    else
-      torrent
-    end
+      if Keyword.get(options, :check, false) do
+        check(torrent)
+      else
+        torrent
+      end
 
     PeerDiscovery.request(torrent)
 
-    Process.send_after(self(),{:speed, 0, 0}, @speed_time)
+    Process.send_after(self(), {:speed, torrent.downloaded, torrent.uploaded}, @speed_time)
 
     case torrent do
       %Struct{left: 0} ->
         {:ok, %Struct{torrent | status: "completed", peer_status: :seed}}
+
       _ ->
-        Process.send_after(self(), {:next_piece, :get_random}, @speed_time + @next_piece_timeout)
-        Swarm.new_peers(torrent.hash)
+        Process.send_after(self(), {:next_piece, :get_random}, 5_000)
         {:ok, %Struct{torrent | status: "empty"}}
     end
   end
@@ -91,13 +95,13 @@ defmodule Torrent.Server do
   def handle_call(:get, _, state), do: {:reply, state, state}
 
   def handle_cast({:downloaded, index}, %Struct{downloaded: 0} = state) do
-    #Logger.info("downloaded first piece #{index}")
+    # Logger.info("downloaded first piece #{index}")
     Process.send_after(self(), :unchoke, 2_000)
     {:noreply, do_downloaded(index, state)}
   end
 
   def handle_cast({:downloaded, index}, state) do
-    #Logger.info("downloaded piece #{index}")
+    # Logger.info("downloaded piece #{index}")
     {:noreply, do_downloaded(index, state)}
   end
 
@@ -108,6 +112,15 @@ defmodule Torrent.Server do
   def handle_cast(:next_piece, %Struct{peer_status: index} = state)
       when is_integer(index) do
     {:noreply, do_next_piece(state, :get_rare)}
+  end
+
+  def handle_cast(:new_peers, %Struct{left: 0} = state) do
+    {:noreply, state}
+  end
+
+  def handle_cast(:new_peers, state) do
+    Swarm.new_peers(state.hash)
+    {:noreply, state}
   end
 
   def handle_info({:next_piece, _}, %Struct{peer_status: :seed} = state) do
@@ -130,26 +143,23 @@ defmodule Torrent.Server do
     {:noreply, state}
   end
 
-  def handle_info({:speed,downloaded, uploaded}, state) do
-    Process.send_after(self(),{:speed, state.downloaded, state.uploaded}, @speed_time)
+  def handle_info({:speed, downloaded, uploaded}, state) do
+    Process.send_after(self(), {:speed, state.downloaded, state.uploaded}, @speed_time)
     %{active: count_peers} = Swarm.count(state.hash)
-    Logger.info "
+    Logger.info("
     #{state.struct["info"]["name"]},
-    download: #{(state.downloaded - downloaded)/@speed_time}KB/s,
-    upload: #{(state.uploaded - uploaded)/@speed_time}KB/s,
-    peers: #{count_peers}"
-    if count_peers < 2 and state.status == "empty" do
-      Swarm.new_peers(state.hash)
-    end
+    download: #{(state.downloaded - downloaded) / @speed_time}KB/s,
+    upload: #{(state.uploaded - uploaded) / @speed_time}KB/s,
+    peers: #{count_peers}")
     {:noreply, state}
   end
 
-  defp do_downloaded(index, state) do  
+  defp do_downloaded(index, state) do
     with %Struct{left: 0} = temp <- update_downloaded(index, state) do
       Swarm.seed(temp.hash)
-      Logger.info "SEED #{state.struct["info"]["name"]}"
-      #Downloads.stop(temp.hash)
-      #PiecesStatistic.stop(temp.hash)
+      Logger.info("SEED #{state.struct["info"]["name"]}")
+      # Downloads.stop(temp.hash)
+      # PiecesStatistic.stop(temp.hash)
       %Struct{temp | status: "completed", peer_status: :seed}
     end
   end
@@ -164,9 +174,9 @@ defmodule Torrent.Server do
     end
   end
 
-  defp mode(%Struct{left: left, struct: %{"info" => %{"piece length" => length}}}) 
-    when left <= @until_endgame*length do 
-      :endgame
+  defp mode(%Struct{left: left, struct: %{"info" => %{"piece length" => length}}})
+       when left <= @until_endgame * length do
+    :endgame
   end
 
   defp mode(_), do: nil
@@ -184,11 +194,11 @@ defmodule Torrent.Server do
   end
 
   defp check(torrent) do
-    downloaded_indexies = 
-      0 .. torrent.last_index
+    downloaded_indexies =
+      0..torrent.last_index
       |> Enum.filter(&FileHandle.check?(torrent.hash, &1))
 
-    Enum.each(downloaded_indexies,&PiecesStatistic.delete(torrent.hash, &1))
+    Enum.each(downloaded_indexies, &PiecesStatistic.delete(torrent.hash, &1))
     Enum.reduce(downloaded_indexies, torrent, &update_downloaded/2)
   end
 end

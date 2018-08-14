@@ -4,9 +4,13 @@ defmodule Peer do
   require Via
   Via.make()
 
-  @type peer_id :: <<_::20>>
-  #peer -> %{"peer id" => _, "port" => _, "ip" => _}
-  @type peer :: %{required(binary()) => peer_id, required(binary()) => Acceptor.port_number(), required(binary()) => binary()}
+  @type peer_id :: <<_::160>>
+  # peer -> %{"peer id" => _, "port" => _, "ip" => _}
+  @type peer :: %{
+          required(binary()) => peer_id,
+          required(binary()) => Acceptor.port_number(),
+          required(binary()) => binary()
+        }
   @type key :: {Peer.peer_id(), Torrent.hash()}
 
   @spec start_link({peer_id(), Acceptor.socket()}) :: Supervisor.on_start()
@@ -16,7 +20,7 @@ defmodule Peer do
 
   @spec get_id(pid()) :: Peer.peer_id()
   def get_id(pid) do
-    [{{_,peer_id}, _} | _] = Registry.keys(Registry, pid)
+    [{{_, peer_id}, _} | _] = Registry.keys(Registry, pid)
     peer_id
   end
 
@@ -35,9 +39,9 @@ defmodule Peer do
     __MODULE__.Controller.interested(key, index)
   end
 
-  defdelegate request(hash,peer_id,index,begin,length), to: __MODULE__.Controller
+  defdelegate request(hash, peer_id, index, begin, length), to: __MODULE__.Controller
 
-  @spec piece(pid(), peer_id(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
+  @spec piece(Torrent.hash(), peer_id(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
   def piece(hash, peer_id, index, begin, block) do
     key = {peer_id, hash}
     __MODULE__.Controller.upload(key, byte_size(block))
@@ -74,6 +78,6 @@ defmodule Peer do
       {__MODULE__.Controller, key},
       {__MODULE__.Receiver, args}
     ]
-    |> Supervisor.init(strategy: :one_for_all, max_restart: 0)
+    |> Supervisor.init(strategy: :one_for_all, max_restarts: 0)
   end
 end

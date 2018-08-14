@@ -6,7 +6,7 @@ defmodule Acceptor.BlackList do
     GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   end
 
-  @spec put(peer_id :: Peer.peer_id()) :: :ok
+  @spec put(Peer.peer_id()) :: :ok
   def put(peer_id), do: GenServer.cast(__MODULE__, peer_id)
 
   @spec member?(Peer.peer_id()) :: boolean()

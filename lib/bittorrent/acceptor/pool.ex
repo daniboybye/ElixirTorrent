@@ -6,24 +6,24 @@ defmodule Acceptor.Pool do
     GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   end
 
-  @spec give_control(socket :: Acceptor.socket()) :: :ok | no_return()
+  @spec give_control(Acceptor.socket()) :: :ok | no_return()
   def give_control(socket) do
     pid = GenServer.whereis(__MODULE__)
     :ok = :gen_tcp.controlling_process(socket, pid)
     GenServer.cast(__MODULE__, {:give_control, socket})
   end
 
-  @spec close(socket :: Acceptor.socket()) :: :ok
+  @spec close(Acceptor.socket()) :: :ok
   def close(socket), do: GenServer.cast(__MODULE__, {:close, socket})
 
-  @spec give_control(socket :: Acceptor.socket()) :: :ok | {:error, any()}
+  @spec remove_control(Acceptor.socket()) :: :ok | {:error, any()}
   def remove_control(socket) do
-    GenServer.call(__MODULE__, {:remove_control, self(), socket})
+    GenServer.call(__MODULE__, {:remove_control, socket})
   end
 
   def init(_), do: {:ok, MapSet.new()}
 
-  def handle_call({:remove_control, pid, socket}, _, state) do
+  def handle_call({:remove_control, socket}, {pid,_}, state) do
     {:reply, :gen_tcp.controlling_process(socket, pid), MapSet.delete(state, socket)}
   end
 

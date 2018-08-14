@@ -22,7 +22,7 @@ defmodule Bittorrent.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:bencode, github: "gausby/bencode"},
+      {:bento, "~> 0.9"},
       {:logger_file_backend, "~> 0.0.10", github: "onkel-dirtus/logger_file_backend"},
       {:httpoison, "~> 1.1"},
       {:dialyxir, "~> 0.5", only: [:dev]}

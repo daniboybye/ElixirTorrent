@@ -16,11 +16,12 @@ defmodule Torrent.Downloads do
 
   @spec piece(Torrent.hash(), Torrent.index(), Torrent.length(), __MODULE__.Piece.mode()) :: :ok
   def piece(hash, index, length, mode) do
-    #Logger.info("current piece download #{index}")
+    # Logger.info("current piece download #{index}")
     DynamicSupervisor.start_child(
       via(hash),
       {__MODULE__.Piece, {index, hash, length}}
     )
+
     __MODULE__.Piece.download(hash, index, mode)
   end
 

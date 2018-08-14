@@ -5,8 +5,8 @@ defmodule Torrent.Downloads.Piece do
   require Logger
   Via.make()
 
-  alias __MODULE__.{State,Request}
-  alias Torrent.{FileHandle,PiecesStatistic,Server,Swarm}
+  alias __MODULE__.{State, Request}
+  alias Torrent.{FileHandle, PiecesStatistic, Server, Swarm}
 
   @endgame_mode_pending_block 2
   @subpiece_length trunc(:math.pow(2, 14))
@@ -28,10 +28,9 @@ defmodule Torrent.Downloads.Piece do
     GenServer.cast(via({index, hash}), {:download, mode})
   end
 
-  @spec want_request(Torrent.hash(), Torrent.index(), Peer.peer_id()) ::
-          {Torrent.begin(), Torrent.length()} | nil
+  @spec want_request(Torrent.hash(), Torrent.index(), Peer.peer_id()) :: :ok
   def want_request(hash, index, peer_id) do
-      GenServer.cast(via({index,hash}), {:want_request, peer_id})
+    GenServer.cast(via({index, hash}), {:want_request, peer_id})
   end
 
   @spec request_response(
@@ -53,21 +52,21 @@ defmodule Torrent.Downloads.Piece do
   end
 
   def handle_cast(
-    {:download, :endgame},
-    %State{waiting: [_ | _]} = state
-    ) do
-    Swarm.interested(state.hash, state.index) 
+        {:download, :endgame},
+        %State{waiting: [_ | _]} = state
+      ) do
+    Swarm.interested(state.hash, state.index)
     {:noreply, Map.put(state, :mode, :endgame)}
   end
-  
+
   def handle_cast(
         {:download, mode},
         %State{waiting: [_ | _]} = state
-        ) do
-          Swarm.interested(state.hash, state.index) 
-          {:noreply, state |> update_timer() |> Map.put(:mode, mode)}
+      ) do
+    Swarm.interested(state.hash, state.index)
+    {:noreply, state |> update_timer() |> Map.put(:mode, mode)}
   end
-        
+
   def handle_cast({:want_request, _}, %State{waiting: []} = state) do
     {:noreply, state}
   end
@@ -75,17 +74,20 @@ defmodule Torrent.Downloads.Piece do
   def handle_cast({:want_request, peer_id}, %State{mode: :endgame} = state) do
     state.waiting
     |> Enum.take(@endgame_mode_pending_block)
-    |> Enum.reject(fn subpiece -> Enum.find_value(state.requests, & &1.subpiece == subpiece and peer_id == &1.peer_id) end)
+    |> Enum.reject(fn subpiece ->
+      Enum.find_value(state.requests, &(&1.subpiece == subpiece and peer_id == &1.peer_id))
+    end)
     |> Enum.take(1)
     |> Enum.map(fn {begin, length} = subpiece ->
-      Peer.request(state.hash, peer_id, state.index,begin,length) 
-      %Request{subpiece: subpiece, peer_id: peer_id} end)
+      Peer.request(state.hash, peer_id, state.index, begin, length)
+      %Request{subpiece: subpiece, peer_id: peer_id}
+    end)
     |> (&Map.update!(state, :requests, fn list -> &1 ++ list end)).()
     |> (&{:noreply, &1}).()
   end
 
   def handle_cast({:want_request, peer_id}, %State{waiting: [{begin, length}]} = state) do
-    Peer.request(state.hash,peer_id, state.index, begin, length)
+    Peer.request(state.hash, peer_id, state.index, begin, length)
     Server.next_piece(state.hash)
 
     state
@@ -98,8 +100,8 @@ defmodule Torrent.Downloads.Piece do
 
   def handle_cast({:want_request, peer_id}, state) do
     [{begin, length} | _] = state.waiting
-    Peer.request(state.hash,peer_id, state.index, begin, length)
-    
+    Peer.request(state.hash, peer_id, state.index, begin, length)
+
     state
     |> update_timer()
     |> monitor_request(peer_id)
@@ -134,9 +136,10 @@ defmodule Torrent.Downloads.Piece do
   end
 
   def handle_info(:timeout, state) do
-    #Logger.info("timeout piece")
+    # Logger.info("timeout piece")
     Server.next_piece(state.hash)
     PiecesStatistic.make_zero(state.hash, state.index)
+    PiecesStatistic.inc(state.hash,state.index)
     {:noreply, Map.put(state, :timer, nil)}
   end
 
@@ -193,8 +196,7 @@ defmodule Torrent.Downloads.Piece do
            Enum.split_with(state.requests, &(&1.ref == ref)) do
       :ok = cancel_timer(timer, {:timeout, ref})
 
-      {:noreply,
-       %State{state | requests: requests, waiting: [subpiece | state.waiting]}}
+      {:noreply, %State{state | requests: requests, waiting: [subpiece | state.waiting]}}
     else
       _ ->
         {:noreply, state}
@@ -219,8 +221,7 @@ defmodule Torrent.Downloads.Piece do
   defp do_timeout(state, ref) do
     Process.demonitor(ref)
 
-    {[%Request{subpiece: subpiece}], requests} =
-      Enum.split_with(state.requests, &(&1.ref == ref))
+    {[%Request{subpiece: subpiece}], requests} = Enum.split_with(state.requests, &(&1.ref == ref))
 
     state = %State{state | waiting: [subpiece | state.waiting], requests: requests}
     {:noreply, state}
@@ -234,7 +235,7 @@ defmodule Torrent.Downloads.Piece do
         :normal
       else
         PiecesStatistic.make_zero(hash, index)
-        PiecesStatistic.inc(hash,index)
+        PiecesStatistic.inc(hash, index)
         :wrong_subpiece
       end
 

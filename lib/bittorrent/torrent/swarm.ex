@@ -11,7 +11,8 @@ defmodule Torrent.Swarm do
 
   @spec new_peers(Torrent.hash()) :: :ok
   def new_peers(hash) do
-    swarm = via(hash)
+    swarm =
+      via(hash)
       |> DynamicSupervisor.which_children()
       |> Enum.map(&(elem(&1, 1) |> Peer.get_id()))
       |> MapSet.new()

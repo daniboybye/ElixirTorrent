@@ -22,6 +22,7 @@ defmodule Torrent.FileHandle do
     if res = GenServer.call(via(hash), {:check, index}, 120_000) do
       Bitfield.add_bit(hash, index)
     end
+
     res
   end
 

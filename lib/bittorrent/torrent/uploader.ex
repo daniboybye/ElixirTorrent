@@ -9,12 +9,19 @@ defmodule Torrent.Uploader do
     GenServer.start_link(__MODULE__, hash, name: via(hash))
   end
 
-  @spec request(Torrent.hash(), Peer.peer_id(), Torrent.begin(),Torrent.index(), Torrent.length()) :: :ok
+  @spec request(
+          Torrent.hash(),
+          Peer.peer_id(),
+          Torrent.begin(),
+          Torrent.index(),
+          Torrent.length()
+        ) :: :ok
   def request(hash, peer_id, index, begin, length) do
     GenServer.cast(via(hash), {:request, peer_id, index, begin, length})
   end
 
-  @spec cancel(Torrent.hash(), Peer.peer_id(), Torrent.begin(),Torrent.index(), Torrent.length()) :: :ok
+  @spec cancel(Torrent.hash(), Peer.peer_id(), Torrent.begin(), Torrent.index(), Torrent.length()) ::
+          :ok
   def cancel(hash, peer_id, index, begin, length) do
     GenServer.cast(via(hash), {:cancel, peer_id, index, begin, length})
   end
@@ -26,6 +33,7 @@ defmodule Torrent.Uploader do
          block = Torrent.FileHandle.read(hash, index, begin, length),
          false <- cancel?(peer_id, index, begin, length) do
       Peer.piece(hash, peer_id, index, begin, block)
+      Torrent.Server.uploaded(hash, length)
     end
 
     {:noreply, hash}

@@ -2,7 +2,7 @@ defmodule Acceptor do
   use Supervisor, type: :supervisor
 
   @type port_number :: pos_integer()
-  @type socket :: pid()
+  @type socket :: port()
 
   @spec start_link(any()) :: Supervisor.on_start()
   def start_link(_), do: Supervisor.start_link(__MODULE__, nil)
@@ -12,6 +12,16 @@ defmodule Acceptor do
 
   @spec socket_options() :: list()
   def socket_options(), do: [:binary, active: false, reuseaddr: true]
+
+  @spec ip() :: binary
+  def ip() do
+    :inet.getif()
+    |> elem(1)
+    |> hd()
+    |> elem(0)
+    |> Tuple.to_list()
+    |> Enum.join(".")
+  end
 
   @spec recv(socket()) :: DynamicSupervisor.on_start_child()
   def recv(client) do

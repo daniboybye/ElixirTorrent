@@ -33,9 +33,9 @@ defmodule Torrent.PiecesStatistic do
     GenServer.cast(via(hash), {:update, bitfield, size})
   end
 
-  @spec delete(Torrent.hash(),Torrent.index()) :: :ok
-  def delete(hash, index) do 
-    GenServer.cast(via(hash),{:delete,index})
+  @spec delete(Torrent.hash(), Torrent.index()) :: :ok
+  def delete(hash, index) do
+    GenServer.cast(via(hash), {:delete, index})
   end
 
   @spec stop(Torrent.hash()) :: :ok
@@ -72,8 +72,8 @@ defmodule Torrent.PiecesStatistic do
     end
   end
 
-  def handle_cast({:delete,index},state) do
-    {:noreply, Map.delete(state,index)}
+  def handle_cast({:delete, index}, state) do
+    {:noreply, Map.delete(state, index)}
   end
 
   def handle_cast({:update, bitfield, size}, state) do

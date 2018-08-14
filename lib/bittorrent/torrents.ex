@@ -6,7 +6,7 @@ defmodule Torrents do
     DynamicSupervisor.start_link(__MODULE__, nil, name: __MODULE__)
   end
 
-  @spec download(Path.t(),Keyword.t()) :: DynamicSupervisor.on_start_child()
+  @spec download(Path.t(), Keyword.t()) :: DynamicSupervisor.on_start_child()
   def download(path, options \\ []) do
     DynamicSupervisor.start_child(__MODULE__, {Torrent, {path, options}})
   end
