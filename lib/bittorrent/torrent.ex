@@ -2,6 +2,9 @@ defmodule Torrent do
   use Supervisor, type: :supervisor, restart: :transient
 
   require Logger
+  require Via
+
+  Via.make()
 
   @type hash :: <<_::160>>
   @type index :: non_neg_integer()
@@ -10,8 +13,16 @@ defmodule Torrent do
   @type block :: binary()
   @type bitfield :: binary()
 
-  @spec start_link({Path.t(), Keyword.t()}) :: Supervisor.on_start()
-  def start_link(args), do: Supervisor.start_link(__MODULE__, args)
+  @spec start_link(Path.t(), Keyword.t()) :: Supervisor.on_start()
+  def start_link(path, options) do
+    torrent = parse_file!(path)
+    Registry.put_meta(
+      Registry, 
+      torrent.hash, 
+      check: Keyword.get(options, :check, false)
+    ) 
+    Supervisor.start_link(__MODULE__, torrent, name: via(torrent.hash))
+  end
 
   defdelegate add_peer(hash, peer_id, socket), to: __MODULE__.Swarm
 
@@ -25,13 +36,39 @@ defmodule Torrent do
 
   @spec get_hash(pid()) :: Torrent.hash()
   def get_hash(pid) do
-    Supervisor.which_children(pid)
+    Registry
+    |> Registry.keys(pid)
     |> hd()
-    |> elem(1)
-    |> __MODULE__.Server.get_hash()
+    |> elem(0)
   end
 
-  def init({path, options}) do
+  def restart(hash) do
+    Registry.put_meta(
+      Registry, 
+      torrent.hash, 
+      check: true
+    )
+    Supervisor.stop(via(hash), :error) 
+  end
+
+  def stop(hash) do
+    Supervisor.stop(via(hash))
+  end
+
+  def init(torrent) do
+    [
+      {__MODULE__.Bitfield, torrent},
+      {__MODULE__.PiecesStatistic, torrent},
+      {__MODULE__.FileHandle, torrent},
+      {__MODULE__.Uploader, torrent},
+      {__MODULE__.Swarm, torrent},
+      {__MODULE__.Downloads, torrent},
+      {__MODULE__.Server, torrent}
+    ]
+    |> Supervisor.init(strategy: :one_for_all, max_restarts: 0)
+  end
+
+  defp parse_file!(path) do
     struct =
       path
       |> File.read!()
@@ -45,24 +82,13 @@ defmodule Torrent do
       |> div(20)
       |> Kernel.-(1)
 
-    torrent = %Torrent.Struct{
+    %Torrent.Struct{
       hash: info_hash(struct),
       left: bytes,
       last_piece_length: bytes - last_index * struct["info"]["piece length"],
       struct: struct,
       last_index: last_index
     }
-
-    [
-      {__MODULE__.Bitfield, torrent},
-      {__MODULE__.PiecesStatistic, torrent},
-      {__MODULE__.FileHandle, torrent},
-      {__MODULE__.Uploader, torrent},
-      {__MODULE__.Swarm, torrent},
-      {__MODULE__.Downloads, torrent},
-      {__MODULE__.Server, {torrent, options}}
-    ]
-    |> Supervisor.init(strategy: :one_for_all, max_restarts: 0)
   end
 
   defp info_hash(%{"info" => info}) do

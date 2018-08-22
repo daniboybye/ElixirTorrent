@@ -1,10 +1,12 @@
 defmodule PeerDiscovery.Controller do
-  use GenServer
+  use GenServer, start: {__MODULE__, :start_link, []}
 
   alias __MODULE__.State
 
-  @spec start_link(any()) :: GenServer.on_start()
-  def start_link(_) do
+  require Logger
+
+  @spec start_link() :: GenServer.on_start()
+  def start_link() do
     GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   end
 
@@ -55,19 +57,25 @@ defmodule PeerDiscovery.Controller do
     {:noreply, Map.put(state, :requests, requests)}
   end
 
-  def handle_info({ref, map}, state) do
-    {x, requests} = Map.pop(state.requests, ref)
-    hash = with %Torrent.Struct{} <- x, do: x.hash
-    Torrent.new_peers(hash)
-    Process.send_after(self(), {:request, hash}, Map.get(map, "interval", 900) * 1_000)
+  def handle_info({ref, %{"failure reason" => reason}}, state) do
+    Logger.info "request failure reason: #{reason}"
+    {x, state} = pop_in(state, [:requests, ref])
+    Torrent.restart(get_hash(x))
+    {:noreply, state}
+  end
+
+  def handle_info({ref, %{"peers" => peers} = map}, state) do
+    {x, state} = pop_in(state, [:requests, ref])
+    Torrent.new_peers(get_hash(x))
+    Process.send_after(self(), {:request, get_hash(x)}, Map.get(map, "interval", 900) * 1_000)
 
     {
-      :noreply,
-      %State{
-        state
-        | requests: requests,
-          peers: Map.put(state.peers, hash, Map.get(map, "peers", []) |> Enum.map(&parse_peer/1))
-      }
+      :noreply, 
+      Map.update!(
+        state, 
+        :peers, 
+        &Map.put(&1, get_hash(x), Enum.map(peers, &parse_peer/1))
+      )
     }
   end
 
@@ -87,4 +95,6 @@ defmodule PeerDiscovery.Controller do
 
     Map.update!(state, :requests, &Map.put(&1, ref, torrent.hash))
   end
+
+  defp get_hash(x), do: with %Torrent.Struct{} <- x, do: x.hash
 end

@@ -1,14 +1,13 @@
 defmodule Acceptor do
-  use Supervisor, type: :supervisor
+  use Supervisor, type: :supervisor, start: {__MODULE__, :start_link, []}
 
   @type port_number :: pos_integer()
   @type socket :: port()
 
-  @spec start_link(any()) :: Supervisor.on_start()
-  def start_link(_), do: Supervisor.start_link(__MODULE__, nil)
+  @spec start_link() :: Supervisor.on_start()
+  def start_link(), do: Supervisor.start_link(__MODULE__, nil)
 
-  @spec port() :: port_number()
-  def port(), do: 6889
+  defdelegate port(), to: __MODULE__.ListenSocket
 
   @spec socket_options() :: list()
   def socket_options(), do: [:binary, active: false, reuseaddr: true]
@@ -35,13 +34,13 @@ defmodule Acceptor do
 
   def init(_) do
     [
-      __MODULE__.BlackList,
-      __MODULE__.Pool,
+      child_spec(__MODULE__.BlackList),
+      child_spec(__MODULE__.Pool),
       {
         Task.Supervisor,
         name: __MODULE__.Handshakes, strategy: :one_for_one, max_restarts: 0
       },
-      __MODULE__.Listen
+      child_spec(__MODULE__.ListenSocket)
     ]
     |> Supervisor.init(strategy: :one_for_one)
   end

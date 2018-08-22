@@ -12,15 +12,9 @@ defmodule Torrent.Server do
 
   Via.make()
 
-  @spec start_link({Torrent.Struct.t(), Keyword.t()}) :: GenServer.on_start()
-  def start_link({torrent, _} = args) do
-    GenServer.start_link(__MODULE__, args, name: via(torrent.hash))
-  end
-
-  @spec get_hash(pid()) :: Torrent.hash()
-  def get_hash(pid) do
-    [{hash, _} | _] = Registry.keys(Registry, pid)
-    hash
+  @spec start_link(Torrent.Struct.t()) :: GenServer.on_start()
+  def start_link(torrent) do
+    GenServer.start_link(__MODULE__, torrent, name: via(torrent.hash))
   end
 
   @spec torrent_downloaded?(Torrent.hash()) :: boolean()
@@ -62,14 +56,13 @@ defmodule Torrent.Server do
   @spec next_piece(Torrent.hash()) :: :ok
   def next_piece(hash), do: GenServer.cast(via(hash), :next_piece)
 
-  def init({torrent, options}) do
-    torrent =
-      if Keyword.get(options, :check, false) do
-        check(torrent)
-      else
-        torrent
-      end
-
+  def init(torrent) do
+    {:ok, opts} = Registry.meta(Registry, torrent.hash)
+    
+    torrent = opts
+      |> Keyword.fetch!(:check)
+      |> check(torrent)
+    
     PeerDiscovery.request(torrent)
 
     Process.send_after(self(), {:speed, torrent.downloaded, torrent.uploaded}, @speed_time)
@@ -193,7 +186,9 @@ defmodule Torrent.Server do
     %Struct{state | downloaded: n + length, left: m - length}
   end
 
-  defp check(torrent) do
+  defp check(false, x), do: x
+
+  defp check(true, torrent) do
     downloaded_indexies =
       0..torrent.last_index
       |> Enum.filter(&FileHandle.check?(torrent.hash, &1))

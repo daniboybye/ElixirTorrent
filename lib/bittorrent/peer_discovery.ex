@@ -1,8 +1,8 @@
 defmodule PeerDiscovery do
-  use Supervisor, type: :supervisor
+  use Supervisor, type: :supervisor, start: {__MODULE__, :start_link, []}
 
-  @spec start_link(any()) :: Supervisor.on_start()
-  def start_link(_), do: Supervisor.start_link(__MODULE__, nil)
+  @spec start_link() :: Supervisor.on_start()
+  def start_link(), do: Supervisor.start_link(__MODULE__, nil)
 
   @spec peer_id() :: Peer.peer_id()
   def peer_id(), do: "E0-1-0-DANIBOYBYE356"

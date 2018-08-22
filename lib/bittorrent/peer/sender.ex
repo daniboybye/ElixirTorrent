@@ -52,13 +52,9 @@ defmodule Peer.Sender do
 
   def init(socket), do: {:ok, socket, @timeout_keeplive}
 
-  def handle_cast(:choke, socket) do
-    do_send(socket, <<@choke_id>>)
-  end
+  def handle_cast(:choke, socket), do: do_send(socket, <<@choke_id>>)
 
-  def handle_cast(:unchoke, socket) do
-    do_send(socket, <<@unchoke_id>>)
-  end
+  def handle_cast(:unchoke, socket), do: do_send(socket, <<@unchoke_id>>)
 
   def handle_cast(:interested, socket) do
     do_send(socket, <<@interested_id>>)

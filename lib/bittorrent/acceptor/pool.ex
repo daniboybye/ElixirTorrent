@@ -1,8 +1,8 @@
 defmodule Acceptor.Pool do
-  use GenServer
+  use GenServer, start: {__MODULE__, :start_link, []}
 
-  @spec start_link(any()) :: GenServer.on_start()
-  def start_link(_) do
+  @spec start_link() :: GenServer.on_start()
+  def start_link() do
     GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   end
 
@@ -10,7 +10,7 @@ defmodule Acceptor.Pool do
   def give_control(socket) do
     pid = GenServer.whereis(__MODULE__)
     :ok = :gen_tcp.controlling_process(socket, pid)
-    GenServer.cast(__MODULE__, {:give_control, socket})
+    GenServer.cast(pid, {:give_control, socket})
   end
 
   @spec close(Acceptor.socket()) :: :ok

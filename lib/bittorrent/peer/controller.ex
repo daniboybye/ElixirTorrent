@@ -101,7 +101,6 @@ defmodule Peer.Controller do
 
   @spec handle_cancel(Peer.key(), Torrent.index(), Torrent.begin(), Torrent.length()) :: :ok
   def handle_cancel({peer_id, hash}, index, begin, length) do
-    # Logger.info "handle cancel"
     Torrent.Uploader.cancel(hash, peer_id, index, begin, length)
   end
 
@@ -166,7 +165,6 @@ defmodule Peer.Controller do
 
   def handle_cast({:cancel, index, begin, length}, state) do
     Sender.cancel(state.key, index, begin, length)
-
     new_state = Map.update!(state, :requests, &List.delete(&1, {index, begin, length}))
     make_request(new_state)
     {:noreply, new_state}
@@ -192,17 +190,16 @@ defmodule Peer.Controller do
 
   def handle_cast({:upload, _}, state), do: {:noreply, state}
 
-  def handle_cast(:handle_choke, state), do: {:noreply, Map.put(state, :choke_me, true)}
+  def handle_cast(:handle_choke, state), do: {:noreply, %State{state | choke_me: true}}
 
   def handle_cast(:handle_unchoke, state) do
-    new_state = Map.put(state, :choke_me, false)
+    new_state = %State{state | choke_me: false}
     make_request(new_state)
     {:noreply, new_state}
   end
 
   def handle_cast(:handle_interested, state) do
-    # Logger.info "handle interested"
-    {:noreply, Map.put(state, :interested_of_me, true)}
+    {:noreply, %State{state | interested_of_me: true}}
   end
 
   def handle_cast(:handle_not_interested, %State{choke: false} = state) do
@@ -250,7 +247,6 @@ defmodule Peer.Controller do
         {:handle_request, index, begin, length},
         %State{key: {peer_id, hash}} = state
       ) do
-    # Logger.info "handle request"
     with true <- state.interested_of_me,
          true <- index < state.pieces_count,
          true <- Torrent.Bitfield.check?(hash, index),
