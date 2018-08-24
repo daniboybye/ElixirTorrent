@@ -23,12 +23,12 @@ defmodule Peer.Receiver do
     {:ok, args}
   end
 
-  def terminate(:protocol_error, peer_id), do: Acceptor.BlackList.put(peer_id)
+  def terminate({:shutdown,:protocol_error}, peer_id), do: Acceptor.BlackList.put(peer_id)
 
   def terminate(_, _), do: :ok
 
   def handle_info(:loop, {{peer_id, _} = key, socket}) do
-    {:stop, loop(socket, key), peer_id}
+    {:stop, {:shutdown,loop(socket, key)}, peer_id}
   end
 
   defp get_message(_, 0), do: {:ok, <<>>}

@@ -34,8 +34,7 @@ defmodule PeerDiscovery.Controller do
   def handle_call({:get, hash}, _, state) do
     state.peers
     |> Map.values()
-    |> Enum.filter(&(elem(&1, 0) == hash))
-    |> Enum.flat_map(&elem(&1, 1))
+    |> Enum.flat_map(&Map.get(&1,hash,[]))
     |> (&{:reply, &1, state}).()
   end
 
@@ -85,7 +84,7 @@ defmodule PeerDiscovery.Controller do
   def handle_info({ref, %Tracker.Response{} = response}, state) do
     {{announce,x}, state} = pop_in(state, [Access.key!(:requests), ref])
     Torrent.new_peers(get_hash(x), response.peers)
-    Process.send_after(self(), {:request, get_hash(x)}, response.interval * 1_000)
+    Process.send_after(self(), {:request, {announce,get_hash(x)}}, response.interval * 1_000)
 
     {
       :noreply,
