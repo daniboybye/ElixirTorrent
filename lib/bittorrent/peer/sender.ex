@@ -8,7 +8,7 @@ defmodule Peer.Sender do
   Via.make()
   Peer.Const.message_id()
 
-  @spec start_link({Peer.key(), Acceptor.socket()}) :: GenServer.on_start()
+  @spec start_link({Peer.key(), port()}) :: GenServer.on_start()
   def start_link({key, socket}) do
     GenServer.start_link(__MODULE__, socket, name: via(key))
   end

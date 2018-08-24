@@ -4,22 +4,21 @@ defmodule Torrent.Swarm do
   require Via
   Via.make()
 
-  @spec start_link(Torrent.Struct.t()) :: Supervisor.on_start()
-  def start_link(%Torrent.Struct{hash: hash}) do
+  @spec start_link(Torrent.t()) :: Supervisor.on_start()
+  def start_link(%Torrent{hash: hash}) do
     DynamicSupervisor.start_link(__MODULE__, nil, name: via(hash))
   end
 
-  @spec new_peers(Torrent.hash()) :: :ok
-  def new_peers(hash) do
+  @spec new_peers(Torrent.hash(), list(Peer.t())) :: :ok
+  def new_peers(hash, list) do
     swarm =
       via(hash)
       |> DynamicSupervisor.which_children()
       |> Enum.map(&(elem(&1, 1) |> Peer.get_id()))
       |> MapSet.new()
 
-    hash
-    |> PeerDiscovery.get()
-    |> Enum.reject(fn %{"peer id" => peer_id} -> MapSet.member?(swarm, peer_id) end)
+    list
+    |> Enum.reject(&MapSet.member?(swarm, &1.peer_id))
     |> Enum.each(&Acceptor.send(&1, hash))
   end
 
@@ -60,7 +59,7 @@ defmodule Torrent.Swarm do
     Enum.each(choking, fn {_, peer_id} -> Peer.choke(hash, peer_id) end)
   end
 
-  @spec add_peer(Torrent.hash(), Peer.peer_id(), Acceptor.socket()) ::
+  @spec add_peer(Torrent.hash(), Peer.peer_id(), port()) ::
           DynamicSupervisor.on_start_child()
   def add_peer(hash, peer_id, socket) do
     DynamicSupervisor.start_child(via(hash), {Peer, {{peer_id, hash}, socket}})

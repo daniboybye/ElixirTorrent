@@ -7,40 +7,41 @@ defmodule Torrent.Server do
   @next_piece_timeout 3_000
   @speed_time 60_000
   @until_endgame 0
+  @failure_rare_strategy 5
 
-  alias Torrent.{Swarm, Struct, FileHandle, PiecesStatistic, Downloads}
+  alias Torrent.{Swarm, FileHandle, PiecesStatistic, Downloads}
 
   Via.make()
 
-  @spec start_link(Torrent.Struct.t()) :: GenServer.on_start()
+  @spec start_link(Torrent.t()) :: GenServer.on_start()
   def start_link(torrent) do
     GenServer.start_link(__MODULE__, torrent, name: via(torrent.hash))
   end
 
   @spec torrent_downloaded?(Torrent.hash()) :: boolean()
   def torrent_downloaded?(hash) do
-    if pid = GenServer.whereis(via(hash)) do
+    with pid when is_pid(pid) <- GenServer.whereis(via(hash)) do
       GenServer.call(pid, :torrent_downloaded?)
     end
   end
 
   @spec size(Torrent.hash()) :: pos_integer() | nil
   def size(hash) do
-    if pid = GenServer.whereis(via(hash)) do
+    with pid when is_pid(pid) <- GenServer.whereis(via(hash)) do
       GenServer.call(pid, :size)
     end
   end
 
-  @spec get(Torrent.hash()) :: Torrent.Struct.t() | nil
+  @spec get(Torrent.hash()) :: Torrent.t() | nil
   def get(hash) do
-    if pid = GenServer.whereis(via(hash)) do
+    with pid when is_pid(pid) <- GenServer.whereis(via(hash)) do
       GenServer.call(pid, :get, 10_000)
     end
   end
 
-  @spec new_peers(Torrent.hash()) :: :ok
-  def new_peers(hash) do
-    GenServer.cast(via(hash), :new_peers)
+  @spec new_peers(Torrent.hash(), list(Peer.t())) :: :ok
+  def new_peers(hash, list) do
+    GenServer.cast(via(hash), {:new_peers, list})
   end
 
   @spec downloaded(Torrent.hash(), Torrent.index()) :: :ok
@@ -57,23 +58,18 @@ defmodule Torrent.Server do
   def next_piece(hash), do: GenServer.cast(via(hash), :next_piece)
 
   def init(torrent) do
-    {:ok, opts} = Registry.meta(Registry, torrent.hash)
-    
-    torrent = opts
-      |> Keyword.fetch!(:check)
+    torrent =
+      Registry
+      |> Registry.meta({torrent.hash, :check})
+      |> elem(1)
       |> check(torrent)
-    
-    PeerDiscovery.request(torrent)
+
+    PeerDiscovery.request(torrent.hash, Torrent.get_announce_list(torrent))
 
     Process.send_after(self(), {:speed, torrent.downloaded, torrent.uploaded}, @speed_time)
 
-    case torrent do
-      %Struct{left: 0} ->
-        {:ok, %Struct{torrent | status: "completed", peer_status: :seed}}
-
-      _ ->
-        Process.send_after(self(), {:next_piece, :get_random}, 5_000)
-        {:ok, %Struct{torrent | status: "empty"}}
+    with {:ok, %Torrent{left: 0}} <- {:ok, torrent} do
+      {:ok, %Torrent{torrent | event: Torrent.completed(), peer_status: :seed}}
     end
   end
 
@@ -87,7 +83,7 @@ defmodule Torrent.Server do
 
   def handle_call(:get, _, state), do: {:reply, state, state}
 
-  def handle_cast({:downloaded, index}, %Struct{downloaded: 0} = state) do
+  def handle_cast({:downloaded, index}, %Torrent{downloaded: 0} = state) do
     # Logger.info("downloaded first piece #{index}")
     Process.send_after(self(), :unchoke, 2_000)
     {:noreply, do_downloaded(index, state)}
@@ -102,26 +98,37 @@ defmodule Torrent.Server do
     {:noreply, Map.update!(state, :uploaded, &(&1 + bytes_size))}
   end
 
-  def handle_cast(:next_piece, %Struct{peer_status: index} = state)
+  def handle_cast(:next_piece, %Torrent{peer_status: index} = state)
       when is_integer(index) do
-    {:noreply, do_next_piece(state, :get_rare)}
+    {:noreply, do_next_piece(state, :get_rare, 0)}
   end
 
-  def handle_cast(:new_peers, %Struct{left: 0} = state) do
+  def handle_cast({:new_peers, _}, %Torrent{peer_status: :seed} = state) do
     {:noreply, state}
   end
 
-  def handle_cast(:new_peers, state) do
-    Swarm.new_peers(state.hash)
+  #event: started
+  def handle_cast({:new_peers, list},%Torrent{event: 2} = state) do
+    Swarm.new_peers(state.hash, list)
+    Process.send_after(self(), {:next_piece, :get_random, 0}, 2_000)
+    {:noreply, %Torrent{state | event: Torrent.empty()}}
+  end
+
+  def handle_cast({:new_peers, list}, state) do
+    Swarm.new_peers(state.hash, list)
     {:noreply, state}
   end
 
-  def handle_info({:next_piece, _}, %Struct{peer_status: :seed} = state) do
+  def handle_info({:next_piece, _, _}, %Torrent{peer_status: :seed} = state) do
     {:noreply, state}
   end
 
-  def handle_info({:next_piece, fun}, %Struct{peer_status: nil} = state) do
-    {:noreply, do_next_piece(state, fun)}
+  def handle_info({:next_piece, _, @failure_rare_strategy}, %Torrent{peer_status: nil} = state) do
+    {:noreply, do_next_piece(state, :get_random, 0)}
+  end
+
+  def handle_info({:next_piece, fun, n}, %Torrent{peer_status: nil} = state) do
+    {:noreply, do_next_piece(state, fun, n)}
   end
 
   def handle_info(:unchoke, state) do
@@ -144,46 +151,53 @@ defmodule Torrent.Server do
     download: #{(state.downloaded - downloaded) / @speed_time}KB/s,
     upload: #{(state.uploaded - uploaded) / @speed_time}KB/s,
     peers: #{count_peers}")
+
+    if count_peers < 2 and state.event == 0 do
+      state
+      |> PeerDiscovery.get()
+      |> (&Swarm.new_peers(state.hash, &1)).()
+    end
+
     {:noreply, state}
   end
 
   defp do_downloaded(index, state) do
-    with %Struct{left: 0} = temp <- update_downloaded(index, state) do
+    with %Torrent{left: 0} = temp <- update_downloaded(index, state) do
       Swarm.seed(temp.hash)
       Logger.info("SEED #{state.struct["info"]["name"]}")
       # Downloads.stop(temp.hash)
       # PiecesStatistic.stop(temp.hash)
-      %Struct{temp | status: "completed", peer_status: :seed}
+      %Torrent{temp | event: Torrent.completed(), peer_status: :seed}
     end
   end
 
-  defp do_next_piece(state, fun) do
+  defp do_next_piece(state, fun, n) do
     if index = apply(PiecesStatistic, fun, [state.hash]) do
       Downloads.piece(state.hash, index, index_length(index, state), mode(state))
       Map.put(state, :peer_status, index)
     else
-      Process.send_after(self(), {:next_piece, fun}, @next_piece_timeout)
+      Process.send_after(self(), {:next_piece, fun, n + 1}, @next_piece_timeout)
       Map.put(state, :peer_status, nil)
     end
   end
 
-  defp mode(%Struct{left: left, struct: %{"info" => %{"piece length" => length}}})
+  defp mode(%Torrent{left: left, struct: %{"info" => %{"piece length" => length}}})
        when left <= @until_endgame * length do
     :endgame
   end
 
   defp mode(_), do: nil
 
-  defp index_length(index, %Struct{last_index: last_index} = state)
+  defp index_length(index, %Torrent{last_index: last_index} = state)
        when index == last_index do
     state.last_piece_length
   end
 
   defp index_length(_, state), do: state.struct["info"]["piece length"]
 
-  defp update_downloaded(index, %Struct{downloaded: n, left: m} = state) do
+  defp update_downloaded(index, %Torrent{downloaded: n, left: m} = state) do
     length = index_length(index, state)
-    %Struct{state | downloaded: n + length, left: m - length}
+    %Torrent{state | downloaded: n + length, left: m - length}
   end
 
   defp check(false, x), do: x

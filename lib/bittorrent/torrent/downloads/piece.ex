@@ -139,7 +139,7 @@ defmodule Torrent.Downloads.Piece do
     # Logger.info("timeout piece")
     Server.next_piece(state.hash)
     PiecesStatistic.make_zero(state.hash, state.index)
-    PiecesStatistic.inc(state.hash,state.index)
+    PiecesStatistic.inc(state.hash, state.index)
     {:noreply, Map.put(state, :timer, nil)}
   end
 

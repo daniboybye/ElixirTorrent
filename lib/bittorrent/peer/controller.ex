@@ -110,7 +110,7 @@ defmodule Peer.Controller do
   end
 
   def init({_, hash} = key) do
-    %Torrent.Struct{peer_status: status, last_index: last_index} = Torrent.get(hash)
+    %Torrent{peer_status: status, last_index: last_index} = Torrent.get(hash)
     Sender.bitfield(key)
     {:ok, %State{key: key, status: status, pieces_count: last_index + 1}}
   end

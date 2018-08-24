@@ -15,9 +15,8 @@ defmodule Acceptor.ListenSocket do
   def port(), do: GenServer.call(__MODULE__, :port)
 
   def init(_) do
-    with socket when is_port(socket) <- 
-        Enum.find_value(6881 .. 6999, &set_up/1) do
-      Task.async(fn -> loop(socket) end)
+    with socket when is_port(socket) <- Enum.find_value(Acceptor.port_range(), &set_up/1) do
+      Task.start_link(fn -> loop(socket) end)
       {:ok, socket}
     else
       _ ->
@@ -30,11 +29,6 @@ defmodule Acceptor.ListenSocket do
     {:reply, port, socket}
   end
 
-  def handle_info({:DOWN, _, :process, _, reason}, socket) do
-    Logger.info "loop listen socket down: #{reason}"
-    {:stop, socket, reason}
-  end
-  
   defp loop(socket) do
     {:ok, client} = :gen_tcp.accept(socket)
     Logger.info("new client")
@@ -52,6 +46,6 @@ defmodule Acceptor.ListenSocket do
 
       {:error, _} ->
         nil
-      end
+    end
   end
 end

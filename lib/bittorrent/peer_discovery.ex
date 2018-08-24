@@ -7,9 +7,7 @@ defmodule PeerDiscovery do
   @spec peer_id() :: Peer.peer_id()
   def peer_id(), do: "E0-1-0-DANIBOYBYE356"
 
-  defdelegate has_hash?(hash), to: __MODULE__.Controller
-
-  defdelegate request(torrent), to: __MODULE__.Controller
+  defdelegate request(torrent, list), to: __MODULE__.Controller
 
   defdelegate get(key), to: __MODULE__.Controller
 
@@ -19,6 +17,7 @@ defmodule PeerDiscovery do
         Task.Supervisor,
         name: __MODULE__.Requests, strategy: :one_for_one, max_restarts: 0
       },
+      __MODULE__.ConnectionIds,
       __MODULE__.Controller
     ]
     |> Supervisor.init(strategy: :one_for_all)

@@ -5,9 +5,8 @@ defmodule Handshake do
   @pstrlen <<byte_size(@pstr)>>
   @reserved <<0, 0, 0, 0, 0, 0, 0, 0>>
 
-  @spec send(Peer.peer(), Torrent.hash()) ::
-          pid() | {:error, any()} | :error
-  def send(%{"ip" => ip, "port" => port, "peer id" => _peer_id}, hash) do
+  @spec send(Peer.t(), Torrent.hash()) :: pid() | {:error, any()} | :error
+  def send(%Peer{port: port, ip: ip}, hash) do
     with {:ok, socket} <-
            :gen_tcp.connect(
              String.to_charlist(ip),
@@ -35,13 +34,13 @@ defmodule Handshake do
     end
   end
 
-  @spec recv(Acceptor.socket()) :: pid() | :error
+  @spec recv(port()) :: pid() | :error
   def recv(socket) do
     with {:ok,
           <<@pstrlen, @pstr, _::bytes-size(8), hash::bytes-size(20), peer_id::bytes-size(20)>>} <-
            :gen_tcp.recv(socket, 68, 120_000),
          false <- Acceptor.BlackList.member?(peer_id),
-         true <- PeerDiscovery.has_hash?(hash),
+         true <- Torrent.has_hash?(hash),
          :ok <-
            :gen_tcp.send(
              socket,

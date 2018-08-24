@@ -4,8 +4,8 @@ defmodule Torrent.Bitfield do
   require Via
   Via.make()
 
-  @spec start_link(Torrent.Struct.t()) :: GenServer.on_start()
-  def start_link(%Torrent.Struct{hash: hash, last_index: index}) do
+  @spec start_link(Torrent.t()) :: GenServer.on_start()
+  def start_link(%Torrent{hash: hash, last_index: index}) do
     GenServer.start_link(__MODULE__, index + 1, name: via(hash))
   end
 
@@ -14,7 +14,7 @@ defmodule Torrent.Bitfield do
     count
     |> size()
     |> (&List.duplicate(0, &1)).()
-    |> List.to_string()
+    |> :binary.list_to_bin()
   end
 
   @spec get(Torrent.hash()) :: Torrent.bitfield()

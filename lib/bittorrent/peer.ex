@@ -5,38 +5,55 @@ defmodule Peer do
   Via.make()
 
   @type peer_id :: <<_::160>>
-  # peer -> %{"peer id" => _, "port" => _, "ip" => _}
-  @type peer :: %{
-          required(binary()) => peer_id,
-          required(binary()) => Acceptor.port_number(),
-          required(binary()) => binary()
-        }
+  @type ip :: binary()
   @type key :: {Peer.peer_id(), Torrent.hash()}
 
-  @spec start_link({peer_id(), Acceptor.socket()}) :: Supervisor.on_start()
+  @enforce_keys [:ip, :port]
+  defstruct [:ip, :port, peer_id: nil]
+
+  @type t :: %__MODULE__{
+          ip: ip(),
+          port: Acceptor.port_number(),
+          peer_id: peer_id() | nil
+        }
+
+  @spec start_link({peer_id(), port()}) :: Supervisor.on_start()
   def start_link({key, _socket} = args) do
     Supervisor.start_link(__MODULE__, args, name: via(key))
   end
 
-  @spec get_id(pid()) :: Peer.peer_id()
+  @spec get_id(pid()) :: Peer.peer_id() | nil
   def get_id(pid) do
-    [{{_, peer_id}, _} | _] = Registry.keys(Registry, pid)
-    peer_id
+    if key = get_key(pid) do
+      elem(key,0)
+    end
+  end
+
+  @spec get_key(pid()) :: Peer.key() | nil
+  defp get_key(pid) do
+    with [{key, _} | _] <- Registry.keys(Registry, pid) do
+      key
+    else
+      _ -> 
+        nil
+    end
   end
 
   @spec whereis(Torrent.hash(), peer_id()) :: pid() | {atom(), node()} | nil
   def whereis(hash, peer_id), do: GenServer.whereis(via({peer_id, hash}))
 
-  @spec have(pid(), Torrent.index()) :: :ok | no_return()
+  @spec have(pid(), Torrent.index()) :: :ok | nil
   def have(pid, index) do
-    [{key, _} | _] = Registry.keys(Registry, pid)
-    __MODULE__.Controller.have(key, index)
+    if key = get_key(pid) do
+      __MODULE__.Controller.have(key, index)
+    end
   end
 
-  @spec interested(pid(), Torrent.index()) :: :ok | no_return()
+  @spec interested(pid(), Torrent.index()) :: :ok | nil
   def interested(pid, index) do
-    [{key, _} | _] = Registry.keys(Registry, pid)
-    __MODULE__.Controller.interested(key, index)
+    if key = get_key(pid) do
+      __MODULE__.Controller.interested(key, index)
+    end
   end
 
   defdelegate request(hash, peer_id, index, begin, length), to: __MODULE__.Controller
@@ -50,26 +67,29 @@ defmodule Peer do
 
   defdelegate cancel(hash, peer_id, index, begin, length), to: __MODULE__.Controller
 
-  @spec reset_rank(pid()) :: :ok | no_return()
+  @spec reset_rank(pid()) :: :ok | nil
   def reset_rank(pid) do
-    [{key, _} | _] = Registry.keys(Registry, pid)
-    __MODULE__.Controller.reset_rank(key)
+    if key = get_key(pid) do
+      __MODULE__.Controller.reset_rank(key)
+    end
   end
 
   defdelegate choke(hash, peer_id), to: __MODULE__.Controller
 
-  @spec want_unchoke(pid()) :: __MODULE__.Controller.want_unchoke_return() | no_return()
+  @spec want_unchoke(pid()) :: __MODULE__.Controller.want_unchoke_return()
   def want_unchoke(pid) do
-    [{key, _} | _] = Registry.keys(Registry, pid)
-    __MODULE__.Controller.want_unchoke(key)
+    if key = get_key(pid) do
+      __MODULE__.Controller.want_unchoke(key)
+    end
   end
 
   defdelegate unchoke(hash, peer_id), to: __MODULE__.Controller
 
-  @spec seed(pid()) :: :ok | no_return()
+  @spec seed(pid()) :: :ok | nil
   def seed(pid) do
-    [{key, _} | _] = Registry.keys(Registry, pid)
-    __MODULE__.Controller.seed(key)
+    if key = get_key(pid) do
+      __MODULE__.Controller.seed(key)
+    end
   end
 
   def init({key, _socket} = args) do

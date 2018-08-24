@@ -3,7 +3,7 @@ defmodule Torrent.FileHandle do
 
   require Via
   require Logger
-  alias Torrent.{Struct, Bitfield}
+  alias Torrent.Bitfield
 
   Via.make()
 
@@ -12,8 +12,8 @@ defmodule Torrent.FileHandle do
   and do not need to be closed manually
   """
 
-  @spec start_link(Struct.t()) :: GenServer.on_start()
-  def start_link(%Struct{hash: hash, struct: %{"info" => info}}) do
+  @spec start_link(Torrent.t()) :: GenServer.on_start()
+  def start_link(%Torrent{hash: hash, struct: %{"info" => info}}) do
     GenServer.start_link(__MODULE__, info, name: via(hash))
   end
 
@@ -26,12 +26,13 @@ defmodule Torrent.FileHandle do
     res
   end
 
-  @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.length()) :: binary()
+  @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
+          (() -> binary())
   def read(hash, index, begin, length) do
     GenServer.call(via(hash), {:read, index, begin, length}, 120_000)
   end
 
-  @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
+  @spec write(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
   def write(key, index, begin, block) do
     GenServer.cast(via(key), {index, begin, block})
   end
@@ -58,30 +59,33 @@ defmodule Torrent.FileHandle do
     {:ok, state}
   end
 
-  def handle_call(
-        {:check, index},
-        _,
-        %{"files" => files, "piece length" => len, "pieces" => pieces} = state
-      ) do
-    {offset, files1} = offset_files(index, files, len)
-    hash = binary_part(pieces, index * 20, 20)
-    piece = do_read(offset, len, files1)
-    {:reply, hash == :crypto.hash(:sha, piece), state}
+  def handle_call({:check, index}, from, state) do
+    fn -> check(index, state["files"], state["piece length"], state["pieces"], from) end
+    |> Task.start_link()
+
+    {:noreply, state}
   end
 
-  def handle_call(
-        {:read, index, begin, length},
-        _,
-        %{"files" => files, "piece length" => piece_len} = state
-      ) do
-    {offset, files1} = offset_files(index, files, piece_len, begin)
-    {:reply, do_read(offset, length, files1), state}
+  def handle_call({:read, index, begin, length}, _, state) do
+    fun = fn ->
+      {offset, files1} = offset_files(index, state["files"], state["piece length"], begin)
+      do_read(offset, length, files1)
+    end
+
+    {:reply, fun, state}
   end
 
   def handle_cast({index, begin, block}, %{"files" => files, "piece length" => len} = state) do
     {offset, files1} = offset_files(index, files, len, begin)
     do_write(offset, files1, block)
     {:noreply, state}
+  end
+
+  defp check(index, files, len, pieces, from) do
+    {offset, files1} = offset_files(index, files, len)
+    hash = binary_part(pieces, index * 20, 20)
+    piece = do_read(offset, len, files1)
+    GenServer.reply(from, hash == :crypto.hash(:sha, piece))
   end
 
   defp offset_files(index, files, piece_len, offset \\ 0) do

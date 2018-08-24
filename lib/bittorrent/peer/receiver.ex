@@ -14,7 +14,7 @@ defmodule Peer.Receiver do
   and do not need to be closed manually
   """
 
-  @spec start_link({Peer.key(), Acceptor.socket()}) :: GenServer.on_start()
+  @spec start_link({Peer.key(), port()}) :: GenServer.on_start()
   def start_link(args), do: GenServer.start_link(__MODULE__, args)
 
   def init({_, socket} = args) do

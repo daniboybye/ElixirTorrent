@@ -9,12 +9,12 @@ defmodule Torrents do
   @spec download(Path.t(), Keyword.t()) :: DynamicSupervisor.on_start_child()
   def download(path, options \\ []) do
     DynamicSupervisor.start_child(
-      __MODULE__, 
-      Via.child_spec(Torrent, [path, options])
+      __MODULE__,
+      {Torrent, {path, options}}
     )
   end
 
   def init(_) do
-    DynamicSupervisor.init(strategy: :one_for_one, max_restarts: :infinity)
+    DynamicSupervisor.init(strategy: :one_for_one, max_restarts: 10)
   end
 end

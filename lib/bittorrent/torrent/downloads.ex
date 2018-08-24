@@ -6,8 +6,8 @@ defmodule Torrent.Downloads do
 
   Via.make()
 
-  @spec start_link(Torrent.Struct.t()) :: Supervisor.on_start()
-  def start_link(%Torrent.Struct{hash: hash}) do
+  @spec start_link(Torrent.t()) :: Supervisor.on_start()
+  def start_link(%Torrent{hash: hash}) do
     DynamicSupervisor.start_link(__MODULE__, nil, name: via(hash))
   end
 
