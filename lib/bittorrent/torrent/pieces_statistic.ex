@@ -67,7 +67,7 @@ defmodule Torrent.PiecesStatistic do
     with nil <- Enum.find(list, &(elem(&1, 1) === :priority)) do
       list
       |> Enum.sort_by(&elem(&1, 1))
-      |> Enum.take(4)
+      |> Enum.take(10)
       |> Enum.random()
     end
   end

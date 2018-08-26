@@ -23,8 +23,8 @@ defmodule Torrent.Downloads.Piece do
   @spec run?(Torrent.hash(), Torrent.index()) :: boolean()
   def run?(hash, index), do: !!GenServer.whereis(via({index, hash}))
 
-  @spec download(Torrent.hash(), Torrent.index(), __MODULE__.mode()) :: :ok
-  def download(hash, index, mode) do
+  @spec download(Torrent.hash(), Torrent.index(), mode()) :: :ok
+  def download(hash, index, mode \\ nil) do
     GenServer.cast(via({index, hash}), {:download, mode})
   end
 
@@ -51,18 +51,17 @@ defmodule Torrent.Downloads.Piece do
     {:ok, %State{index: index, hash: hash, waiting: make_subpieces([], length, 0)}}
   end
 
-  def handle_cast(
-        {:download, :endgame},
-        %State{waiting: [_ | _]} = state
-      ) do
+  def handle_cast({:download,_},%State{waiting: []} = state) do
+    Server.next_piece(state.hash)
+    {:noreply,state}
+  end
+
+  def handle_cast({:download, :endgame}, state) do
     Swarm.interested(state.hash, state.index)
     {:noreply, Map.put(state, :mode, :endgame)}
   end
 
-  def handle_cast(
-        {:download, mode},
-        %State{waiting: [_ | _]} = state
-      ) do
+  def handle_cast({:download, mode},state) do
     Swarm.interested(state.hash, state.index)
     {:noreply, state |> update_timer() |> Map.put(:mode, mode)}
   end
@@ -227,15 +226,19 @@ defmodule Torrent.Downloads.Piece do
     {:noreply, state}
   end
 
-  defp is_finish(%State{requests: [], waiting: [], hash: hash, index: index}) do
+  defp is_finish(%State{requests: [], waiting: []} = state) do
+    with %State{mode: :endgame} <- state do
+      Server.next_piece(state.hash)
+    end
+    
     reason =
-      if FileHandle.check?(hash, index) do
-        Swarm.broadcast_have(hash, index)
-        Server.downloaded(hash, index)
+      if FileHandle.check?(state.hash, state.index) do
+        Swarm.broadcast_have(state.hash, state.index)
+        Server.downloaded(state.hash, state.index)
         :normal
       else
-        PiecesStatistic.make_zero(hash, index)
-        PiecesStatistic.inc(hash, index)
+        PiecesStatistic.make_zero(state.hash, state.index)
+        PiecesStatistic.inc(state.hash, state.index)
         :wrong_subpiece
       end
 

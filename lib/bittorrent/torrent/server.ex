@@ -7,7 +7,6 @@ defmodule Torrent.Server do
   @next_piece_timeout 3_000
   @speed_time 60_000
   @until_endgame 0
-  @failure_rare_strategy 5
 
   alias Torrent.{Swarm, FileHandle, PiecesStatistic, Downloads}
 
@@ -100,7 +99,7 @@ defmodule Torrent.Server do
 
   def handle_cast(:next_piece, %Torrent{peer_status: index} = state)
       when is_integer(index) do
-    {:noreply, do_next_piece(state, :get_rare, 0)}
+    {:noreply, do_next_piece(state, :get_rare)}
   end
 
   def handle_cast({:new_peers, _}, %Torrent{peer_status: :seed} = state) do
@@ -110,7 +109,7 @@ defmodule Torrent.Server do
   #event: started
   def handle_cast({:new_peers, list},%Torrent{event: 2} = state) do
     Swarm.new_peers(state.hash, list)
-    Process.send_after(self(), {:next_piece, :get_random, 0}, 2_000)
+    Process.send_after(self(), {:next_piece, :get_random}, 2_000)
     {:noreply, %Torrent{state | event: Torrent.empty()}}
   end
 
@@ -119,16 +118,12 @@ defmodule Torrent.Server do
     {:noreply, state}
   end
 
-  def handle_info({:next_piece, _, _}, %Torrent{peer_status: :seed} = state) do
+  def handle_info({:next_piece, _}, %Torrent{peer_status: :seed} = state) do
     {:noreply, state}
   end
 
-  def handle_info({:next_piece, _, @failure_rare_strategy}, %Torrent{peer_status: nil} = state) do
-    {:noreply, do_next_piece(state, :get_random, 0)}
-  end
-
-  def handle_info({:next_piece, fun, n}, %Torrent{peer_status: nil} = state) do
-    {:noreply, do_next_piece(state, fun, n)}
+  def handle_info({:next_piece, fun}, %Torrent{peer_status: nil} = state) do
+    {:noreply, do_next_piece(state, fun)}
   end
 
   def handle_info(:unchoke, state) do
@@ -171,14 +166,13 @@ defmodule Torrent.Server do
     end
   end
 
-  defp do_next_piece(state, fun, n) do
+  defp do_next_piece(state, fun) do
     if index = apply(PiecesStatistic, fun, [state.hash]) do
       Downloads.piece(state.hash, index, index_length(index, state), mode(state))
-      Map.put(state, :peer_status, index)
     else
-      Process.send_after(self(), {:next_piece, fun, n + 1}, @next_piece_timeout)
-      Map.put(state, :peer_status, nil)
+      Process.send_after(self(), {:next_piece, fun}, @next_piece_timeout)
     end
+    %State{state | peer_status: index)
   end
 
   defp mode(%Torrent{left: left, struct: %{"info" => %{"piece length" => length}}})
