@@ -1,31 +1,61 @@
 defmodule Torrent.Uploader do
-  use DynamicSupervisor, type: :supervisor
-
   require Via
   Via.make()
 
+  alias Torrent.{FileHandle, Server}
+
+  def child_spec(torrent) do
+    %{
+      start: {__MODULE__, :start_link, [torrent]},
+      type: :supervisor,
+      restart: :permanent,
+      id: __MODULE__
+    }
+  end
+
   @spec start_link(Torrent.t()) :: Supervisor.on_start()
   def start_link(%Torrent{hash: hash}) do
-    DynamicSupervisor.start_link(__MODULE__, nil, name: via(hash))
+    Task.Supervisor.start_link(name: via(hash))
   end
 
   @spec request(
           Torrent.hash(),
-          Peer.peer_id(),
+          Peer.id(),
           Torrent.begin(),
           Torrent.index(),
           Torrent.length()
         ) :: DynamicSupervisor.on_start_child()
   def request(hash, peer_id, index, begin, length) do
-    DynamicSupervisor.start_child(
+    Task.Supervisor.start_child(
       via(hash),
-      {__MODULE__.Task, {hash, peer_id, index, begin, length}}
+      fn -> 
+        name = {hash, peer_id, index, begin, length}
+        Registry.register(Registry, name, self())
+        
+        block = FileHandle.read(hash, index, begin, length).()
+        Peer.piece(hash, peer_id, index, begin, block)
+        Server.uploaded(hash, length)
+      
+        Registry.unregister(Registry, name)
+      end
     )
   end
-
-  defdelegate cancel(hash, peer_id, index, begin, length), to: __MODULE__.Task
-
-  def init(_) do
-    DynamicSupervisor.init(strategy: :one_for_one, max_restarts: 0)
+  
+  @spec cancel(
+          Torrent.hash(),
+          Peer.id(),
+          Torrent.begin(),
+          Torrent.index(),
+          Torrent.length()
+        ) :: :ok  
+  def cancel(hash, peer_id, index, begin, length) do
+    name = {hash, peer_id, index, begin, length}
+    
+    with [{_, task} | _] <- Registry.lookup(Registry, name) do
+      Task.Supervisor.terminate_child(via(hash), task)
+      Registry.unregister(Registry, name)
+    end
+    
+    :ok
   end
 end

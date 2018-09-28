@@ -1,5 +1,7 @@
-defmodule Bittorrent.Application do
+defmodule ElixirTorrent do
   use Application
+
+  def version, do: "ET0-1-0"
 
   def start(_type, _args) do
     [

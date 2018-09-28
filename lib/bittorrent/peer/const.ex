@@ -1,6 +1,7 @@
 defmodule Peer.Const do
   defmacro message_id() do
     quote do
+      # Core Protocol
       @choke_id 0
       @unchoke_id 1
       @interested_id 2
@@ -10,10 +11,25 @@ defmodule Peer.Const do
       @request_id 6
       @piece_id 7
       @cancel_id 8
+
+      # DHT Extension
       @port_id 9
 
-      @timeout_recv 150_000
-      @timeout_keeplive 90_000
+      # Fast Extension
+      @suggest_piece_id 0x0D
+      @have_all_id 0x0E
+      @have_none_id 0x0F
+      @reject_request_id 0x10
+      @allowed_fast_id 0x11
+
+      # Additional IDs used in deployed clients: 
+      #@LTEP_Handshake_id 0x14
+      # (implemented in libtorrent, uTorrent,...)
+
+      # Hash Transfer Protocol
+      #@hash_request_id 0x15
+      #@hashed_id 0x16
+      #@hash_reject_id 0x17
     end
   end
 end

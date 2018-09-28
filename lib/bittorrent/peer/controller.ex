@@ -6,343 +6,202 @@ defmodule Peer.Controller do
 
   Via.make()
 
+  alias Acceptor.BlackList
+  alias __MODULE__.{State, FastExtension}
   alias Peer.Sender
-  alias __MODULE__.State
+  alias Torrent.Uploader
 
-  @type want_unchoke_return :: {non_neg_integer(), Peer.peer_id()} | nil
+  import Peer, only: [make_key: 2, key_to_id: 1, key_to_hash: 1]
 
-  @max_unanswered_requests 5
-
-  @spec start_link(Peer.key()) :: GenServer.on_start()
-  def start_link(key) do
-    GenServer.start_link(__MODULE__, key, name: via(key))
-  end
-
-  @spec upload(Peer.key(), pos_integer()) :: :ok
-  def upload(key, byte_size) do
-    GenServer.cast(via(key), {:upload, byte_size})
+  @spec start_link({Peer.id(),Torrent.hash(),port(), Peer.reserved()}) :: GenServer.on_start()
+  def start_link({id, hash, _socket, _reserved} = args) do
+    GenServer.start_link(
+      __MODULE__,
+      args,
+      name: via(make_key(hash, id))
+    )
   end
 
   @spec have(Peer.key(), Torrent.index()) :: :ok
-  def have(key, index), do: GenServer.cast(via(key), {:have, index})
+  def have(key, index), do: GenServer.cast(via(key), {:have, [index]})
 
   @spec interested(Peer.key(), Torrent.index()) :: :ok
   def interested(key, index) do
-    GenServer.cast(via(key), {:interested, index})
+    GenServer.cast(via(key), {:interested, [index]})
   end
 
-  @spec cancel(Torrent.hash(), Peer.peer_id(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
+  @spec cancel(Torrent.hash(), Peer.id(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           :ok
-  def cancel(hash, peer_id, index, begin, length) do
-    GenServer.cast(via({peer_id, hash}), {:cancel, index, begin, length})
+  def cancel(hash, id, index, begin, length) do
+    make_key(hash, id)
+    |> via
+    |> GenServer.cast({:cancel, [index, begin, length]})
   end
 
   @spec seed(Peer.key()) :: :ok
-  def seed(key), do: GenServer.cast(via(key), :seed)
+  def seed(key), do: GenServer.cast(via(key), {:seed, []})
 
-  @spec choke(Torrent.hash(), Peer.peer_id()) :: :ok
-  def choke(hash, peer_id), do: GenServer.cast(via({peer_id, hash}), :choke)
+  @spec choke(Torrent.hash(), Peer.id()) :: :ok
+  def choke(hash, id) do 
+    make_key(hash, id)
+    |> via
+    |> GenServer.cast({:choke,[]})
+  end
 
-  @spec unchoke(Torrent.hash(), Peer.peer_id()) :: :ok
-  def unchoke(hash, peer_id), do: GenServer.cast(via({peer_id, hash}), :unchoke)
+  @spec unchoke(Torrent.hash(), Peer.id()) :: :ok
+  def unchoke(hash, id) do 
+    make_key(hash, id)
+    |> via
+    |> GenServer.cast({:unchoke,[]})
+  end
 
-  @spec want_unchoke(Peer.key()) :: want_unchoke_return()
-  def want_unchoke(key), do: GenServer.call(via(key), :want_unchoke)
+  @spec rank(Peer.key()) :: State.rank()
+  def rank(key), do: GenServer.call(via(key), :rank)
 
   @spec reset_rank(Peer.key()) :: :ok
-  def reset_rank(key), do: GenServer.cast(via(key), :reset_rank)
+  def reset_rank(key), do: GenServer.cast(via(key), {:reset_rank,[]})
 
   @spec request(
           Torrent.hash(),
-          Peer.peer_id(),
+          Peer.id(),
           Torrent.index(),
           Torrent.begin(),
           Torrent.length()
         ) :: :ok
-  def request(hash, peer_id, index, begin, length) do
-    GenServer.cast(via({peer_id, hash}), {:request, index, begin, length})
+  def request(hash, id, index, begin, length) do
+    make_key(hash, id)
+    |> via
+    |> GenServer.cast({:request, [index, begin, length]})
+  end
+
+  @spec piece(Torrent.hash(), Peer.id(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
+  def piece(hash, id, index, begin, block) do
+    key = make_key(hash, id)
+    
+    Sender.piece(key, index, begin, block)
+
+    GenServer.cast(via(key), {:upload, [byte_size(block)]})
   end
 
   @spec handle_choke(Peer.key()) :: :ok
-  def handle_choke(key), do: GenServer.cast(via(key), :handle_choke)
+  def handle_choke(key), do: GenServer.cast(via(key), {:handle_choke,[]})
 
   @spec handle_unchoke(Peer.key()) :: :ok
-  def handle_unchoke(key), do: GenServer.cast(via(key), :handle_unchoke)
+  def handle_unchoke(key), do: GenServer.cast(via(key), {:handle_unchoke,[]})
 
   @spec handle_interested(Peer.key()) :: :ok
   def handle_interested(key) do
-    GenServer.cast(via(key), :handle_interested)
+    GenServer.cast(via(key), {:handle_interested, []})
   end
 
   @spec handle_not_interested(Peer.key()) :: :ok
   def handle_not_interested(key) do
-    GenServer.cast(via(key), :handle_not_interested)
+    GenServer.cast(via(key), {:handle_not_interested,[]})
   end
 
   @spec handle_have(Peer.key(), Torrent.index()) :: :ok
   def handle_have(key, piece_index) do
-    GenServer.cast(via(key), {:handle_have, piece_index})
+    GenServer.cast(via(key), {:handle_have, [piece_index]})
   end
 
   @spec handle_bitfield(Peer.key(), Torrent.bitfield()) :: :ok
   def handle_bitfield(key, bitfield) do
-    GenServer.cast(via(key), {:handle_bitfield, bitfield})
+    GenServer.cast(via(key), {:handle_bitfield, [bitfield]})
   end
 
   @spec handle_request(Peer.key(), Torrent.index(), Torrent.begin(), Torrent.length()) :: :ok
   def handle_request(key, index, begin, length) do
-    GenServer.cast(via(key), {:handle_request, index, begin, length})
+    GenServer.cast(via(key), {:handle_request, [index, begin, length]})
   end
 
   @spec handle_piece(Peer.key(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
   def handle_piece(key, index, begin, block) do
-    GenServer.cast(via(key), {:handle_piece, index, begin, block})
+    GenServer.cast(via(key), {:handle_piece, [index, begin, block]})
   end
 
   @spec handle_cancel(Peer.key(), Torrent.index(), Torrent.begin(), Torrent.length()) :: :ok
-  def handle_cancel({peer_id, hash}, index, begin, length) do
-    Torrent.Uploader.cancel(hash, peer_id, index, begin, length)
+  def handle_cancel(key, index, begin, length) do
+    Uploader.cancel(key_to_hash(key), key_to_id(key), index, begin, length)
   end
 
-  @spec handle_port(Peer.key(), Acceptor.port_number()) :: :ok
+  @spec handle_port(Peer.key(), :inet.port_number()) :: :ok
   def handle_port(key, port) do
-    GenServer.cast(via(key), {:handle_port, port})
+    GenServer.cast(via(key), {:handle_port, [port]})
   end
 
-  def init({_, hash} = key) do
-    %Torrent{peer_status: status, last_index: last_index} = Torrent.get(hash)
-    Sender.bitfield(key)
-    {:ok, %State{key: key, status: status, pieces_count: last_index + 1}}
+  @spec handle_have_all(Peer.key()) :: :ok
+  def handle_have_all(key) do
+    GenServer.cast(via(key), {:handle_have_all,[]})
   end
 
-  def terminate(:protocol_error, %State{key: {peer_id, _}}) do
-    Acceptor.BlackList.put(peer_id)
+  @spec handle_have_none(Peer.key()) :: :ok
+  def handle_have_none(key) do
+    GenServer.cast(via(key), {:handle_have_none,[]})
+  end
+
+  @spec handle_suggest_piece(Peer.key(), Torrent.index()) :: :ok
+  def handle_suggest_piece(key, index) do
+    GenServer.cast(via(key),{:handle_suggest_piece, [index]})
+  end
+
+  @spec handle_reject(Peer.key(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
+          :ok
+  def handle_reject(key, index, begin, length) do
+    GenServer.cast(via(key), {:handle_reject, [index, begin, length]})
+  end
+
+  @spec handle_allowed_fast(Peer.key(), Torrent.index()) :: :ok
+  def handle_allowed_fast(key, index) do
+    GenServer.cast(via(key), {:handle_allowed_fast, [index]})
+  end
+
+  def init({id, hash, socket, reserved}) do
+    %Torrent{} = torrent = Torrent.get(hash)
+
+    state = %State{
+      hash: hash,
+      id: id,
+      socket: socket,
+      fast_extension: FastExtension.make(reserved),
+      status: torrent.peer_status,
+      pieces_count: torrent.last_index + 1
+    }
+
+    State.first_message(state, torrent.downloaded)
+
+    {:ok, state}
+  end
+
+  def terminate({:shutdown, :protocol_error}, state) do
+    BlackList.put(state.id)
   end
 
   def terminate(_, _), do: :ok
 
-  def handle_call(
-        :want_unchoke,
-        _,
-        %State{interested_of_me: true, key: {peer_id, _}} = state
-      ) do
-    {:reply, {state.rank, peer_id}, state}
+  def handle_call(:rank, _, state), do: {:reply, State.rank(state), state}
+
+  def handle_cast({message, _}, %State{fast_extension: nil} = state) 
+    when message in [:handle_have_all, :handle_have_none, :handle_suggest_piece, :handle_allowed_fast, :handle_reject] do
+    {:stop, {:shutdown, :protocol_error}, state}
   end
 
-  def handle_call(:want_unchoke, _, state), do: {:reply, nil, state}
-
-  def handle_cast(:reset_rank, state) do
-    {:noreply, %State{state | rank: 0}}
-  end
-
-  def handle_cast({:have, index}, state) do
-    with <<_::bits-size(index), 0::1, _::bits>> <- state.bitfield do
-      Sender.have(state.key, index)
-    end
-
-    {:noreply, state}
-  end
-
-  def handle_cast(:choke, %State{choke: false} = state) do
-    Sender.choke(state.key)
-    {:noreply, %State{state | choke: true}}
-  end
-
-  def handle_cast(:choke, state), do: {:noreply, state}
-
-  def handle_cast(:unchoke, %State{choke: true} = state) do
-    Sender.unchoke(state.key)
-    {:noreply, %State{state | choke: false}}
-  end
-
-  def handle_cast(:unchoke, state), do: {:noreply, state}
-
-  def handle_cast({:interested, index}, state) do
-    state
-    |> Map.put(:status, index)
-    |> check_interested()
-  end
-
-  def handle_cast({:cancel, index, begin, length}, state) do
-    Sender.cancel(state.key, index, begin, length)
-    new_state = Map.update!(state, :requests, &List.delete(&1, {index, begin, length}))
-    make_request(new_state)
-    {:noreply, new_state}
-  end
-
-  def handle_cast({:request, index, begin, length}, state) do
-    Sender.request(state.key, index, begin, length)
-    new_state = Map.update!(state, :requests, &[{index, begin, length} | &1])
-    make_request(new_state)
-    {:noreply, new_state}
-  end
-
-  def handle_cast(:seed, %State{interested: true} = state) do
-    Sender.interested(state.key, false)
-    do_seed(state)
-  end
-
-  def handle_cast(:seed, state), do: do_seed(state)
-
-  def handle_cast({:upload, n}, %State{status: :seed} = state) do
-    {:noreply, Map.update!(state, :rank, &(&1 + n))}
-  end
-
-  def handle_cast({:upload, _}, state), do: {:noreply, state}
-
-  def handle_cast(:handle_choke, state), do: {:noreply, %State{state | choke_me: true}}
-
-  def handle_cast(:handle_unchoke, state) do
-    new_state = %State{state | choke_me: false}
-    make_request(new_state)
-    {:noreply, new_state}
-  end
-
-  def handle_cast(:handle_interested, state) do
-    {:noreply, %State{state | interested_of_me: true}}
-  end
-
-  def handle_cast(:handle_not_interested, %State{choke: false} = state) do
-    Sender.choke(state.key)
-    {:noreply, %State{state | interested_of_me: false, choke: true}}
-  end
-
-  def handle_cast(:handle_not_interested, state) do
-    {:noreply, %State{state | interested_of_me: false}}
-  end
-
-  def handle_cast({:handle_bitfield, _}, %State{bitfield: bitfield} = state)
-      when is_binary(bitfield) do
-    {:stop, :protocol_error, state}
-  end
-
-  def handle_cast({:handle_bitfield, _}, %State{status: :seed} = state) do
-    {:noreply, state}
-  end
-
-  def handle_cast({:handle_bitfield, bitfield}, %State{key: {_, hash}} = state) do
-    Torrent.PiecesStatistic.update(hash, bitfield, state.pieces_count)
-
-    state
-    |> Map.put(:bitfield, bitfield)
-    |> check_interested()
-  end
-
-  def handle_cast({:handle_have, _}, %State{status: :seed} = state) do
-    {:noreply, state}
-  end
-
-  def handle_cast({:handle_have, index}, %State{bitfield: nil} = state) do
-    state.pieces_count
-    |> Torrent.Bitfield.make()
-    |> (&Map.put(state, :bitfield, &1)).()
-    |> do_handle_have(index)
-  end
-
-  def handle_cast({:handle_have, index}, state) do
-    do_handle_have(state, index)
-  end
-
-  def handle_cast(
-        {:handle_request, index, begin, length},
-        %State{key: {peer_id, hash}} = state
-      ) do
-    with true <- state.interested_of_me,
-         true <- index < state.pieces_count,
-         true <- Torrent.Bitfield.check?(hash, index),
-         false <- state.choke do
-      Torrent.Uploader.request(hash, peer_id, index, begin, length)
-      {:noreply, state}
-    else
-      false ->
-        {:stop, :protocol_error, state}
-
-      true ->
-        {:noreply, state}
-    end
-  end
-
-  def handle_cast(
-        {:handle_piece, index, begin, block},
-        %State{key: {peer_id, hash}} = state
-      ) do
-    length = byte_size(block)
-    value = {index, begin, length}
-
-    if Enum.find_value(state.requests, &(&1 == value)) do
-      Torrent.Downloads.request_response(hash, index, peer_id, begin, block)
-
-      new_state = %State{
-        state
-        | requests: List.delete(state.requests, value),
-          rank: state.rank + length
-      }
-
-      make_request(new_state)
-      {:noreply, new_state}
-    else
-      {:stop, :protocol_error, state}
-    end
-  end
-
-  def handle_cast({:handle_port, _port}, state) do
-    # DHT
-    {:noreply, state}
-  end
-
-  defp do_seed(state) do
-    {:noreply, %State{state | bitfield: nil, status: :seed, interested: false}}
-  end
-
-  defp make_request(
-         %State{
-           interested: true,
-           choke_me: false,
-           status: status,
-           key: {peer_id, hash}
-         } = state
-       )
-       when is_integer(status) do
-    with len when len < @max_unanswered_requests <- length(state.requests) do
-      Torrent.Downloads.want_request(hash, status, peer_id)
-    end
-
-    :ok
-  end
-
-  defp make_request(_), do: :ok
-
-  defp check_interested(%State{status: status} = state)
-       when is_integer(status) do
-    interested = do_has_index?(status, state)
-
-    if interested != state.interested do
-      Sender.interested(state.key, interested)
-    end
-
-    new_state = Map.put(state, :interested, interested)
-    make_request(new_state)
-    {:noreply, new_state}
-  end
-
-  defp check_interested(state), do: {:noreply, state}
-
-  defp do_handle_have(state, index) do
-    Torrent.PiecesStatistic.inc(elem(state.key, 1), index)
-
-    state
-    |> Map.update!(:bitfield, fn <<prefix::bits-size(index), _::1, postfix::bits>> ->
-      <<prefix::bits, 1::1, postfix::bits>>
-    end)
-    |> check_interested()
-  end
-
-  defp do_has_index?(index, state) do
-    with <<_::bits-size(index), 1::1, _::bits>> <- state.bitfield do
-      true
-    else
+  def handle_cast({fun, args}, state) do
+    #if fun == :handle_unchoke, do: Logger.info "unchoke"
+    #if fun == :handle_piece, do: Logger.info "piece"
+    case fun do
+      :handle_allowed_fast ->
+        Logger.info "allowed fast #{hd(args)}"
+      :handle_suggest_piece -> 
+        Logger.info "suggest piece"
       _ ->
-        false
+        :ok
+    end
+    
+    case apply(State, fun, [state | args]) do
+      {:error, reason, state} ->
+        {:stop, {:shutdown, reason}, state}
+      state ->
+        {:noreply, state}
     end
   end
 end

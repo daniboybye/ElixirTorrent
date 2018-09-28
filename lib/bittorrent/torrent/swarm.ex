@@ -18,7 +18,7 @@ defmodule Torrent.Swarm do
       |> MapSet.new()
 
     list
-    |> Enum.reject(&MapSet.member?(swarm, &1.peer_id))
+    |> Enum.reject(&MapSet.member?(swarm, &1.id))
     |> Enum.each(&Acceptor.send(&1, hash))
   end
 
@@ -42,8 +42,8 @@ defmodule Torrent.Swarm do
       with {most_uploaded, [_ | _] = list} <-
              via(hash)
              |> DynamicSupervisor.which_children()
-             |> Enum.map(&(elem(&1, 1) |> Peer.want_unchoke()))
-             |> Enum.reject(&is_nil/1)
+             |> Enum.map(&(elem(&1, 1) |> Peer.rank()))
+             |> Enum.filter(& &1)
              |> Enum.sort_by(&elem(&1, 0), &(&2 > &1))
              |> Enum.split(3) do
         {optimistic, list} =
@@ -55,14 +55,14 @@ defmodule Torrent.Swarm do
         {[optimistic | most_uploaded], list}
       end
 
-    Enum.each(unchoking, fn {_, peer_id} -> Peer.unchoke(hash, peer_id) end)
-    Enum.each(choking, fn {_, peer_id} -> Peer.choke(hash, peer_id) end)
+    Enum.each(unchoking, fn {_, id} -> Peer.unchoke(hash, id) end)
+    Enum.each(choking, fn {_, id} -> Peer.choke(hash, id) end)
   end
 
-  @spec add_peer(Torrent.hash(), Peer.peer_id(), port()) ::
+  @spec add_peer(Torrent.hash(), Peer.id(), Peer.reserved(), port()) ::
           DynamicSupervisor.on_start_child()
-  def add_peer(hash, peer_id, socket) do
-    DynamicSupervisor.start_child(via(hash), {Peer, {{peer_id, hash}, socket}})
+  def add_peer(hash, id, reserved, socket) do
+    DynamicSupervisor.start_child(via(hash), {Peer, {id, hash, socket, reserved}})
   end
 
   @spec count(Torrent.hash()) :: %{

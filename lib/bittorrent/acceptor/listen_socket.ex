@@ -11,7 +11,7 @@ defmodule Acceptor.ListenSocket do
   @spec start_link() :: GenServer.on_start()
   def start_link(), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
-  @spec port() :: Acceptor.port_number()
+  @spec port() :: :inet.port_number()
   def port(), do: GenServer.call(__MODULE__, :port)
 
   def init(_) do

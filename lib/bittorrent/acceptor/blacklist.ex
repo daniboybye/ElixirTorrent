@@ -6,10 +6,10 @@ defmodule Acceptor.BlackList do
     GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   end
 
-  @spec put(Peer.peer_id()) :: :ok
+  @spec put(Peer.id()) :: :ok
   def put(peer_id), do: GenServer.cast(__MODULE__, peer_id)
 
-  @spec member?(Peer.peer_id()) :: boolean()
+  @spec member?(Peer.id()) :: boolean()
   def member?(peer_id), do: GenServer.call(__MODULE__, peer_id)
 
   def init(_), do: {:ok, MapSet.new()}

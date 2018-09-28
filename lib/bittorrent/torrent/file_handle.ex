@@ -20,14 +20,14 @@ defmodule Torrent.FileHandle do
   @spec check?(Torrent.hash(), Torrent.index()) :: boolean()
   def check?(hash, index) do
     via(hash)
-    |> GenServer.call({:check, index}, :infinity)
-    |> modify_bitfield(hash,index)
+    |> GenServer.call({:check, index}, 5*60*1_000)
+    |> modify_bitfield(hash, index)
   end
 
   @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           (() -> binary())
   def read(hash, index, begin, length) do
-    GenServer.call(via(hash), {:read, index, begin, length}, 120_000)
+    GenServer.call(via(hash), {:read, index, begin, length}, 3*60*1_000)
   end
 
   @spec write(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
@@ -144,14 +144,12 @@ defmodule Torrent.FileHandle do
     pid
   end
 
-  @spec modify_bitfield(boolean(),Torrent.hash(),Torrent.index()) :: boolean()
-  defp modify_bitfield(true,hash,index) do 
-    Bitfield.up(hash,index)
+  @spec modify_bitfield(boolean(), Torrent.hash(), Torrent.index()) :: boolean()
+  defp modify_bitfield(false, _, _), do: false
+  
+  defp modify_bitfield(true, hash, index) do
+    Bitfield.up(hash, index)
     true
   end
 
-  defp modify_bitfield(false,hash,index) do 
-    Bitfield.up(hash,index)
-    false
-  end
 end

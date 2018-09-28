@@ -14,13 +14,13 @@ defmodule PeerDiscovery.ConnectionIds do
     GenServer.start_link(__MODULE__, nil, name: __MODULE__)
   end
 
-  @spec get(Tracker.announce(), port(), :inet.ip_address(), Acceptor.port_number()) ::
+  @spec get(Tracker.announce(), port(), :inet.ip_address(), :inet.port_number()) ::
           Tracker.connection_id() | Tracker.Error.t() | nil
   def get(announce, socket, ip, port) do
     GenServer.call(
       __MODULE__,
       {announce, socket, ip, port},
-      :infinity
+      2*60*60*1_000
     )
   end
 

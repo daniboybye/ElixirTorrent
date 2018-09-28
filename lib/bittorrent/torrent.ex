@@ -4,7 +4,11 @@ defmodule Torrent do
   require Logger
   require Via
 
+  alias __MODULE__.{Server, Swarm, Bitfield, PiecesStatistic, FileHandle, Uploader, Downloads}
+
   Via.make()
+
+  @compile {:inline, empty: 0, started: 0, completed: 0, stopped: 0, event_to_string: 1}
 
   @type hash :: <<_::160>>
   @type index :: non_neg_integer()
@@ -13,7 +17,10 @@ defmodule Torrent do
   @type block :: binary()
   @type bitfield :: binary()
 
+  @empty 0
+  @completed 1
   @started 2
+  @stopped 3
 
   @enforce_keys [:hash, :struct, :left, :last_index, :last_piece_length]
   defstruct [
@@ -40,7 +47,7 @@ defmodule Torrent do
           left: non_neg_integer(),
           last_index: index(),
           last_piece_length: length(),
-          peer_status: nil | :seed | index(),
+          peer_status: Peer.status(),
           # The total amount uploaded 
           # (since the client sent the 'started' event to the tracker)"""
           uploaded: non_neg_integer(),
@@ -53,28 +60,20 @@ defmodule Torrent do
 
   def started(), do: @started
 
-  def empty(), do: 0
+  def empty(), do: @empty
 
-  def completed(), do: 1
+  def completed(), do: @completed
 
-  def stopped(), do: 3
+  def stopped(), do: @stopped
 
   @spec event_to_string(0..3) :: String.t()
-  def event_to_string(0), do: "empty"
+  def event_to_string(@empty), do: "empty"
 
-  def event_to_string(1), do: "completed"
+  def event_to_string(@completed), do: "completed"
 
-  def event_to_string(2), do: "started"
+  def event_to_string(@started), do: "started"
 
-  def event_to_string(3), do: "stopped"
-
-  @spec get_announce_list(__MODULE__.t()) :: nonempty_list(Tracker.announce())
-  def get_announce_list(%__MODULE__{} = torrent) do
-    torrent.struct
-    |> Map.get("announce-list", [])
-    |> Enum.concat()
-    |> (&[torrent.struct["announce"] | &1]).()
-  end
+  def event_to_string(@stopped), do: "stopped"
 
   @spec start_link({Path.t(), Keyword.t()}) :: Supervisor.on_start() | no_return()
   def start_link({path, options}) do
@@ -92,22 +91,22 @@ defmodule Torrent do
   @spec has_hash?(hash()) :: boolean()
   def has_hash?(hash), do: !!GenServer.whereis(via(hash))
 
-  defdelegate add_peer(hash, peer_id, socket), to: __MODULE__.Swarm
+  defdelegate add_peer(hash, peer_id, reserved, socket), to: Swarm
 
-  defdelegate get(hash), to: __MODULE__.Server
+  defdelegate get(hash), to: Server
 
-  defdelegate torrent_downloaded?(hash), to: __MODULE__.Server
+  defdelegate torrent_downloaded?(hash), to: Server
 
-  defdelegate size(hash), to: __MODULE__.Server
+  defdelegate size(hash), to: Server
 
-  defdelegate new_peers(hash, list), to: __MODULE__.Server
+  defdelegate tracker_response(hash, list), to: Server
 
   @spec get_hash(pid()) :: Torrent.hash() | nil
   def get_hash(pid) do
-    with [{hash, _} | _] <- Registry.keys(Registry, pid) do
-      hash
-    else
-      _ -> 
+    case Registry.keys(Registry, pid) do
+      [{hash, _} | _] ->
+        hash
+      _ ->
         nil
     end
   end
@@ -126,18 +125,19 @@ defmodule Torrent do
 
   def init(torrent) do
     [
-      {__MODULE__.Bitfield, torrent},
-      {__MODULE__.PiecesStatistic, torrent},
-      {__MODULE__.FileHandle, torrent},
-      {__MODULE__.Uploader, torrent},
-      {__MODULE__.Swarm, torrent},
-      {__MODULE__.Downloads, torrent},
-      {__MODULE__.Server, torrent}
+      {Bitfield, torrent},
+      {PiecesStatistic, torrent},
+      {FileHandle, torrent},
+      {Uploader, torrent},
+      {Swarm, torrent},
+      {Downloads, torrent},
+      {Server, torrent}
     ]
     |> Supervisor.init(strategy: :one_for_all, max_restarts: 0)
   end
 
-  defp parse_file!(path) do
+  @spec parse_file!(Path.t()) :: t() | no_return()
+  def parse_file!(path) do
     struct =
       path
       |> File.read!()

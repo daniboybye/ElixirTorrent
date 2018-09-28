@@ -1,10 +1,10 @@
 defmodule PeerDiscovery.Controller.State do
-  defstruct peers: %{}, requests: %{}
+  defstruct dictionary: %{}, requests: %{}
 
   @type key :: Torrent.hash() | {Torrent.hash(), atom()}
 
   @type t :: %__MODULE__{
-          peers: %{required(Tracker.announce()) => %{required(Torrent.hash()) => list(Peer.t())}},
+          dictionary: map(), # map(hash => %{tiers: tiers, peers: peers})
           requests: %{required(reference()) => {Tracker.announce(), key()}}
         }
 end

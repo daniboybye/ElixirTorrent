@@ -1,21 +1,16 @@
-# Bittorrent
+Currently supported BEPs:
+BEP 03 - The BitTorrent Protocol Specification
+BEP 04 - Known Number Allocations
+BEP 06 - Fast Extension
+BEP 12 - Multitracker Metadata Extension
+BEP 15 - UDP Tracker Protocol
+BEP 20 - Peer ID Conventions
+BEP 23 - Tracker Returns Compact Peer Lists
+BEP 31 - Failure Retry Extension
 
-**TODO: Add description**
-
-## Installation
-
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `bittorrent` to your list of dependencies in `mix.exs`:
-
-```elixir
 def deps do
   [
     {:bittorrent, "~> 0.1.0"}
   ]
 end
-```
-
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at [https://hexdocs.pm/bittorrent](https://hexdocs.pm/bittorrent).
 

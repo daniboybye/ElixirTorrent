@@ -19,9 +19,9 @@ defmodule Tracker do
   def udp_connect_timeout(), do: @udp_connect_timeout
 
   @spec default_interval() :: pos_integer()
-  def default_interval(), do: 60 * 15
+  def default_interval(), do: 5 * 60
 
-  @spec request!(announce(), Torrent.t(), Peer.peer_id(), Acceptor.port_number(), key()) ::
+  @spec request!(announce(), Torrent.t(), Peer.id(), :inet.port_number(), key()) ::
           Response.t() | Error.t() | no_return()
   def request!(<<"http:", _::binary>> = announce, torrent, peer_id, port, key) do
     %{
@@ -34,7 +34,7 @@ defmodule Tracker do
       "left" => torrent.left,
       "event" => Torrent.event_to_string(torrent.event),
       "numwant" => numwant(torrent.left),
-      "key" => key,
+      #"key" => key,
       "ip" => Acceptor.ip_string()
     }
     |> URI.encode_query()
@@ -43,10 +43,13 @@ defmodule Tracker do
     |> Map.fetch!(:body)
     |> Bento.decode!()
     |> case do
-      %{"failure reason" => reason} ->
-        %Error{reason: reason}
+      %{"failure reason" => reason} = map ->
+        %Error{
+          reason: reason,
+          retry_in: Map.get(map, "retry in")
+        }
 
-      map when is_map(map) ->
+      map ->
         %Response{
           interval: Map.get(map, "interval", default_interval()),
           complete: Map.get(map, "complete", 0),
@@ -57,7 +60,11 @@ defmodule Tracker do
   end
 
   def request!(<<"udp:", _::binary>> = announce, torrent, peer_id, my_port, key) do
-    %URI{port: port, host: host} = URI.parse(announce)
+    %URI{port: port, host: host} =  
+      announce
+      |> URI.parse
+      |> Map.update!(:port, fn nil -> 6969
+                                x -> x end)
 
     {:ok, ip} =
       host
@@ -65,27 +72,35 @@ defmodule Tracker do
       |> :inet.getaddr(:inet)
 
     socket = Acceptor.open_udp()
-    with id when is_binary(id) <- PeerDiscovery.ConnectionIds.get(announce, socket, ip, port) do
-      udp_announce(socket, ip, port, id, torrent, peer_id, my_port, key)
-    else
+
+    case PeerDiscovery.connection_id(announce, socket, ip, port) do
       %Error{} = error ->
         error
+      id ->
+        udp_announce(socket, ip, port, id, torrent, peer_id, my_port, key)
     end
   end
 
-  @spec udp_connect(port(), :inet.ip_address(), Acceptor.port_number()) ::
+  @spec udp_connect(port(), :inet.ip_address(), :inet.port_number()) ::
           connection_id() | Error.t() | no_return()
   def udp_connect(socket, ip, port) do
-    do_udp_connect(socket, ip, port, 15)
+    generate_transaction_id()
+    |> do_udp_connect(socket, ip, port, 15)
   end
 
-  defp do_udp_connect(_, _, _, timeout) when timeout > @udp_connect_timeout do
+  @spec do_udp_connect(non_neg_integer(), port(), :inet.ip_address(), non_neg_integer(), pos_integer()) :: connection_id() | Error.t() | no_return()
+  defp do_udp_connect(_, _, _, _, timeout) when timeout > @udp_connect_timeout do
     %Error{reason: :timeout}
   end
 
-  defp do_udp_connect(socket, ip, port, timeout) do
-    transaction_id = generate_transaction_id()
-    :ok = :gen_udp.send(socket, ip, port, <<@udp_protocol_id::binary, @connect::binary, transaction_id::32>>)
+  defp do_udp_connect(transaction_id, socket, ip, port, timeout) do
+    :ok =
+      :gen_udp.send(
+        socket,
+        ip,
+        port,
+        <<@udp_protocol_id::binary, @connect::binary, transaction_id::32>>
+      )
 
     case :gen_udp.recv(socket, 0, timeout * 1_000) do
       {:ok, {^ip, ^port, <<@connect, ^transaction_id::32, connection_id::bytes-size(8)>>}} ->
@@ -95,27 +110,27 @@ defmodule Tracker do
         %Error{reason: reason}
 
       {:error, :timeout} ->
-        do_udp_connect(socket, ip, port, timeout * 2)
+        do_udp_connect(transaction_id, socket, ip, port, timeout * 2)
     end
   end
 
   @spec udp_announce(
           port(),
           :inet.ip_address(),
-          Acceptor.port_number(),
+          :inet.port_number(),
           connection_id(),
           Torrent.t(),
-          Peer.peer_id(),
-          Acceptor.port_number(),
+          Peer.id(),
+          :inet.port_number(),
           key()
         ) :: Response.t() | no_return()
   defp udp_announce(socket, ip, port, connection_id, torrent, peer_id, my_port, key) do
     transaction_id = generate_transaction_id()
 
     message =
-    <<connection_id::binary, @announce::binary, transaction_id::32, torrent.hash::binary, peer_id::binary,
-       torrent.downloaded::64, torrent.left::64, torrent.uploaded::64, torrent.event::32,
-        ip()::binary(), key::32, numwant(torrent.left)::32, my_port::16>>
+      <<connection_id::binary, @announce::binary, transaction_id::32, torrent.hash::binary,
+        peer_id::binary, torrent.downloaded::64, torrent.left::64, torrent.uploaded::64,
+        torrent.event::32, ip()::binary(), key::32, numwant(torrent.left)::32, my_port::16>>
 
     :ok = :gen_udp.send(socket, ip, port, message)
 
@@ -137,12 +152,17 @@ defmodule Tracker do
 
   @spec ip() :: <<_::32>>
   defp ip() do
-    with x when byte_size(x) != 4 <- Acceptor.ip_binary() do
-      <<0::32>>
+    Acceptor.ip_binary()
+    |> byte_size()
+    |> case do
+      4 ->
+        Acceptor.ip_binary()
+      _ ->
+        <<0::32>>
     end
   end
 
-  @doc """
+  @docmodule """
   scrape request:
   Offset          Size            Name            Value
   0               64-bit integer  connection_id
@@ -159,9 +179,9 @@ defmodule Tracker do
   12 + 12 * n 32-bit integer  completed
   16 + 12 * n 32-bit integer  leechers
   8 + 12 * N
-  """
+  
 
-  defp udp_scrape(socket, ip, port, connection_id, list) do
+  def udp_scrape(socket, ip, port, connection_id, list) do
     transaction_id = generate_transaction_id()
 
     :ok =
@@ -177,10 +197,11 @@ defmodule Tracker do
         %Error{reason: reason}
 
       {:ok, {^ip, ^port, <<@scrape, ^transaction_id::32, _::binary>>}} ->
-        #TODO
+        # TODO
         :ok
     end
   end
+"""
 
   defp to_peers(bin) when is_binary(bin) do
     Acceptor.ip()
@@ -194,8 +215,8 @@ defmodule Tracker do
   defp to_peers(list) when is_list(list) do
     Enum.map(
       list,
-      fn %{"peer id" => peer_id, "port" => port, "ip" => ip} ->
-        %Peer{peer_id: peer_id, port: port, ip: ip}
+      fn %{"peer id" => id, "port" => port, "ip" => ip} ->
+        %Peer{id: id, port: port, ip: ip}
       end
     )
   end
@@ -206,7 +227,7 @@ defmodule Tracker do
     [%Peer{port: port, ip: Enum.join([ip1, ip2, ip3, ip4], ".")} | res]
     |> do_parse_ipv4(bin)
   end
-  
+
   defp do_parse_ipv6(res, <<>>), do: res
 
   defp do_parse_ipv6(

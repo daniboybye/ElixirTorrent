@@ -21,13 +21,13 @@ defmodule Torrent.Bitfield do
   def get(hash), do: GenServer.call(via(hash), :get)
 
   @spec up(Torrent.hash(), Torrent.index()) :: :ok
-  def up(hash, index), do: GenServer.cast(via(hash), {1,index})
+  def up(hash, index), do: GenServer.cast(via(hash), {1, index})
 
   @spec down(Torrent.hash(), Torrent.index()) :: :ok
-  def down(hash, index), do: GenServer.cast(via(hash), {0,index})
+  def down(hash, index), do: GenServer.cast(via(hash), {0, index})
 
-  @spec check?(Torrent.hash(), Torrent.index()) :: boolean()
-  def check?(hash, index), do: GenServer.call(via(hash), index)
+  @spec have?(Torrent.hash(), Torrent.index()) :: boolean()
+  def have?(hash, index), do: GenServer.call(via(hash), index)
 
   def init(count), do: {:ok, __MODULE__.make(count)}
 

@@ -3,9 +3,9 @@ defmodule Bittorrent.MixProject do
 
   def project do
     [
-      app: :bittorrent,
+      app: :elixir_torrent,
       version: "0.1.0",
-      elixir: "~> 1.7.2",
+      elixir: "~> 1.7.3 ",
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]
@@ -15,7 +15,7 @@ defmodule Bittorrent.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      mod: {Bittorrent.Application, []}
+      mod: {ElixirTorrent, []}
     ]
   end
 

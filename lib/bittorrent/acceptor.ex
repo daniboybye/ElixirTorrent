@@ -1,12 +1,12 @@
 defmodule Acceptor do
   use Supervisor, type: :supervisor, start: {__MODULE__, :start_link, []}
 
-  @type port_number :: :inet.port_number()
+  alias __MODULE__.{ListenSocket, BlackList, Pool}
 
   @spec start_link() :: Supervisor.on_start()
   def start_link(), do: Supervisor.start_link(__MODULE__, nil)
 
-  defdelegate port(), to: __MODULE__.ListenSocket
+  defdelegate port(), to: ListenSocket
 
   @spec socket_options() :: list()
   def socket_options(), do: [:binary, active: false, reuseaddr: true]
@@ -17,8 +17,10 @@ defmodule Acceptor do
   @spec open_udp() :: port()
   def open_udp(), do: Enum.find_value(port_range(), &set_up/1)
 
+  @key :math.pow(2, 32) |> trunc() |> :rand.uniform() |> Kernel.-(1)
+
   @spec key() :: Tracker.key()
-  def key(), do: 4_203_128_992
+  def key(), do: @key
 
   @spec ip() :: tuple()
   def ip() do
@@ -54,13 +56,13 @@ defmodule Acceptor do
 
   def init(_) do
     [
-      __MODULE__.BlackList,
-      __MODULE__.Pool,
+      BlackList,
+      Pool,
       {
         Task.Supervisor,
         name: __MODULE__.Handshakes, strategy: :one_for_one, max_restarts: 0
       },
-      __MODULE__.ListenSocket
+      ListenSocket
     ]
     |> Supervisor.init(strategy: :one_for_one)
   end

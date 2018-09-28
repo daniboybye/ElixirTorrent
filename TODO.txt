@@ -1,0 +1,4 @@
+1. scrape request (UDP tracker protocol) is not implement
+2. handle suggest piece message
+3. handling "failure reason"        => "Overloaded",
+			"retry in"              => "5"

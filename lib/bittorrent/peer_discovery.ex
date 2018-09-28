@@ -1,15 +1,16 @@
 defmodule PeerDiscovery do
   use Supervisor, type: :supervisor, start: {__MODULE__, :start_link, []}
 
+  alias __MODULE__.{Controller, ConnectionIds}
+
   @spec start_link() :: Supervisor.on_start()
   def start_link(), do: Supervisor.start_link(__MODULE__, nil)
 
-  @spec peer_id() :: Peer.peer_id()
-  def peer_id(), do: "E0-1-0-DANIBOYBYE356"
+  defdelegate put(torrent, list), to: Controller
 
-  defdelegate request(torrent, list), to: __MODULE__.Controller
+  defdelegate get(key), to: Controller
 
-  defdelegate get(key), to: __MODULE__.Controller
+  defdelegate connection_id(announce, socket, ip, port), to: ConnectionIds, as: :get
 
   def init(_) do
     [
@@ -17,8 +18,8 @@ defmodule PeerDiscovery do
         Task.Supervisor,
         name: __MODULE__.Requests, strategy: :one_for_one, max_restarts: 0
       },
-      __MODULE__.ConnectionIds,
-      __MODULE__.Controller
+      ConnectionIds,
+      Controller
     ]
     |> Supervisor.init(strategy: :one_for_all)
   end
