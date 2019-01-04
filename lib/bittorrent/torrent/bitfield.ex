@@ -1,8 +1,6 @@
 defmodule Torrent.Bitfield do
   use GenServer
-
-  require Via
-  Via.make()
+  use Via
 
   @spec start_link(Torrent.t()) :: GenServer.on_start()
   def start_link(%Torrent{hash: hash, last_index: index}) do

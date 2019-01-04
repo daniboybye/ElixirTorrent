@@ -1,10 +1,8 @@
 defmodule Peer do
   use Supervisor, restart: :temporary, type: :supervisor
+  use Via
 
   alias __MODULE__.{Sender, Controller, Receiver}
-
-  require Via
-  Via.make()
 
   @type id :: <<_::160>>
   @type reserved :: <<_::64>>

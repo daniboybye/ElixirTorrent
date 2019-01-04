@@ -1,12 +1,10 @@
 defmodule Torrent do
   use Supervisor, type: :supervisor, restart: :transient
+  use Via
 
   require Logger
-  require Via
 
   alias __MODULE__.{Server, Swarm, Bitfield, PiecesStatistic, FileHandle, Uploader, Downloads}
-
-  Via.make()
 
   @compile {:inline, empty: 0, started: 0, completed: 0, stopped: 0, event_to_string: 1}
 
@@ -91,11 +89,11 @@ defmodule Torrent do
   @spec has_hash?(hash()) :: boolean()
   def has_hash?(hash), do: !!GenServer.whereis(via(hash))
 
-  defdelegate add_peer(hash, peer_id, reserved, socket), to: Swarm
+  defdelegate add_peer(hash, id, reserved, socket), to: Swarm
 
   defdelegate get(hash), to: Server
 
-  defdelegate torrent_downloaded?(hash), to: Server
+  defdelegate downloaded?(hash), to: Server
 
   defdelegate size(hash), to: Server
 
@@ -109,16 +107,6 @@ defmodule Torrent do
       _ ->
         nil
     end
-  end
-
-  def restart(hash) do
-    Registry.put_meta(
-      Registry,
-      {hash, :check},
-      true
-    )
-
-    Supervisor.stop(via(hash), :error)
   end
 
   def stop(hash), do: Supervisor.stop(via(hash))

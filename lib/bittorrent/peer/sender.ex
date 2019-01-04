@@ -1,13 +1,9 @@
 defmodule Peer.Sender do
   use GenServer
-
-  require Via
-  require Peer.Const
+  use Via
+  use Peer.Const
 
   @timeout 100_000
-
-  Via.make()
-  Peer.Const.message_id()
 
   @spec start_link({Peer.id, Torrent.hash(), port()}) :: GenServer.on_start()
   def start_link({id, hash, socket}) do

@@ -318,7 +318,8 @@ defmodule Peer.Controller.State do
 
     if not full_requests_queue?(state) and 
       (not state.choke_me or FastExtension.download?(state.fast_extension, index)) do
-      Downloads.request(state.hash, index, state.id)
+      pid = self()
+      Downloads.request(state.hash, index, state.id, &GenServer.cast(pid, {:request, [&1, &2, &3]}))
     end
 
     state

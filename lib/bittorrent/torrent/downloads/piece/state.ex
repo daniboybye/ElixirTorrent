@@ -19,7 +19,7 @@ defmodule Torrent.Downloads.Piece.State do
     requests: list(Request.t())
   }
 
-  @subpiece_length trunc(:math.pow(2, 14))
+  @subpiece_length Piece.max_length()
   @endgame_mode_pending_block 2
   @timeout_request 60_000
   @timeout_get_request 100_000
@@ -63,35 +63,35 @@ defmodule Torrent.Downloads.Piece.State do
     |> Enum.into(MapSet.new(), & &1.subpiece)
   end
 
-  @spec request(t(), Peer.id()) :: t()
-  def request(%__MODULE__{waiting: []} = state, _), do: state
+  @spec request(t(), Peer.id(), Piece.callback()) :: t()
+  def request(%__MODULE__{waiting: []} = state, _, _), do: state
 
-  def request(state, peer_id) do
+  def request(state, peer_id, callback) do
     state
     |> Map.update!(
       :monitoring, 
         &Map.put_new_lazy(&1, peer_id, 
       fn -> Process.monitor(Peer.whereis(state.hash, peer_id)) end)
     )
-    |> do_request(peer_id)
+    |> do_request(peer_id, callback)
   end
 
-  @spec do_request(t(), Peer.id()) :: t()
-  defp do_request(%__MODULE__{mode: :endgame} = state, peer_id) do
+  @spec do_request(t(), Peer.id(), Piece.callback()) :: t()
+  defp do_request(%__MODULE__{mode: :endgame} = state, peer_id, callback) do
     state.waiting
     |> Enum.take(@endgame_mode_pending_block)
     |> Enum.find_value(state,
         &state
         |> subpieces(peer_id)
         |> MapSet.member?(&1)
-        |> unless(do: new_request(state, %Request{
+        |> unless(do: new_request(state, callback, %Request{
           peer_id: peer_id,
           subpiece: &1
         }
     )))
   end
 
-  defp do_request(state, peer_id) do
+  defp do_request(state, peer_id, callback) do
     [subpiece | waiting] = state.waiting
     
     if Enum.empty?(waiting), do: Server.next_piece(state.hash)
@@ -109,7 +109,7 @@ defmodule Torrent.Downloads.Piece.State do
       | timer: unless(Enum.empty?(waiting), do: new_timer()),
         waiting: waiting
     }
-    |> new_request(request)
+    |> new_request(callback, request)
   end  
 
   @spec response(t(), Peer.id, Torrent.begin(), Torrent.block()) :: t()
@@ -210,11 +210,11 @@ defmodule Torrent.Downloads.Piece.State do
     end
   end
 
-  @spec new_request(t(), Request.t()) :: t()
-  defp new_request(state, request) do
+  @spec new_request(t(), Piece.callback(), Request.t()) :: t()
+  defp new_request(state, callback, request) do
     {begin, length} = request.subpiece
     
-    Peer.request(state.hash, request.peer_id, state.index, begin, length)
+    callback.(state.index, begin, length)
     
     Map.update!(state, :requests, &[request | &1])
   end

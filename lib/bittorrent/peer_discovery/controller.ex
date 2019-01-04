@@ -117,6 +117,13 @@ defmodule PeerDiscovery.Controller do
     request(new_state, {new_announce, hash})
   end
 
+  defp handle_response(nil, state, hash, announce) do
+      
+    {new_announce, new_state} = next_announce(state, hash, announce)
+    
+    request(new_state, {new_announce, hash})
+  end
+
   defp handle_response(%Tracker.Response{} = response, state, hash, announce) do
     #!!!
     Torrent.tracker_response(hash, response.peers)
@@ -135,6 +142,7 @@ defmodule PeerDiscovery.Controller do
 
   defp next_announce(state, hash, announce) do
     state.dictionary
+    |> Map.fetch!(hash)
     |> Map.fetch!(:tiers)
     |> Enum.drop_while(&not Enum.member?(&1, announce))
     |> (fn [x | y] -> {tl(Enum.drop_while(x, &announce != &1)), y} end).()

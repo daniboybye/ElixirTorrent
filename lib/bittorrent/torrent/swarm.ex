@@ -1,8 +1,6 @@
 defmodule Torrent.Swarm do
   use DynamicSupervisor
-
-  require Via
-  Via.make()
+  use Via
 
   @spec start_link(Torrent.t()) :: Supervisor.on_start()
   def start_link(%Torrent{hash: hash}) do
@@ -78,7 +76,8 @@ defmodule Torrent.Swarm do
   end
 
   defp each_childred(hash, fun) do
-    DynamicSupervisor.which_children(via(hash))
+    via(hash)
+    |> DynamicSupervisor.which_children()
     |> Enum.each(&(elem(&1, 1) |> fun.()))
   end
 end

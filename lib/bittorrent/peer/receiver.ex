@@ -1,14 +1,13 @@
 defmodule Peer.Receiver do
   use GenServer
+  use Peer.Const
 
-  require Peer.Const
   require Logger
 
   alias Peer.Controller
   alias Acceptor.{Pool, BlackList}
 
-  Peer.Const.message_id()
-  @max_length trunc(:math.pow(2, 14))
+  @max_length Torrent.Downloads.piece_max_length
 
   @doc """
   Receiver controls a :gen_tcp.socket 

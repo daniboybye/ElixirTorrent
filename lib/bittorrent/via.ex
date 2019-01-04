@@ -1,5 +1,5 @@
 defmodule Via do
-  defmacro make() do
+  defmacro __using__(_opts) do
     quote do
       defp via(key) do
         {:via, Registry, {Registry, {key, __MODULE__}}}

@@ -1,11 +1,9 @@
 defmodule Torrent.FileHandle do
   use GenServer
+  use Via
 
-  require Via
   require Logger
   alias Torrent.Bitfield
-
-  Via.make()
 
   @doc """
   FileHandle controls File.io_device() 
@@ -145,7 +143,10 @@ defmodule Torrent.FileHandle do
   end
 
   @spec modify_bitfield(boolean(), Torrent.hash(), Torrent.index()) :: boolean()
-  defp modify_bitfield(false, _, _), do: false
+  defp modify_bitfield(false, hash, index) do
+    Bitfield.down(hash, index)
+    false
+  end
   
   defp modify_bitfield(true, hash, index) do
     Bitfield.up(hash, index)

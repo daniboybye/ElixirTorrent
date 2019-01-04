@@ -1,15 +1,18 @@
 defmodule Torrent.Downloads.Piece do
   use GenServer, restart: :transient
+  use Via
 
-  require Via
   require Logger
-  Via.make()
 
   alias __MODULE__.State
   alias Torrent.{FileHandle, PiecesStatistic, Server}
 
   @type mode :: :endgame | nil
   @type args :: [index: Torrent.index(), hash: Torrent.hash(), length: Torrent.length()]
+  @type callback :: (Torrent.index(), Torrent.begin(), Torrent.length() -> any())
+
+  @max_length trunc(:math.pow(2, 14))
+  @compile {:inline, max_length: 0}
 
   @spec start_link(args()) :: GenServer.on_start()
   def start_link(args) do
@@ -23,14 +26,16 @@ defmodule Torrent.Downloads.Piece do
     )
   end
 
+  def max_length, do: @max_length
+
   @spec download(Torrent.hash(), Torrent.index(), mode()) :: :ok
   def download(hash, index, mode \\ nil) do
     GenServer.cast(key(index, hash), {:download, [mode]})
   end
 
-  @spec request(Torrent.hash(), Torrent.index(), Peer.id()) :: :ok
-  def request(hash, index, peer_id) do
-    GenServer.cast(key(index, hash), {:request, [peer_id]})
+  @spec request(Torrent.hash(), Torrent.index(), Peer.id(), callback()) :: :ok
+  def request(hash, index, peer_id, callback) do
+    GenServer.cast(key(index, hash), {:request, [peer_id, callback]})
   end
 
   @spec response(

@@ -1,8 +1,6 @@
 defmodule Torrent.PiecesStatistic do
   use GenServer, restart: :transient
-
-  require Via
-  Via.make()
+  use Via
 
   @type index :: Torrent.index() | nil
   @typep element :: {Torrent.index(), non_neg_integer() | :priority | {:allowed_fast, pos_integer()} }

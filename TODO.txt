@@ -2,3 +2,4 @@
 2. handle suggest piece message
 3. handling "failure reason"        => "Overloaded",
 			"retry in"              => "5"
+4. DHT

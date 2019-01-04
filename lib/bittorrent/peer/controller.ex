@@ -1,10 +1,8 @@
 defmodule Peer.Controller do
   use GenServer
+  use Via
 
-  require Via
   require Logger
-
-  Via.make()
 
   alias Acceptor.BlackList
   alias __MODULE__.{State, FastExtension}
@@ -61,6 +59,7 @@ defmodule Peer.Controller do
   @spec reset_rank(Peer.key()) :: :ok
   def reset_rank(key), do: GenServer.cast(via(key), {:reset_rank,[]})
 
+  @doc """
   @spec request(
           Torrent.hash(),
           Peer.id(),
@@ -73,6 +72,7 @@ defmodule Peer.Controller do
     |> via
     |> GenServer.cast({:request, [index, begin, length]})
   end
+  """
 
   @spec piece(Torrent.hash(), Peer.id(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
   def piece(hash, id, index, begin, block) do
@@ -189,8 +189,6 @@ defmodule Peer.Controller do
     #if fun == :handle_unchoke, do: Logger.info "unchoke"
     #if fun == :handle_piece, do: Logger.info "piece"
     case fun do
-      :handle_allowed_fast ->
-        Logger.info "allowed fast #{hd(args)}"
       :handle_suggest_piece -> 
         Logger.info "suggest piece"
       _ ->

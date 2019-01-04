@@ -24,10 +24,14 @@ defmodule Tracker do
   @spec request!(announce(), Torrent.t(), Peer.id(), :inet.port_number(), key()) ::
           Response.t() | Error.t() | no_return()
   def request!(<<"http:", _::binary>> = announce, torrent, peer_id, port, key) do
+    
+    #obfuscation = Keyword.get(options, :obfuscation, true)
+    
     %{
+      #"sha_ih" => :crypto.hash(:sha, torrent.hash)
       "info_hash" => torrent.hash,
       "peer_id" => peer_id,
-      "port" => port,
+      "port" => port,#obfuscation
       "compact" => 1,
       "uploaded" => torrent.uploaded,
       "downloaded" => torrent.downloaded,
@@ -35,7 +39,7 @@ defmodule Tracker do
       "event" => Torrent.event_to_string(torrent.event),
       "numwant" => numwant(torrent.left),
       #"key" => key,
-      "ip" => Acceptor.ip_string()
+      "ip" => Acceptor.ip_string()#obfuscation
     }
     |> URI.encode_query()
     |> (&<<announce::binary, "?", &1::binary>>).()

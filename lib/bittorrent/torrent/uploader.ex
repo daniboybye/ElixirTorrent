@@ -1,6 +1,5 @@
 defmodule Torrent.Uploader do
-  require Via
-  Via.make()
+  use Via
 
   alias Torrent.{FileHandle, Server}
 

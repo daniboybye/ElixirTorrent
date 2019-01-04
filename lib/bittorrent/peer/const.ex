@@ -1,5 +1,5 @@
 defmodule Peer.Const do
-  defmacro message_id() do
+  defmacro __using__(_opts) do
     quote do
       # Core Protocol
       @choke_id 0

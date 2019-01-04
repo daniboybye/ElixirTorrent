@@ -1,7 +1,7 @@
 defmodule Torrent.Server do
   use GenServer
-
-  require Via
+  use Via
+  
   require Logger
 
   @next_piece_timeout 3_000
@@ -10,15 +10,13 @@ defmodule Torrent.Server do
 
   alias Torrent.{Swarm, FileHandle, PiecesStatistic, Downloads}
 
-  Via.make()
-
   @spec start_link(Torrent.t()) :: GenServer.on_start()
   def start_link(torrent) do
     GenServer.start_link(__MODULE__, torrent, name: via(torrent.hash))
   end
 
-  @spec torrent_downloaded?(Torrent.hash()) :: boolean()
-  def torrent_downloaded?(hash) do
+  @spec downloaded?(Torrent.hash()) :: boolean()
+  def downloaded?(hash) do
     with pid when is_pid(pid) <- GenServer.whereis(via(hash)) do
       GenServer.call(pid, :torrent_downloaded?)
     end
@@ -66,9 +64,9 @@ defmodule Torrent.Server do
       |> elem(1)
       |> check(temp)
     
-    PeerDiscovery.put(torrent.hash, get_announce(torrent.struct))
     Process.send_after(self(), {:speed, torrent.downloaded, torrent.uploaded}, @speed_time)
-    {:noreply, torrent}
+
+    {:noreply, tracker_request(torrent)}
   end
 
   def handle_call(:torrent_download?, _, state) do
@@ -192,9 +190,20 @@ defmodule Torrent.Server do
     %Torrent{state | downloaded: n + length, left: m - length}
   end
 
-  defp get_announce(%{"announce-list" => x}), do: x
+  defp tracker_request(%Torrent{struct: %{"announce-list" => x}} = torrent) do
+    PeerDiscovery.put(torrent.hash, x)
+    torrent
+  end
   
-  defp get_announce(%{"announce" => x}), do: [[x]]
+  defp tracker_request(%Torrent{struct: %{"announce" => x}} = torrent) do
+    PeerDiscovery.put(torrent.hash, [[x]])
+    torrent
+  end
+
+  defp tracker_request(%Torrent{struct: %{"nodes" => nodes}} = torrent) do
+    Enum.map(nodes, fn [host, port] -> :ok end)
+    torrent
+  end
 
   defp check(false, x), do: x
 

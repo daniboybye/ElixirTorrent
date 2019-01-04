@@ -11,7 +11,7 @@ BEP 31 - Failure Retry Extension
 ```elixir  
 def deps do  
   [  
-    {:bittorrent, "~> 0.1.0"}  
+    {:elixir_torrent, "~> 0.1.0"}  
   ]  
 end  
 ```  
