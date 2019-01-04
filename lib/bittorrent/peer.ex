@@ -74,7 +74,7 @@ defmodule Peer do
     if key = get_key(pid), do: Controller.interested(key, index)
   end
 
-  defdelegate request(hash, id, index, begin, length), to: Controller
+  #defdelegate request(hash, id, index, begin, length), to: Controller
 
   defdelegate piece(hash, id, index, begin, block), to: Controller
 
