@@ -213,14 +213,11 @@ defmodule Peer.Controller.State do
     end
   end
 
-  @spec handle_piece(t(), Torrent.index(), Torrent.begin(), Torrent.block()) ::
+  @spec handle_piece(t(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           t() | {:error, :protocol_error, t()}
-  def handle_piece(state, index, begin, block) do
-    length = byte_size(block)
-
+  def handle_piece(state, index, begin, length) do
+    
     if member_request?(state, index, begin, length) do
-      Downloads.response(state.hash, index, state.id, begin, block)
-
       state
       |> Map.update!(:rank, &(&1 + length))
       |> delete_request(index, begin, length)

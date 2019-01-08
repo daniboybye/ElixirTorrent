@@ -3,3 +3,4 @@
 3. handling "failure reason"        => "Overloaded",
 			"retry in"              => "5"
 4. DHT
+5. solve: binary memory leak in Torrent.{Swarm, Downloads, Server, Bitfield}) 

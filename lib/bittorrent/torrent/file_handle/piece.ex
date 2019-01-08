@@ -8,6 +8,8 @@ defmodule Torrent.FileHandle.Piece do
 
   alias Torrent.{Bitfield, PiecesStatistic}
 
+  @timeout_hibernate 45 * 1_000
+
   # @spec start_link(Keyword.t()) :: GenServer.on_start()
   def start_link(key, piece) do
     GenServer.start_link(
@@ -55,18 +57,22 @@ defmodule Torrent.FileHandle.Piece do
 
   def handle_call(:check, _, piece) do
     block = do_read(piece.offset, piece.length, piece.files)
-    {:reply, piece.hash === :crypto.hash(:sha, block), piece}
+    res = piece.hash === :crypto.hash(:sha, block)
+    {:reply, res, piece, @timeout_hibernate}
   end
 
   def handle_call({:read, begin, length}, _, piece) do
     fun = fn -> do_read(piece.offset + begin, length, piece.files) end
-    {:reply, fun, piece}
+    {:reply, fun, piece, @timeout_hibernate}
   end
 
   def handle_cast({:write, begin, block}, piece) do
     do_write(piece.offset + begin, piece.files, block)
-    {:noreply, piece}
+    {:noreply, piece, @timeout_hibernate}
   end
+
+  def handle_info(:timeout, piece),
+  do: {:noreply, piece, :hibernate}
 
   defp do_read(offset, length, files, res \\ <<>>)
 

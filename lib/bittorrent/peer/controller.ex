@@ -7,7 +7,7 @@ defmodule Peer.Controller do
   alias Acceptor.BlackList
   alias __MODULE__.{State, FastExtension}
   alias Peer.Sender
-  alias Torrent.Uploader
+  alias Torrent.{Uploader, Downloads}
 
   import Peer, only: [make_key: 2, key_to_id: 1, key_to_hash: 1]
 
@@ -24,9 +24,8 @@ defmodule Peer.Controller do
   def have(key, index), do: GenServer.cast(via(key), {:have, [index]})
 
   @spec interested(Peer.key(), Torrent.index()) :: :ok
-  def interested(key, index) do
-    GenServer.cast(via(key), {:interested, [index]})
-  end
+  def interested(key, index), 
+  do: GenServer.cast(via(key), {:interested, [index]})
 
   @spec cancel(Torrent.hash(), Peer.id(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           :ok
@@ -99,7 +98,8 @@ defmodule Peer.Controller do
 
   @spec handle_piece(Peer.key(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
   def handle_piece(key, index, begin, block) do
-    GenServer.cast(via(key), {:handle_piece, [index, begin, block]})
+    Downloads.response(key_to_hash(key), index, key_to_id(key), begin, block)
+    GenServer.cast(via(key), {:handle_piece, [index, begin, byte_size(block)]})
   end
 
   @spec handle_cancel(Peer.key(), Torrent.index(), Torrent.begin(), Torrent.length()) :: :ok
@@ -151,9 +151,8 @@ defmodule Peer.Controller do
     {:ok, state}
   end
 
-  def terminate({:shutdown, :protocol_error}, state) do
-    BlackList.put(state.id)
-  end
+  def terminate({:shutdown, :protocol_error}, state), 
+  do: BlackList.put(state.id)
 
   def terminate(_, _), do: :ok
 
