@@ -23,13 +23,13 @@ defmodule Peer.Const do
       @allowed_fast_id 0x11
 
       # Additional IDs used in deployed clients: 
-      #@LTEP_Handshake_id 0x14
+      # @LTEP_Handshake_id 0x14
       # (implemented in libtorrent, uTorrent,...)
 
       # Hash Transfer Protocol
-      #@hash_request_id 0x15
-      #@hashed_id 0x16
-      #@hash_reject_id 0x17
+      # @hash_request_id 0x15
+      # @hashed_id 0x16
+      # @hash_reject_id 0x17
     end
   end
 end

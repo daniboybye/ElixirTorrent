@@ -7,14 +7,14 @@ defmodule Peer.Receiver do
   alias Peer.Controller
   alias Acceptor.{Pool, BlackList}
 
-  @max_length Torrent.Downloads.piece_max_length
+  @max_length Torrent.Downloads.piece_max_length()
 
   @doc """
   Receiver controls a :gen_tcp.socket 
   and do not need to be closed manually
   """
 
-  @spec start_link({Peer.id, Torrent.hash(), port()}) :: GenServer.on_start()
+  @spec start_link({Peer.id(), Torrent.hash(), port()}) :: GenServer.on_start()
   def start_link(args), do: GenServer.start_link(__MODULE__, args)
 
   def init({_id, _hash, socket} = args) do

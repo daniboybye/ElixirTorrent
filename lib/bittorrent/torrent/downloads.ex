@@ -1,7 +1,7 @@
 defmodule Torrent.Downloads do
   use DynamicSupervisor, restart: :transient, type: :supervisor
   use Via
-  
+
   alias __MODULE__.Piece
 
   @spec start_link(Torrent.t()) :: Supervisor.on_start()
@@ -12,15 +12,20 @@ defmodule Torrent.Downloads do
   @spec stop(Torrent.hash()) :: :ok
   def stop(hash), do: DynamicSupervisor.stop(via(hash))
 
-  @spec piece(Torrent.hash(), Torrent.index(), Torrent.length(), Piece.mode()) :: :ok
-  def piece(hash, index, length, mode \\ nil) do
-    
+  #@spec piece(Torrent.hash(), Torrent.index(), Torrent.length(), Piece.mode()) :: :ok
+  def piece(hash, index, length, downloaded, requests_are_dealt, mode \\ nil) do
     DynamicSupervisor.start_child(
       via(hash),
-      {Piece, [index: index, hash: hash, length: length]}
-    )
-
-    Piece.download(hash, index, mode)
+      {Piece, [index: index, hash: hash, length: length, downloaded: downloaded, requests_are_dealt: requests_are_dealt]}
+    ) |> case do
+    {:ok, pid} ->
+      pid
+    {:ok, pid, _} ->
+      pid
+    {:error, {:already_started, pid}} ->
+      pid
+    end
+    |> Piece.download(mode)
   end
 
   defdelegate piece_max_length, to: Piece, as: :max_length

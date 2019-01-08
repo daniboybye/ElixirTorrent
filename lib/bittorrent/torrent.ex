@@ -104,6 +104,7 @@ defmodule Torrent do
     case Registry.keys(Registry, pid) do
       [{hash, _} | _] ->
         hash
+
       _ ->
         nil
     end
@@ -112,9 +113,10 @@ defmodule Torrent do
   def stop(hash), do: Supervisor.stop(via(hash))
 
   def init(torrent) do
+    PiecesStatistic.init(torrent)
+
     [
       {Bitfield, torrent},
-      {PiecesStatistic, torrent},
       {FileHandle, torrent},
       {Uploader, torrent},
       {Swarm, torrent},

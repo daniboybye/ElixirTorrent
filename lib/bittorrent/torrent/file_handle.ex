@@ -24,17 +24,26 @@ defmodule Torrent.FileHandle do
     all_files = init_files(torrent.struct["info"])
     length = torrent.struct["info"]["piece length"]
     pieces_hash = torrent.struct["info"]["pieces"]
-    last_piece = make_piece(torrent.last_index, torrent.last_piece_length, all_files, torrent.hash, pieces_hash)
+
+    last_piece =
+      make_piece(
+        torrent.last_index,
+        torrent.last_piece_length,
+        all_files,
+        torrent.hash,
+        pieces_hash
+      )
 
     0..(torrent.last_index - 1)
     |> Enum.map(&make_piece(&1, length, all_files, torrent.hash, pieces_hash))
-    |> (&[ last_piece | &1]).()
+    |> (&[last_piece | &1]).()
     |> Enum.map(&{Piece, &1})
     |> Supervisor.init(strategy: :one_for_one)
   end
 
   defp make_piece(index, length, all_files, torrent_hash, pieces_hash) do
     {offset, files} = files_for_index(index, all_files, length)
+
     [
       key: Piece.key(torrent_hash, index),
       piece: %Piece{
@@ -42,7 +51,8 @@ defmodule Torrent.FileHandle do
         files: files,
         length: length,
         hash: binary_part(pieces_hash, index * 20, 20)
-    }]
+      }
+    ]
   end
 
   defp init_files(%{"files" => files}) do

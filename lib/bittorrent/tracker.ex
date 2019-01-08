@@ -24,22 +24,23 @@ defmodule Tracker do
   @spec request!(announce(), Torrent.t(), Peer.id(), :inet.port_number(), key()) ::
           Response.t() | Error.t() | no_return()
   def request!(<<"http:", _::binary>> = announce, torrent, peer_id, port, key) do
-    
-    #obfuscation = Keyword.get(options, :obfuscation, true)
-    
+    # obfuscation = Keyword.get(options, :obfuscation, true)
+
     %{
-      #"sha_ih" => :crypto.hash(:sha, torrent.hash)
+      # "sha_ih" => :crypto.hash(:sha, torrent.hash)
       "info_hash" => torrent.hash,
       "peer_id" => peer_id,
-      "port" => port,#obfuscation
+      # obfuscation
+      "port" => port,
       "compact" => 1,
       "uploaded" => torrent.uploaded,
       "downloaded" => torrent.downloaded,
       "left" => torrent.left,
       "event" => Torrent.event_to_string(torrent.event),
       "numwant" => numwant(torrent.left),
-      #"key" => key,
-      "ip" => Acceptor.ip_string()#obfuscation
+      # "key" => key,
+      # obfuscation
+      "ip" => Acceptor.ip_string()
     }
     |> URI.encode_query()
     |> (&<<announce::binary, "?", &1::binary>>).()
@@ -64,11 +65,13 @@ defmodule Tracker do
   end
 
   def request!(<<"udp:", _::binary>> = announce, torrent, peer_id, my_port, key) do
-    %URI{port: port, host: host} =  
+    %URI{port: port, host: host} =
       announce
-      |> URI.parse
-      |> Map.update!(:port, fn nil -> 6969
-                                x -> x end)
+      |> URI.parse()
+      |> Map.update!(:port, fn
+        nil -> 6969
+        x -> x
+      end)
 
     {:ok, ip} =
       host
@@ -80,6 +83,7 @@ defmodule Tracker do
     case PeerDiscovery.connection_id(announce, socket, ip, port) do
       %Error{} = error ->
         error
+
       id ->
         udp_announce(socket, ip, port, id, torrent, peer_id, my_port, key)
     end
@@ -92,7 +96,13 @@ defmodule Tracker do
     |> do_udp_connect(socket, ip, port, 15)
   end
 
-  @spec do_udp_connect(non_neg_integer(), port(), :inet.ip_address(), non_neg_integer(), pos_integer()) :: connection_id() | Error.t() | no_return()
+  @spec do_udp_connect(
+          non_neg_integer(),
+          port(),
+          :inet.ip_address(),
+          non_neg_integer(),
+          pos_integer()
+        ) :: connection_id() | Error.t() | no_return()
   defp do_udp_connect(_, _, _, _, timeout) when timeout > @udp_connect_timeout do
     %Error{reason: :timeout}
   end
@@ -161,51 +171,52 @@ defmodule Tracker do
     |> case do
       4 ->
         Acceptor.ip_binary()
+
       _ ->
         <<0::32>>
     end
   end
 
   @docmodule """
-  scrape request:
-  Offset          Size            Name            Value
-  0               64-bit integer  connection_id
-  8               32-bit integer  action          2 // scrape
-  12              32-bit integer  transaction_id
-  16 + 20 * n     20-byte string  info_hash
-  16 + 20 * N
+    scrape request:
+    Offset          Size            Name            Value
+    0               64-bit integer  connection_id
+    8               32-bit integer  action          2 // scrape
+    12              32-bit integer  transaction_id
+    16 + 20 * n     20-byte string  info_hash
+    16 + 20 * N
 
-  scrape response:
-  Offset      Size            Name            Value
-  0           32-bit integer  action          2 // scrape
-  4           32-bit integer  transaction_id
-  8 + 12 * n  32-bit integer  seeders
-  12 + 12 * n 32-bit integer  completed
-  16 + 12 * n 32-bit integer  leechers
-  8 + 12 * N
-  
+    scrape response:
+    Offset      Size            Name            Value
+    0           32-bit integer  action          2 // scrape
+    4           32-bit integer  transaction_id
+    8 + 12 * n  32-bit integer  seeders
+    12 + 12 * n 32-bit integer  completed
+    16 + 12 * n 32-bit integer  leechers
+    8 + 12 * N
+    
 
-  def udp_scrape(socket, ip, port, connection_id, list) do
-    transaction_id = generate_transaction_id()
+    def udp_scrape(socket, ip, port, connection_id, list) do
+      transaction_id = generate_transaction_id()
 
-    :ok =
-      :gen_udp.send(
-        socket,
-        ip,
-        port,
-        :binary.list_to_bin([connection_id, @scrape, transaction_id | list])
-      )
+      :ok =
+        :gen_udp.send(
+          socket,
+          ip,
+          port,
+          :binary.list_to_bin([connection_id, @scrape, transaction_id | list])
+        )
 
-    case :gen_udp.recv(socket, 0, @timeout) do
-      {:ok, {^ip, ^port, <<@error, ^transaction_id::32, reason::binary>>}} ->
-        %Error{reason: reason}
+      case :gen_udp.recv(socket, 0, @timeout) do
+        {:ok, {^ip, ^port, <<@error, ^transaction_id::32, reason::binary>>}} ->
+          %Error{reason: reason}
 
-      {:ok, {^ip, ^port, <<@scrape, ^transaction_id::32, _::binary>>}} ->
-        # TODO
-        :ok
+        {:ok, {^ip, ^port, <<@scrape, ^transaction_id::32, _::binary>>}} ->
+          # TODO
+          :ok
+      end
     end
-  end
-"""
+  """
 
   defp to_peers(bin) when is_binary(bin) do
     Acceptor.ip()

@@ -1,8 +1,14 @@
 defmodule Torrent.Downloads.Piece.State do
-  @enforce_keys [:index, :hash, :waiting]
-  defstruct [:index, :hash, :waiting, :timer, :mode, monitoring: %{}, requests: []]
+  @enforce_keys [:index, :hash, :waiting, :requests_are_dealt, :downloaded]
+  defstruct [:index, :hash, :waiting, :requests_are_dealt, :downloaded, :timer, :mode, monitoring: %{}, requests: []]
 
-  alias Torrent.{Downloads.Piece.Request, Downloads.Piece, Swarm, FileHandle, PiecesStatistic, Server}
+  alias Torrent.{
+    Downloads.Piece.Request,
+    Downloads.Piece,
+    Swarm,
+    FileHandle,
+    PiecesStatistic
+  }
 
   require Logger
 
@@ -10,14 +16,14 @@ defmodule Torrent.Downloads.Piece.State do
   @type waiting() :: list(Request.subpiece())
 
   @type t :: %__MODULE__{
-    index: Torrent.index(),
-    hash: Torrent.hash(),
-    waiting: waiting(),
-    timer: timer(),
-    mode: Piece.mode(),
-    monitoring: map(),
-    requests: list(Request.t())
-  }
+          index: Torrent.index(),
+          hash: Torrent.hash(),
+          waiting: waiting(),
+          timer: timer(),
+          mode: Piece.mode(),
+          monitoring: map(),
+          requests: list(Request.t())
+        }
 
   @subpiece_length Piece.max_length()
   @endgame_mode_pending_block 2
@@ -29,19 +35,22 @@ defmodule Torrent.Downloads.Piece.State do
   @spec make(Piece.args()) :: t()
   def make(args) do
     %__MODULE__{
-      index: Keyword.fetch!(args, :index), 
-      hash: Keyword.fetch!(args, :hash), 
-      waiting: make_subpieces([], Keyword.fetch!(args, :length), 0)
+      index: Keyword.fetch!(args, :index),
+      hash: Keyword.fetch!(args, :hash),
+      waiting: make_subpieces([], Keyword.fetch!(args, :length), 0),
+      requests_are_dealt: Keyword.fetch!(args, :requests_are_dealt),
+      downloaded: Keyword.fetch!(args, :downloaded)
     }
   end
 
   @spec download(t(), Piece.mode()) :: t()
   def download(%__MODULE__{waiting: []} = state, _) do
-    Server.next_piece(state.hash)
+    state.requests_are_dealt.()
     state
   end
 
   def download(state, mode) do
+    PiecesStatistic.set(state.hash, state.index, :processing)
     Swarm.interested(state.hash, state.index)
     %__MODULE__{state | mode: mode, timer: unless(mode, do: new_timer())}
   end
@@ -59,45 +68,48 @@ defmodule Torrent.Downloads.Piece.State do
   @spec subpieces(t(), Peer.id()) :: MapSet.t(Request.subpiece())
   def subpieces(state, peer_id) do
     state.requests
-    |> Enum.filter(& &1.peer_id == peer_id)
+    |> Enum.filter(&(&1.peer_id == peer_id))
     |> Enum.into(MapSet.new(), & &1.subpiece)
   end
 
-  @spec request(t(), Peer.id(), Piece.callback()) :: t()
+ # @spec request(t(), Peer.id(), Piece.callback()) :: t()
   def request(%__MODULE__{waiting: []} = state, _, _), do: state
 
   def request(state, peer_id, callback) do
     state
     |> Map.update!(
-      :monitoring, 
-        &Map.put_new_lazy(&1, peer_id, 
-      fn -> Process.monitor(Peer.whereis(state.hash, peer_id)) end)
+      :monitoring,
+      &Map.put_new_lazy(&1, peer_id, fn -> Process.monitor(Peer.whereis(state.hash, peer_id)) end)
     )
     |> do_request(peer_id, callback)
   end
 
-  @spec do_request(t(), Peer.id(), Piece.callback()) :: t()
+  #@spec do_request(t(), Peer.id(), Piece.callback()) :: t()
   defp do_request(%__MODULE__{mode: :endgame} = state, peer_id, callback) do
     state.waiting
     |> Enum.take(@endgame_mode_pending_block)
-    |> Enum.find_value(state,
-        &state
+    |> Enum.find_value(
+      state,
+      &(state
         |> subpieces(peer_id)
         |> MapSet.member?(&1)
-        |> unless(do: new_request(state, callback, %Request{
-          peer_id: peer_id,
-          subpiece: &1
-        }
-    )))
+        |> unless(
+          do:
+            new_request(state, callback, %Request{
+              peer_id: peer_id,
+              subpiece: &1
+            })
+        ))
+    )
   end
 
   defp do_request(state, peer_id, callback) do
     [subpiece | waiting] = state.waiting
-    
-    if Enum.empty?(waiting), do: Server.next_piece(state.hash)
-    
+
+    if Enum.empty?(waiting), do: state.requests_are_dealt.()
+
     cancel_timer(state.timer, :timeout)
-    
+
     request = %Request{
       peer_id: peer_id,
       timer: requests_timer(peer_id),
@@ -110,9 +122,9 @@ defmodule Torrent.Downloads.Piece.State do
         waiting: waiting
     }
     |> new_request(callback, request)
-  end  
+  end
 
-  @spec response(t(), Peer.id, Torrent.begin(), Torrent.block()) :: t()
+  @spec response(t(), Peer.id(), Torrent.begin(), Torrent.block()) :: t()
   def response(state, peer_id, begin, block) do
     length = byte_size(block)
     subpiece = {begin, length}
@@ -130,9 +142,8 @@ defmodule Torrent.Downloads.Piece.State do
         unless peer_id == request.peer_id do
           Peer.cancel(state.hash, request.peer_id, state.index, begin, length)
         end
-      end
-      )
-      
+      end)
+
       state = %__MODULE__{
         state
         | requests: requests,
@@ -140,7 +151,7 @@ defmodule Torrent.Downloads.Piece.State do
       }
 
       with %__MODULE__{mode: :endgame, waiting: []} <- state do
-        Server.next_piece(state.hash)
+        state.requests_are_dealt.()
         state
       end
     end
@@ -148,7 +159,7 @@ defmodule Torrent.Downloads.Piece.State do
 
   @spec reject(t(), Peer.id(), Torrent.begin(), Torrent.length()) :: t()
   def reject(state, peer_id, begin, length) do
-    {list, requests} = 
+    {list, requests} =
       Enum.split_with(state.requests, &(&1.subpiece == {begin, length} and &1.peer_id == peer_id))
 
     %__MODULE__{state | requests: requests}
@@ -157,24 +168,24 @@ defmodule Torrent.Downloads.Piece.State do
 
   @spec timeout(t(), Peer.id()) :: t()
   def timeout(state, peer_id) do
-    {list, requests} = Enum.split_with(state.requests, & &1.peer_id == peer_id)
-    
+    {list, requests} = Enum.split_with(state.requests, &(&1.peer_id == peer_id))
+
     %__MODULE__{state | requests: requests}
     |> do_reject(list)
   end
-  
+
   @spec down(t(), reference()) :: t()
   def down(state, ref) do
     {peer_id, new_state} = pop_in(state, [Access.key!(:monitoring), ref])
     timeout(new_state, peer_id)
   end
-  
-  @spec do_reject(t(),list(Request.t())) :: t()
+
+  @spec do_reject(t(), list(Request.t())) :: t()
   defp do_reject(state, requests) do
     if not Enum.empty?(requests) and Enum.empty?(state.waiting) and is_nil(state.mode) do
-      PiecesStatistic.make_priority(state.hash, state.index)
+      PiecesStatistic.set(state.hash, state.index, nil)
     end
-    
+
     Enum.each(requests, &cancel_request/1)
 
     Map.update!(
@@ -213,9 +224,9 @@ defmodule Torrent.Downloads.Piece.State do
   @spec new_request(t(), Piece.callback(), Request.t()) :: t()
   defp new_request(state, callback, request) do
     {begin, length} = request.subpiece
-    
+
     callback.(state.index, begin, length)
-    
+
     Map.update!(state, :requests, &[request | &1])
   end
 

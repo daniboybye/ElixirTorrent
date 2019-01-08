@@ -4,7 +4,8 @@ defmodule PeerDiscovery.Controller.State do
   @type key :: Torrent.hash() | {Torrent.hash(), atom()}
 
   @type t :: %__MODULE__{
-          dictionary: map(), # map(hash => %{tiers: tiers, peers: peers})
+          # map(hash => %{tiers: tiers, peers: peers})
+          dictionary: map(),
           requests: %{required(reference()) => {Tracker.announce(), key()}}
         }
 end

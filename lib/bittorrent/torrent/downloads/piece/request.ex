@@ -6,8 +6,8 @@ defmodule Torrent.Downloads.Piece.Request do
   @type subpiece :: {Torrent.begin(), Torrent.length()}
 
   @type t :: %__MODULE__{
-    peer_id: Peer.id(),
-    subpiece: subpiece(),
-    timer: timer()
-  }
+          peer_id: Peer.id(),
+          subpiece: subpiece(),
+          timer: timer()
+        }
 end

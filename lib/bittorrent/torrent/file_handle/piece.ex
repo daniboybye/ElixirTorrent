@@ -1,18 +1,18 @@
 defmodule Torrent.FileHandle.Piece do
-  defstruct [:hash, :offset, :files, :length]
   @enforce_keys [:hash, :offset, :files, :length]
-  #offset: offset from the beginning of the first file
-  
+  defstruct [:hash, :offset, :files, :length]
+  # offset: offset from the beginning of the first file
+
   use GenServer
   use Via
 
-  alias Torrent.Bitfield
+  alias Torrent.{Bitfield, PiecesStatistic}
 
-  #@spec start_link(Keyword.t()) :: GenServer.on_start()
+  # @spec start_link(Keyword.t()) :: GenServer.on_start()
   def start_link(key, piece) do
     GenServer.start_link(
-      __MODULE__, 
-      piece, 
+      __MODULE__,
+      piece,
       name: via(key)
     )
   end
@@ -20,9 +20,7 @@ defmodule Torrent.FileHandle.Piece do
   def child_spec(keyword) do
     key = {index, _} = Keyword.fetch!(keyword, :key)
     piece = Keyword.fetch!(keyword, :piece)
-    %{id: {__MODULE__, index},
-      start: {__MODULE__, :start_link, [key, piece]}
-    }
+    %{id: {__MODULE__, index}, start: {__MODULE__, :start_link, [key, piece]}}
   end
 
   def key(hash, index), do: {index, hash}
@@ -31,20 +29,26 @@ defmodule Torrent.FileHandle.Piece do
 
   @spec check?(Torrent.hash(), Torrent.index()) :: boolean()
   def check?(hash, index) do
-    flag = GenServer.call(vk(hash, index), :check, 5 * 60 * 1_000)
-    apply(Bitfield, if(flag, do: :up, else: :down), [hash, index])
+    if flag = GenServer.call(vk(hash, index), :check, 5 * 60 * 1_000) do
+      PiecesStatistic.set(hash, index, :complete)
+      Bitfield.up(hash, index)
+    else
+      PiecesStatistic.set(hash, index, nil)
+      Bitfield.down(hash, index)
+    end
+
     flag
   end
 
   @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           (() -> binary())
   def read(hash, index, begin, length) do
-    GenServer.call(vk(hash, index), {begin, length}, 2 * 60 * 1_000)
+    GenServer.call(vk(hash, index), {:read, begin, length}, 2 * 60 * 1_000)
   end
 
   @spec write(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
   def write(hash, index, begin, block) do
-    GenServer.cast(vk(hash, index), {begin, block})
+    GenServer.cast(vk(hash, index), {:write, begin, block})
   end
 
   def init(piece), do: {:ok, piece}
@@ -54,14 +58,12 @@ defmodule Torrent.FileHandle.Piece do
     {:reply, piece.hash === :crypto.hash(:sha, block), piece}
   end
 
-  #read
-  def handle_call({begin, length}, _, piece) do
+  def handle_call({:read, begin, length}, _, piece) do
     fun = fn -> do_read(piece.offset + begin, length, piece.files) end
     {:reply, fun, piece}
   end
 
-  #write
-  def handle_cast({begin, block}, piece) do
+  def handle_cast({:write, begin, block}, piece) do
     do_write(piece.offset + begin, piece.files, block)
     {:noreply, piece}
   end
@@ -80,9 +82,10 @@ defmodule Torrent.FileHandle.Piece do
   defp do_write(_, _, <<>>), do: :ok
 
   defp do_write(offset, [{pid, len} | files], bin) do
-    s = byte_size(bin)
-    n = min(s, len - offset)
-    :ok = :file.pwrite(pid, {:bof, offset}, binary_part(bin, 0, n))
-    do_write(0, files, binary_part(bin, n, s - n))
+    k = min(byte_size(bin), len - offset)
+    <<bytes_for_writing::bytes-size(k), bin::binary>> = bin
+
+    :ok = :file.pwrite(pid, {:bof, offset}, bytes_for_writing)
+    do_write(0, files, bin)
   end
 end

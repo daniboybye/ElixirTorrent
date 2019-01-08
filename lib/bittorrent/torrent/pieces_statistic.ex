@@ -1,152 +1,111 @@
 defmodule Torrent.PiecesStatistic do
-  use GenServer, restart: :transient
-  use Via
-
   @type index :: Torrent.index() | nil
-  @typep element :: {Torrent.index(), non_neg_integer() | :priority | {:allowed_fast, pos_integer()} }
+  @type status :: :allowed_fast | :complete | :processing | nil
+  @typep element :: {Torrent.index(), non_neg_integer(), status()}
 
-  @spec start_link(Torrent.t()) :: GenServer.on_start()
-  def start_link(%Torrent{hash: hash, last_index: index}) do
-    GenServer.start_link(__MODULE__, index, name: via(hash))
+  @the_rarest 7
+
+  @spec init(Torrent.t()) :: :ok
+  def init(%Torrent{hash: hash, last_index: count}) do
+    ref = :ets.new(nil, [:set, :public, keypos: 1, write_concurrency: true])
+    Registry.register(Registry, key(hash), ref)
+    true = :ets.insert(ref, Enum.map(0..count, &{&1, 0, nil}))
+    :ok
   end
 
-  @spec get_random(Torrent.hash()) :: index()
-  def get_random(hash), do: GenServer.call(via(hash), :random)
-
-  @spec get_rare(Torrent.hash()) :: index()
-  def get_rare(hash), do: GenServer.call(via(hash), :rare)
-
-  @spec make_zero(Torrent.hash(), Torrent.index()) :: :ok
-  def make_zero(hash, index) do
-    GenServer.cast(via(hash), {:make_zero, index})
+  @spec choice_piece(Torrent.hash(), :random | :rare) :: index()
+  def choice_piece(hash, :random) do
+    table_ref(hash)
+    |> :ets.select([
+      {{:"$0", :"$1", :"$2"},
+       [
+         {:andalso, {:>, :"$1", 0},
+          {:orelse, {:"=:=", :"$2", nil}, {:"=:=", :"$2", :allowed_fast}}}
+       ], [:"$0"]}
+    ])
+    |> (&unless(Enum.empty?(&1), do: Enum.random(&1))).()
   end
 
-  @spec make_priority(Torrent.hash(), Torrent.index()) :: :ok
-  def make_priority(hash, index) do
-    GenServer.cast(via(hash), {:make_priority, index})
-  end
-
-  @spec inc(Torrent.hash(), Torrent.index()) :: :ok
-  def inc(hash, index), do: GenServer.cast(via(hash), {:inc, index})
-
-  @spec inc_all(Torrent.hash()) :: :ok
-  def inc_all(hash), do: GenServer.cast(via(hash), :inc_all)
-
-  @spec update(Torrent.hash(), Torrent.bitfield(), non_neg_integer()) :: :ok
-  def update(hash, bitfield, size) do
-    GenServer.cast(via(hash), {:update, bitfield, size})
-  end
-
-  @spec allowed_fast(Torrent.hash(), Torrent.index()) :: :ok
-  def allowed_fast(hash, index) do
-    GenServer.cast(via(hash),{:allowed_fast, index})
-  end
-  
-  @spec delete(Torrent.hash(), Torrent.index()) :: :ok
-  def delete(hash, index) do
-    GenServer.cast(via(hash), {:delete, index})
-  end
-
-  @spec stop(Torrent.hash()) :: :ok
-  def stop(hash), do: GenServer.stop(via(hash))
-
-  def init(count), do: {:ok, Enum.into(0..count, %{}, &{&1, 0})}
-
-  def handle_call(_,_, x) when x == %{}, do: {:reply, nil, %{}}
-
-  def handle_call(:random, _, state), do: do_get(state, &random/1)
-
-  def handle_call(:rare, _, state), do: do_get(state, &rare/1)
-
-  # tuple > atom !!!
-  defp do_get(state, algorithm) do
-    state
-    |> Enum.shuffle
-    |> Enum.max
-    |> case do
-      {index, {:allowed_fast, _}} ->
-        index
-      {index, :priority} ->
-        index
-      {_, x} when is_integer(x) ->
-        state
-        |> Enum.reject(&(elem(&1, 1) == 0))
-        |> algorithm.()
-      end
-    |> (&{:reply, &1, Map.delete(state, &1)}).()
-  end
-
-  @spec random(list(element())) :: index()
-  defp random([]), do: nil
-
-  defp random(list), do: Enum.random(list) |> elem(0)
-
-  @spec rare(list(element())) :: index()
-  defp rare([]), do: nil
-
-  defp rare(list) do
-    list
-    |> List.keysort(1)
-    |> Enum.take(10)
-    |> random
-  end
-
-  def handle_cast({:delete, index}, state) do
-    {:noreply, Map.delete(state, index)}
-  end
-
-  def handle_cast({:update, bitfield, size}, state) do
-    {:noreply, do_update(state, 0, size, bitfield)}
-  end
-
-  def handle_cast({:inc, index}, state) do
-    {:noreply, do_inc(state, index)}
-  end
-
-  def handle_cast(:inc_all, state) do
-    {
-      :noreply,
-      Enum.into(state, %{}, fn
-        {k, v} when is_integer(v) -> {k, v + 1}
-        x -> x
-      end)
-    }
-  end
-
-  def handle_cast({:make_zero, index}, state) do
-    {:noreply, Map.put(state, index, 0)}
-  end
-
-  def handle_cast({:make_priority, index}, state) do
-    {:noreply, Map.put(state, index, :priority)}
-  end
-
-  def handle_cast({:allowed_fast, index}, state) do
-    case Map.get(state, index) do
+  def choice_piece(hash, :rare) do
+    case :ets.foldl(&choice_rare/2, nil, table_ref(hash)) do
       nil ->
-        {:noreply, state}
-      {:allowed_fast, x} ->
-        {:noreply, Map.put(state, index, {:allowed_fast, x+1})}
-      _ ->
-        {:noreply, Map.put(state, index, {:allowed_fast, 1})}
+        nil
+
+      {index, :allowed_fast} ->
+        index
+
+      list ->
+        list
+        |> Enum.random()
+        |> elem(0)
     end
   end
 
-  defp do_update(state, index, size, _) when index == size, do: state
-
-  defp do_update(state, index, size, <<1::1, tail::bits>>) do
-    state
-    |> do_inc(index)
-    |> do_update(index + 1, size, tail)
+  @spec set(Torrent.hash(), Torrent.index(), status()) :: :ok
+  def set(hash, index, status) do
+    true = :ets.update_element(table_ref(hash), index, {3, status})
+    :ok
   end
 
-  defp do_update(state, index, size, <<_::1, tail::bits>>) do
-    do_update(state, index + 1, size, tail)
+  @spec inc(Torrent.hash(), Torrent.index()) :: :ok
+  def inc(hash, index) do
+    update_counter(table_ref(hash), index)
+    :ok
   end
 
-  defp do_inc(state, index) do
-    with %{^index => x} when is_integer(x) <- state do
-      %{state | index => x + 1}
+  @spec update(Torrent.hash(), Torrent.bitfield(), non_neg_integer()) :: :ok
+  def update(hash, bitfield, size) do
+    indices_inc(bitfield, size, table_ref(hash))
+  end
+
+  @spec inc_all(Torrent.hash(), Torrent.index()) :: :ok
+  def inc_all(hash, last_index) do
+    ref = table_ref(hash)
+    Enum.each(0..last_index, &update_counter(ref, &1))
+  end
+
+  defp update_counter(ref, index) do
+    :ets.update_counter(ref, index, 1)
+  end
+
+  defp indices_inc(bin, size, ref, index \\ 0)
+
+  defp indices_inc(_, size, _, index) when size == index, do: :ok
+
+  defp indices_inc(<<x::1, bin::bits>>, size, ref, index) do
+    if x == 1, do: update_counter(ref, index)
+
+    indices_inc(bin, size, ref, index + 1)
+  end
+
+  defp key(hash), do: {hash, __MODULE__}
+
+  defp table_ref(hash) do
+    [{_pid, ref}] = Registry.lookup(Registry, key(hash))
+    ref
+  end
+
+  defp choice_rare(_, {_, :allowed_fast} = acc), do: acc
+
+  defp choice_rare({_, 0, _}, acc), do: acc
+
+  defp choice_rare({index, _, :allowed_fast}, _), do: {index, :allowed_fast}
+
+  defp choice_rare({_, _, status}, acc) when status in [:complete, :processing],
+    do: acc
+
+  defp choice_rare({index, n, _}, nil), do: [{index, n}]
+
+  defp choice_rare({index, n, _}, acc) do
+    list = [{index, n} | acc]
+
+    case Enum.count(acc) do
+      @the_rarest ->
+        maximum = Enum.max_by(list, &elem(&1, 1))
+        List.delete(list, maximum)
+
+      _ ->
+        list
     end
   end
 end

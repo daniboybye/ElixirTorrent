@@ -23,6 +23,7 @@ defmodule Bittorrent.MixProject do
   defp deps do
     [
       {:bento, "~> 0.9"},
+      {:recon, "~> 2.4"},
       {:logger_file_backend, "~> 0.0.10", github: "onkel-dirtus/logger_file_backend"},
       {:httpoison, "~> 1.1"},
       {:dialyxir, "~> 0.5", only: [:dev]},

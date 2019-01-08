@@ -5,7 +5,7 @@ defmodule Peer.Sender do
 
   @timeout 100_000
 
-  @spec start_link({Peer.id, Torrent.hash(), port()}) :: GenServer.on_start()
+  @spec start_link({Peer.id(), Torrent.hash(), port()}) :: GenServer.on_start()
   def start_link({id, hash, socket}) do
     GenServer.start_link(__MODULE__, socket, name: via(Peer.make_key(hash, id)))
   end

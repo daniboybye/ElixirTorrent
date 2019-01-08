@@ -20,7 +20,7 @@ defmodule PeerDiscovery.ConnectionIds do
     GenServer.call(
       __MODULE__,
       {announce, socket, ip, port},
-      2*60*60*1_000
+      2 * 60 * 60 * 1_000
     )
   end
 

@@ -1,10 +1,9 @@
 defmodule Peer.Controller.State do
-  
   alias Torrent.{Bitfield, PiecesStatistic, Uploader, Downloads}
-  alias Peer.{Sender}
-  alias Peer.Controller.FastExtension
+  alias Peer.{Sender, Controller.FastExtension}
 
-  import Peer, only: [make_key: 2]#, key_to_id: 1, key_to_hash: 1
+  require Logger
+  import Peer, only: [make_key: 2]
 
   @enforce_keys [:hash, :id, :fast_extension, :status, :pieces_count, :socket]
   defstruct [
@@ -45,11 +44,11 @@ defmodule Peer.Controller.State do
 
   @max_unanswered_requests 5
 
-  @spec key(t()) :: Peer.key() 
+  @spec key(t()) :: Peer.key()
   def key(state), do: make_key(state.hash, state.id)
 
-  @spec rank(t()) :: rank() 
-  def rank(state) do 
+  @spec rank(t()) :: rank()
+  def rank(state) do
     if state.interested_of_me, do: {state.rank, state.id}
   end
 
@@ -63,6 +62,7 @@ defmodule Peer.Controller.State do
     case state.bitfield do
       <<_::bits-size(index), 1::1, _::bits>> ->
         true
+
       _ ->
         false
     end
@@ -100,12 +100,11 @@ defmodule Peer.Controller.State do
   def first_message(%__MODULE__{fast_extension: %FastExtension{}} = state, 0) do
     Sender.have_none(key(state))
   end
-      
+
   def first_message(state, _), do: Sender.bitfield(key(state))
 
   @spec cancel(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
   def cancel(state, index, begin, length) do
-
     if member_request?(state, index, begin, length) do
       Sender.cancel(key(state), index, begin, length)
     end
@@ -117,7 +116,7 @@ defmodule Peer.Controller.State do
 
   @spec request(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
   def request(state, index, begin, length) do
-    
+
     unless member_request?(state, index, begin, length) do
       Sender.request(key(state), index, begin, length)
     end
@@ -132,11 +131,11 @@ defmodule Peer.Controller.State do
 
   def seed(state) do
     if state.interested, do: Sender.not_interested(key(state))
-    
+
     %__MODULE__{state | bitfield: nil, status: :seed, interested: false}
   end
 
-  @spec upload(t(),Torrent.length()) :: t()
+  @spec upload(t(), Torrent.length()) :: t()
   def upload(%__MODULE__{status: :seed} = state, n) do
     Map.update!(state, :rank, &(&1 + n))
   end
@@ -164,7 +163,7 @@ defmodule Peer.Controller.State do
   end
 
   @spec handle_have(t(), Torrent.index()) :: t() | {:error, :protocol_error, t()}
-  def handle_have(%__MODULE__{bitfield: :all} = state, _) do 
+  def handle_have(%__MODULE__{bitfield: :all} = state, _) do
     {:error, :protocol_error, state}
   end
 
@@ -177,16 +176,19 @@ defmodule Peer.Controller.State do
     PiecesStatistic.inc(state.hash, index)
 
     state
-    |> Map.update!(:bitfield, 
-    fn <<prefix::bits-size(index), _::1, postfix::bits>> ->
-      <<prefix::bits, 1::1, postfix::bits>>
-    end)
+    |> Map.update!(
+      :bitfield,
+      fn <<prefix::bits-size(index), _::1, postfix::bits>> ->
+        <<prefix::bits, 1::1, postfix::bits>>
+      end
+    )
     |> check_interested()
   end
 
   @spec handle_bitfield(t(), bitfield()) :: t() | {:error, :protocol_error, t()}
   def handle_bitfield(%__MODULE__{bitfield: x} = state, _)
-      when not is_nil(x), do: {:error, :protocol_error, state}
+      when not is_nil(x),
+      do: {:error, :protocol_error, state}
 
   def handle_bitfield(%__MODULE__{status: :seed} = x, _), do: x
 
@@ -197,10 +199,10 @@ defmodule Peer.Controller.State do
     |> check_interested()
   end
 
-  @spec handle_request(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t() | {:error, :protocol_error, t()} 
+  @spec handle_request(t(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
+          t() | {:error, :protocol_error, t()}
   def handle_request(state, index, begin, length) do
     if index < state.pieces_count and Bitfield.have?(state.hash, index) do
-      
       if not state.choke or FastExtension.upload?(state.fast_extension, index) do
         Uploader.request(state.hash, state.id, index, begin, length)
       end
@@ -211,7 +213,8 @@ defmodule Peer.Controller.State do
     end
   end
 
-  @spec handle_piece(t(), Torrent.index(), Torrent.begin(), Torrent.block()) :: t() | {:error, :protocol_error, t()}
+  @spec handle_piece(t(), Torrent.index(), Torrent.begin(), Torrent.block()) ::
+          t() | {:error, :protocol_error, t()}
   def handle_piece(state, index, begin, block) do
     length = byte_size(block)
 
@@ -219,7 +222,7 @@ defmodule Peer.Controller.State do
       Downloads.response(state.hash, index, state.id, begin, block)
 
       state
-      |> Map.update!(:rank, & &1 + length)
+      |> Map.update!(:rank, &(&1 + length))
       |> delete_request(index, begin, length)
       |> make_request
     else
@@ -227,27 +230,25 @@ defmodule Peer.Controller.State do
     end
   end
 
-
-
   # DHT
   @spec handle_port(t(), non_neg_integer()) :: t()
   def handle_port(x, _port), do: x
 
-  #FastExtansionMessage begin
+  # FastExtansionMessage begin
 
   @spec handle_have_all(t()) :: t() | {:error, :two_seeds | :protocol_error, t()}
   def handle_have_all(%__MODULE__{bitfield: x} = state) when not is_nil(x) do
     {:error, :protocol_error, state}
   end
-  
+
   def handle_have_all(%__MODULE__{status: :seed} = x), do: {:error, :two_seeders, x}
 
-  def handle_have_all(state) do 
-    PiecesStatistic.inc_all(state.hash)
-    
+  def handle_have_all(state) do
+    PiecesStatistic.inc_all(state.hash, state.pieces_count - 1)
+
     %__MODULE__{state | bitfield: :all}
     |> check_interested
-  end 
+  end
 
   @spec handle_have_none(t()) :: t() | {:error, :protocol_error, t()}
   def handle_have_none(%__MODULE__{bitfield: x} = state) when not is_nil(x) do
@@ -261,10 +262,10 @@ defmodule Peer.Controller.State do
 
   def handle_have_none(state), do: %__MODULE__{state | bitfield: :none}
 
-  @spec handle_reject(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t() | {:error, :protocol_error, t()}
+  @spec handle_reject(t(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
+          t() | {:error, :protocol_error, t()}
   def handle_reject(state, index, begin, length) do
     if member_request?(state, index, begin, length) do
-      
       Downloads.reject(state.hash, index, state.id, begin, length)
 
       state
@@ -275,7 +276,7 @@ defmodule Peer.Controller.State do
     end
   end
 
-  #TODO
+  # TODO
   @spec handle_suggest_piece(t(), Torrent.index()) :: t()
   def handle_suggest_piece(state, _index) do
     state
@@ -283,12 +284,14 @@ defmodule Peer.Controller.State do
 
   @spec handle_allowed_fast(t(), Torrent.index()) :: t()
   def handle_allowed_fast(state, index) do
-    PiecesStatistic.allowed_fast(state.hash, index)
-    
+    unless Bitfield.have?(state.hash, index) do
+      PiecesStatistic.set(state.hash, index, :allowed_fast)
+    end
+
     state
-    |> update_in( 
+    |> update_in(
       [Access.key!(:fast_extension), Access.key!(:allowed_fast_me)],
-      &MapSet.put(&1, index)  
+      &MapSet.put(&1, index)
     )
     |> make_request
   end
@@ -298,28 +301,31 @@ defmodule Peer.Controller.State do
     {:ok, {addr, _port}} = :inet.sockname(state.socket)
 
     set = AllowedFast.set(addr, state.hash, state.pieces_count)
-    
+
     Enum.each(set, &Sender.allowed_fast(key(state), &1))
 
     put_in(
-      state, 
+      state,
       [Access.key!(:fast_extension), Access.key!(:allowed_fast)],
       set
     )
   end
 
-  #FastExtansionMessage end
+  # FastExtansionMessage end
 
   @spec make_request(t()) :: t()
-  defp make_request(
-    %__MODULE__{interested: true, status: index} = state
-  )
-  when is_integer(index) do
-
-    if not full_requests_queue?(state) and 
-      (not state.choke_me or FastExtension.download?(state.fast_extension, index)) do
+  defp make_request(%__MODULE__{interested: true, status: index} = state)
+       when is_integer(index) do
+    if not full_requests_queue?(state) and
+         (not state.choke_me or FastExtension.download?(state.fast_extension, index)) do
       pid = self()
-      Downloads.request(state.hash, index, state.id, &GenServer.cast(pid, {:request, [&1, &2, &3]}))
+
+      Downloads.request(
+        state.hash,
+        index,
+        state.id,
+        &GenServer.cast(pid, {:request, [&1, &2, &3]})
+      )
     end
 
     state
@@ -347,17 +353,17 @@ defmodule Peer.Controller.State do
 
   @spec put_request(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
   defp put_request(state, index, begin, length) do
-    Map.update!(state, :requests, &MapSet.put(&1, subpiece(index,begin,length)))
+    Map.update!(state, :requests, &MapSet.put(&1, subpiece(index, begin, length)))
   end
 
   @spec delete_request(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
   defp delete_request(state, index, begin, length) do
-    Map.update!(state, :requests, &MapSet.delete(&1, subpiece(index,begin,length)))
+    Map.update!(state, :requests, &MapSet.delete(&1, subpiece(index, begin, length)))
   end
 
   @spec member_request?(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: boolean()
   defp member_request?(state, index, begin, length) do
-    MapSet.member?(state.requests, subpiece(index,begin,length))
+    MapSet.member?(state.requests, subpiece(index, begin, length))
   end
 
   @spec full_requests_queue?(t()) :: boolean()

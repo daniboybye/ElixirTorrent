@@ -13,7 +13,7 @@ defmodule Peer do
   @reserved <<0, 0, 0, 0, 0, 0, 0, 4>>
   @id_length 20
   @id <<ElixirTorrent.version()::binary, "-",
-             :crypto.strong_rand_bytes(@id_length - byte_size(ElixirTorrent.version()) - 1)::binary>>
+        :crypto.strong_rand_bytes(@id_length - byte_size(ElixirTorrent.version()) - 1)::binary>>
 
   @enforce_keys [:ip, :port]
   defstruct [:ip, :port, id: nil]
@@ -51,6 +51,7 @@ defmodule Peer do
     case Registry.keys(Registry, pid) do
       [{key, _} | _] ->
         key
+
       [] ->
         nil
     end
@@ -61,7 +62,7 @@ defmodule Peer do
     hash
     |> make_key(id)
     |> via
-    |> GenServer.whereis
+    |> GenServer.whereis()
   end
 
   @spec have(pid(), Torrent.index()) :: :ok | nil
@@ -74,16 +75,16 @@ defmodule Peer do
     if key = get_key(pid), do: Controller.interested(key, index)
   end
 
-  #defdelegate request(hash, id, index, begin, length), to: Controller
+  # defdelegate request(hash, id, index, begin, length), to: Controller
 
   defdelegate piece(hash, id, index, begin, block), to: Controller
 
   defdelegate cancel(hash, id, index, begin, length), to: Controller
-  
+
   defdelegate choke(hash, id), to: Controller
-  
+
   defdelegate unchoke(hash, id), to: Controller
-  
+
   @spec reset_rank(pid()) :: :ok | nil
   def reset_rank(pid) do
     if key = get_key(pid), do: Controller.reset_rank(key)
@@ -108,10 +109,10 @@ defmodule Peer do
   def make_key(hash, id), do: {id, hash}
 
   @spec key_to_id(key()) :: id()
-  def key_to_id({id,_}), do: id
+  def key_to_id({id, _}), do: id
 
   @spec key_to_hash(key()) :: Torrent.hash()
-  def key_to_hash({_,hash}), do: hash
+  def key_to_hash({_, hash}), do: hash
 
   def init(args) do
     [

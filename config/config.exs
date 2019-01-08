@@ -1,6 +1,7 @@
 use Mix.Config
 
-config :logger, backends: [{LoggerFileBackend, :info}, {LoggerFileBackend, :error}, {LoggerFileBackend, :warn}]
+config :logger,
+  backends: [{LoggerFileBackend, :info}, {LoggerFileBackend, :error}, {LoggerFileBackend, :warn}]
 
 config :logger, :info,
   path: "info.log",
