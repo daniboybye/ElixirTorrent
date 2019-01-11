@@ -1,101 +1,84 @@
 defmodule Peer.Receiver do
-  use GenServer
+  use Task, restart: :permanent
   use Peer.Const
 
   require Logger
 
-  alias Peer.Controller
-  alias Acceptor.{Pool, BlackList}
+  import Peer.Controller
 
   @max_length Torrent.Downloads.piece_max_length()
 
-  @doc """
-  Receiver controls a :gen_tcp.socket 
-  and do not need to be closed manually
-  """
+  def start_link(args), do: Task.start_link(__MODULE__, :run, args)
 
-  @spec start_link({Peer.id(), Torrent.hash(), port()}) :: GenServer.on_start()
-  def start_link(args), do: GenServer.start_link(__MODULE__, args)
+  def run(hash, id, socket) do
+    case reason = loop(socket, Peer.make_key(hash, id)) do
+      :protocol_error ->
+        Acceptor.malicious_peer(id)
 
-  def init({_id, _hash, socket} = args) do
-    :ok = Pool.remove_control(socket)
-    {:ok, nil, {:continue, args}}
+      {:error, x} ->
+        x
+    end
+
+    {:shutdown, reason}
   end
 
-  def terminate({:shutdown, :protocol_error}, id), do: BlackList.put(id)
+  defp recv_msg(_, 0), do: {:ok, <<>>}
 
-  def terminate(_, _), do: :ok
-
-  def handle_continue({id, hash, socket}, nil) do
-    {:stop, {:shutdown, loop(socket, Peer.make_key(hash, id))}, id}
-  end
-
-  defp get_message(_, 0), do: {:ok, <<>>}
-
-  defp get_message(socket, len) do
-    :gen_tcp.recv(socket, len, 70_000)
-  end
+  defp recv_msg(socket, len),
+    do: :gen_tcp.recv(socket, len, 120_000)
 
   defp loop(socket, key) do
-    with {:ok, <<len::32>>} <- :gen_tcp.recv(socket, 4, 130_000),
-         {:ok, message} <- get_message(socket, len),
-         :ok <- handle(message, key) do
-      loop(socket, key)
-    end
+    with {:ok, <<len::32>>} <- :gen_tcp.recv(socket, 4, 120_000),
+         {:ok, message} <- recv_msg(socket, len),
+         :ok <- parse(message, key),
+         do: loop(socket, key)
   end
 
-  defp handle(<<>>, _), do: :ok
+  defp parse(<<>>, _), do: :ok
 
-  defp handle(<<@choke_id>>, key), do: Controller.handle_choke(key)
+  defp parse(@choke_id, key), do: handle_choke(key)
 
-  defp handle(<<@unchoke_id>>, key), do: Controller.handle_unchoke(key)
+  defp parse(@unchoke_id, key), do: handle_unchoke(key)
 
-  defp handle(<<@interested_id>>, key), do: Controller.handle_interested(key)
+  defp parse(@interested_id, key), do: handle_interested(key)
 
-  defp handle(<<@not_interested_id>>, key) do
-    Controller.handle_not_interested(key)
-  end
+  defp parse(@not_interested_id, key),
+    do: handle_not_interested(key)
 
-  defp handle(<<@have_id, index::32>>, key) do
-    Controller.handle_have(key, index)
-  end
+  defp parse(<<@have_id, index::32>>, key),
+    do: handle_have(key, index)
 
-  defp handle(<<@have_all_id>>, key), do: Controller.handle_have_all(key)
+  defp parse(@have_all_id, key), do: handle_have_all(key)
 
-  defp handle(<<@have_none_id>>, key), do: Controller.handle_have_none(key)
+  defp parse(@have_none_id, key), do: handle_have_none(key)
 
-  defp handle(<<@bitfield_id, bitfield::binary>>, key) do
-    Controller.handle_bitfield(key, bitfield)
-  end
+  defp parse(<<@bitfield_id, bitfield::binary>>, key),
+    do: handle_bitfield(key, bitfield)
 
-  defp handle(<<@request_id, index::32, begin::32, length::32>>, key)
-       when length <= @max_length do
-    Controller.handle_request(key, index, begin, length)
-  end
+  defp parse(<<@request_id, _::32, _::32, length::32>>, _)
+       when length > @max_length,
+       do: :protocol_error
 
-  defp handle(<<@piece_id, index::32, begin::32, block::binary>>, key) do
-    Controller.handle_piece(key, index, begin, block)
-  end
+  defp parse(<<@request_id, index::32, begin::32, length::32>>, key),
+    do: handle_request(key, index, begin, length)
 
-  defp handle(<<@cancel_id, index::32, begin::32, length::32>>, key) do
-    Controller.handle_cancel(key, index, begin, length)
-  end
+  defp parse(<<@piece_id, index::32, begin::32, block::binary>>, key),
+    do: handle_piece(key, index, begin, block)
 
-  defp handle(<<@port_id, port::16>>, key) do
-    Controller.handle_port(key, port)
-  end
+  defp parse(<<@cancel_id, index::32, begin::32, length::32>>, key),
+    do: handle_cancel(key, index, begin, length)
 
-  defp handle(<<@suggest_piece_id, index::32>>, key) do
-    Controller.handle_suggest_piece(key, index)
-  end
+  defp parse(<<@port_id, port::16>>, key),
+    do: handle_port(key, port)
 
-  defp handle(<<@reject_request_id, index::32, begin::32, length::32>>, key) do
-    Controller.handle_reject(key, index, begin, length)
-  end
+  defp parse(<<@suggest_piece_id, index::32>>, key),
+    do: handle_suggest_piece(key, index)
 
-  defp handle(<<@allowed_fast_id, index::32>>, key) do
-    Controller.handle_allowed_fast(key, index)
-  end
+  defp parse(<<@reject_request_id, index::32, begin::32, len::32>>, key),
+    do: handle_reject(key, index, begin, len)
 
-  defp handle(_, _), do: :ok
+  defp parse(<<@allowed_fast_id, index::32>>, key),
+    do: handle_allowed_fast(key, index)
+
+  defp parse(_, _), do: :protocol_error
 end

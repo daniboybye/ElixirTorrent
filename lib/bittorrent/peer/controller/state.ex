@@ -116,7 +116,6 @@ defmodule Peer.Controller.State do
 
   @spec request(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
   def request(state, index, begin, length) do
-
     unless member_request?(state, index, begin, length) do
       Sender.request(key(state), index, begin, length)
     end
@@ -204,7 +203,15 @@ defmodule Peer.Controller.State do
   def handle_request(state, index, begin, length) do
     if index < state.pieces_count and Bitfield.have?(state.hash, index) do
       if not state.choke or FastExtension.upload?(state.fast_extension, index) do
-        Uploader.request(state.hash, state.id, index, begin, length)
+        pid = self()
+        sender_key = key(state)
+
+        callback = fn block ->
+          Sender.piece(sender_key, index, begin, block)
+          GenServer.cast(pid, {:upload, [byte_size(block)]})
+        end
+
+        Uploader.request(state.hash, state.id, index, begin, length, callback)
       end
 
       state
@@ -216,7 +223,6 @@ defmodule Peer.Controller.State do
   @spec handle_piece(t(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           t() | {:error, :protocol_error, t()}
   def handle_piece(state, index, begin, length) do
-    
     if member_request?(state, index, begin, length) do
       state
       |> Map.update!(:rank, &(&1 + length))

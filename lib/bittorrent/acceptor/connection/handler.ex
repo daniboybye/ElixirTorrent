@@ -1,15 +1,13 @@
-defmodule Acceptor.ListenSocket do
-  use GenServer, start: {__MODULE__, :start_link, []}
+defmodule Acceptor.Connection.Handler do
+  use GenServer, start: {GenServer, :start_link, [__MODULE__, nil, [name: __MODULE__]]}
 
+  alias Acceptor.Connection.Handshakes
   require Logger
 
   @doc """
   ListenSocket controls a :gen_tcp.listen 
   and do not need to be closed manually
   """
-
-  @spec start_link() :: GenServer.on_start()
-  def start_link(), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
   @spec port() :: :inet.port_number()
   def port(), do: GenServer.call(__MODULE__, :port)
@@ -32,15 +30,12 @@ defmodule Acceptor.ListenSocket do
   defp loop(socket) do
     {:ok, client} = :gen_tcp.accept(socket)
     Logger.info("new client")
-    Acceptor.Pool.give_control(client)
-    Acceptor.recv(client)
+    Handshakes.recv(client)
     loop(socket)
   end
 
   defp set_up(number) do
-    number
-    |> :gen_tcp.listen(Acceptor.socket_options())
-    |> case do
+    case :gen_tcp.listen(number, Acceptor.socket_options()) do
       {:ok, socket} ->
         socket
 

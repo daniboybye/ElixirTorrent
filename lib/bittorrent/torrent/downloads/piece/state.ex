@@ -1,13 +1,23 @@
 defmodule Torrent.Downloads.Piece.State do
-  @enforce_keys [:index, :hash, :waiting, :requests_are_dealt, :downloaded]
-  defstruct [:index, :hash, :waiting, :requests_are_dealt, :downloaded, :timer, :mode, monitoring: %{}, requests: []]
+  @enforce_keys [:index, :hash, :waiting]
+  defstruct [
+    :index,
+    :hash,
+    :waiting,
+    :requests_are_dealt,
+    :downloaded,
+    :timer,
+    :mode,
+    monitoring: %{},
+    requests: []
+  ]
 
   alias Torrent.{
     Downloads.Piece.Request,
     Downloads.Piece,
-    Swarm,
     FileHandle,
-    PiecesStatistic
+    PiecesStatistic,
+    Model
   }
 
   require Logger
@@ -32,27 +42,32 @@ defmodule Torrent.Downloads.Piece.State do
 
   @compile {:inline, subpieces: 2}
 
-  @spec make(Piece.args()) :: t()
-  def make(args) do
+  def make({hash, index}) do
     %__MODULE__{
-      index: Keyword.fetch!(args, :index),
-      hash: Keyword.fetch!(args, :hash),
-      waiting: make_subpieces([], Keyword.fetch!(args, :length), 0),
-      requests_are_dealt: Keyword.fetch!(args, :requests_are_dealt),
-      downloaded: Keyword.fetch!(args, :downloaded)
+      index: index,
+      hash: hash,
+      waiting: make_subpieces([], Model.piece_length(hash, index), 0)
     }
   end
 
-  @spec download(t(), Piece.mode()) :: t()
-  def download(%__MODULE__{waiting: []} = state, _) do
+  def download(%__MODULE__{waiting: []} = state, _, _) do
+    IO.inspect(Model.get(state.hash), label: "choicing processing piece")
     state.requests_are_dealt.()
     state
   end
 
-  def download(state, mode) do
+  def download(state, downloaded, requests_are_dealt) do
     PiecesStatistic.set(state.hash, state.index, :processing)
-    Swarm.interested(state.hash, state.index)
-    %__MODULE__{state | mode: mode, timer: unless(mode, do: new_timer())}
+
+    mode = Model.get(state.hash, :mode)
+
+    %__MODULE__{
+      state
+      | mode: mode,
+        timer: unless(mode, do: new_timer()),
+        downloaded: downloaded,
+        requests_are_dealt: requests_are_dealt
+    }
   end
 
   @spec make_subpieces(waiting(), Torrent.length(), Torrent.length() | 0) :: waiting()
@@ -72,7 +87,7 @@ defmodule Torrent.Downloads.Piece.State do
     |> Enum.into(MapSet.new(), & &1.subpiece)
   end
 
- # @spec request(t(), Peer.id(), Piece.callback()) :: t()
+  # @spec request(t(), Peer.id(), Piece.callback()) :: t()
   def request(%__MODULE__{waiting: []} = state, _, _), do: state
 
   def request(state, peer_id, callback) do
@@ -84,7 +99,7 @@ defmodule Torrent.Downloads.Piece.State do
     |> do_request(peer_id, callback)
   end
 
-  #@spec do_request(t(), Peer.id(), Piece.callback()) :: t()
+  # @spec do_request(t(), Peer.id(), Piece.callback()) :: t()
   defp do_request(%__MODULE__{mode: :endgame} = state, peer_id, callback) do
     state.waiting
     |> Enum.take(@endgame_mode_pending_block)
@@ -221,7 +236,7 @@ defmodule Torrent.Downloads.Piece.State do
     end
   end
 
-  @spec new_request(t(), Piece.callback(), Request.t()) :: t()
+  #@spec new_request(t(), Piece.callback(), Request.t()) :: t()
   defp new_request(state, callback, request) do
     {begin, length} = request.subpiece
 

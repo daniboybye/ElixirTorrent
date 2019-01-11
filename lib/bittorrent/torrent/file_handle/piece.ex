@@ -6,23 +6,16 @@ defmodule Torrent.FileHandle.Piece do
   use GenServer
   use Via
 
-  alias Torrent.{Bitfield, PiecesStatistic}
+  alias Torrent.{Bitfield, PiecesStatistic, Model}
 
-  @timeout_hibernate 45 * 1_000
+  @timeout_hibernate 30 * 1_000
 
-  # @spec start_link(Keyword.t()) :: GenServer.on_start()
-  def start_link(key, piece) do
-    GenServer.start_link(
-      __MODULE__,
-      piece,
-      name: via(key)
-    )
+  def start_link({_, key} = arg) do
+    GenServer.start_link(__MODULE__, arg, name: via(key))
   end
 
-  def child_spec(keyword) do
-    key = {index, _} = Keyword.fetch!(keyword, :key)
-    piece = Keyword.fetch!(keyword, :piece)
-    %{id: {__MODULE__, index}, start: {__MODULE__, :start_link, [key, piece]}}
+  def child_spec({_, {index, _}} = arg) do
+    %{id: {__MODULE__, index}, start: {__MODULE__, :start_link, [arg]}}
   end
 
   def key(hash, index), do: {index, hash}
@@ -31,15 +24,7 @@ defmodule Torrent.FileHandle.Piece do
 
   @spec check?(Torrent.hash(), Torrent.index()) :: boolean()
   def check?(hash, index) do
-    if flag = GenServer.call(vk(hash, index), :check, 5 * 60 * 1_000) do
-      PiecesStatistic.set(hash, index, :complete)
-      Bitfield.up(hash, index)
-    else
-      PiecesStatistic.set(hash, index, nil)
-      Bitfield.down(hash, index)
-    end
-
-    flag
+    GenServer.call(vk(hash, index), {:check?, hash, index}, 2 * 60 * 1_000)
   end
 
   @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
@@ -53,13 +38,17 @@ defmodule Torrent.FileHandle.Piece do
     GenServer.cast(vk(hash, index), {:write, begin, block})
   end
 
-  def init(piece), do: {:ok, piece}
+  def init({piece, key}), do: {:ok, piece, {:continue, {:check, key}}}
 
-  def handle_call(:check, _, piece) do
-    block = do_read(piece.offset, piece.length, piece.files)
-    res = piece.hash === :crypto.hash(:sha, block)
-    {:reply, res, piece, @timeout_hibernate}
+  def handle_continue({:check, {index, torrent_hash}}, piece) do
+    with x when x in [:complete, :processing] <- PiecesStatistic.get_status(torrent_hash, index),
+         do: do_check(torrent_hash, index, piece)
+
+    {:noreply, piece, :hibernate}
   end
+
+  def handle_call({:check?, hash, index}, _, piece),
+    do: {:reply, do_check(hash, index, piece), piece, @timeout_hibernate}
 
   def handle_call({:read, begin, length}, _, piece) do
     fun = fn -> do_read(piece.offset + begin, length, piece.files) end
@@ -72,7 +61,7 @@ defmodule Torrent.FileHandle.Piece do
   end
 
   def handle_info(:timeout, piece),
-  do: {:noreply, piece, :hibernate}
+    do: {:noreply, piece, :hibernate}
 
   defp do_read(offset, length, files, res \\ <<>>)
 
@@ -93,5 +82,21 @@ defmodule Torrent.FileHandle.Piece do
 
     :ok = :file.pwrite(pid, {:bof, offset}, bytes_for_writing)
     do_write(0, files, bin)
+  end
+
+  defp do_check(torrent_hash, index, piece) do
+    block = do_read(piece.offset, piece.length, piece.files)
+    res = piece.hash === :crypto.hash(:sha, block)
+
+    if res do
+      Model.downloaded_piece(torrent_hash, index)
+      PiecesStatistic.set(torrent_hash, index, :complete)
+      Bitfield.up(torrent_hash, index)
+    else
+      PiecesStatistic.set(torrent_hash, index, nil)
+      Bitfield.down(torrent_hash, index)
+    end
+
+    res
   end
 end

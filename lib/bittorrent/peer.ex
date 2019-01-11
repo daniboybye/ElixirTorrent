@@ -1,22 +1,47 @@
 defmodule Peer do
-  use Supervisor, restart: :temporary, type: :supervisor
+  @enforce_keys [:ip, :port]
+  defstruct [:ip, :port, id: nil]
+
+  @docmodule """
+  Recommend Peer controls a :gen_tcp.socket 
+  and do not need to be closed manually
+  """
+
   use Via
 
   alias __MODULE__.{Sender, Controller, Receiver}
+
+  def child_spec(args) do
+    %{
+      id: __MODULE__,
+      restart: :temporary,
+      type: :supervisor,
+      start: {__MODULE__, :start_link, args}
+    }
+  end
+
+  def start_link(hash, id, socket, reserved) do
+    children = [
+      {Sender, [hash, id, socket]},
+      {Controller, [hash, id, socket, reserved]},
+      {Receiver, [hash, id, socket]}
+    ]
+
+    opts = [name: vm(hash, id), strategy: :one_for_all, max_restarts: 0]
+
+    Supervisor.start_link(children, opts)
+  end
 
   @type id :: <<_::160>>
   @type reserved :: <<_::64>>
   @type ip :: binary()
   @type key :: {id(), Torrent.hash()}
-  @type status :: nil | :seed | Torrent.index()
+  @type status :: nil | :seed | :connecting_to_peers | Torrent.index()
 
   @reserved <<0, 0, 0, 0, 0, 0, 0, 4>>
   @id_length 20
   @id <<ElixirTorrent.version()::binary, "-",
         :crypto.strong_rand_bytes(@id_length - byte_size(ElixirTorrent.version()) - 1)::binary>>
-
-  @enforce_keys [:ip, :port]
-  defstruct [:ip, :port, id: nil]
 
   @type t :: %__MODULE__{
           ip: ip(),
@@ -24,10 +49,7 @@ defmodule Peer do
           id: id() | nil
         }
 
-  @spec start_link({id(), Torrent.hash(), port(), reserved()}) :: Supervisor.on_start()
-  def start_link({id, hash, _socket, _reserved} = args) do
-    Supervisor.start_link(__MODULE__, args, name: via(make_key(hash, id)))
-  end
+  defp vm(hash, id), do: via(make_key(hash, id))
 
   @spec id :: id()
   def id, do: @id
@@ -57,13 +79,11 @@ defmodule Peer do
     end
   end
 
+  @spec exists?(t(), Torrent.hash()) :: boolean()
+  def exists?(%Peer{id: id}, hash), do: !!whereis(hash, id)
+
   @spec whereis(Torrent.hash(), id()) :: pid() | {atom(), node()} | nil
-  def whereis(hash, id) do
-    hash
-    |> make_key(id)
-    |> via
-    |> GenServer.whereis()
-  end
+  def whereis(hash, id), do: GenServer.whereis(vm(hash, id))
 
   @spec have(pid(), Torrent.index()) :: :ok | nil
   def have(pid, index) do
@@ -74,10 +94,6 @@ defmodule Peer do
   def interested(pid, index) do
     if key = get_key(pid), do: Controller.interested(key, index)
   end
-
-  # defdelegate request(hash, id, index, begin, length), to: Controller
-
-  defdelegate piece(hash, id, index, begin, block), to: Controller
 
   defdelegate cancel(hash, id, index, begin, length), to: Controller
 
@@ -113,13 +129,4 @@ defmodule Peer do
 
   @spec key_to_hash(key()) :: Torrent.hash()
   def key_to_hash({_, hash}), do: hash
-
-  def init(args) do
-    [
-      {Sender, Tuple.delete_at(args, 3)},
-      {Controller, args},
-      {Receiver, Tuple.delete_at(args, 3)}
-    ]
-    |> Supervisor.init(strategy: :one_for_all, max_restarts: 0)
-  end
 end

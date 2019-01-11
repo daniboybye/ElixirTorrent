@@ -1,6 +1,4 @@
 1. scrape request (UDP tracker protocol) is not implement
 2. handle suggest piece message
-3. handling "failure reason"        => "Overloaded",
-			"retry in"              => "5"
+3. BEP - 14 Local Service Discovery
 4. DHT
-5. solve: binary memory leak in Torrent.{Swarm, Downloads, Server, Bitfield}) 

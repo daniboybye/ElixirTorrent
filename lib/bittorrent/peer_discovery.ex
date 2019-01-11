@@ -1,26 +1,36 @@
 defmodule PeerDiscovery do
-  use Supervisor, type: :supervisor, start: {__MODULE__, :start_link, []}
+  alias __MODULE__.{Announce, AnnouncesSupervisor, ConnectionIds}
 
-  alias __MODULE__.{Controller, ConnectionIds}
-
-  @spec start_link() :: Supervisor.on_start()
-  def start_link(), do: Supervisor.start_link(__MODULE__, nil)
-
-  defdelegate put(torrent, list), to: Controller
-
-  defdelegate get(key), to: Controller
-
-  defdelegate connection_id(announce, socket, ip, port), to: ConnectionIds, as: :get
-
-  def init(_) do
-    [
+  def child_spec(_) do
+    children = [
       {
         Task.Supervisor,
         name: __MODULE__.Requests, strategy: :one_for_one, max_restarts: 0
       },
-      ConnectionIds,
-      Controller
+      {
+        DynamicSupervisor,
+        name: __MODULE__.AnnouncesSupervisor, strategy: :one_for_one, max_restarts: 0
+      },
+      ConnectionIds
     ]
-    |> Supervisor.init(strategy: :one_for_all)
+
+    opts = [strategy: :one_for_all]
+
+    %{
+      id: __MODULE__,
+      type: :supervisor,
+      start: {Supervisor, :start_link, [children, opts]}
+    }
   end
+
+  def register(pid, torrent) do
+    DynamicSupervisor.start_child(
+      AnnouncesSupervisor,
+      {Announce, [pid, torrent]}
+    )
+  end
+
+  defdelegate get(hash), to: Announce
+
+  defdelegate connection_id(announce, socket, ip, port), to: ConnectionIds, as: :get
 end

@@ -59,6 +59,7 @@ defmodule Tracker do
           interval: Map.get(map, "interval", default_interval()),
           complete: Map.get(map, "complete", 0),
           incomplete: Map.get(map, "incomplete", 0),
+          external_ip: Map.get(map, "external ip", Bento.encode!("")) |> Bento.decode!(),
           peers: Map.get(map, "peers", []) |> to_peers()
         }
     end
@@ -113,7 +114,7 @@ defmodule Tracker do
         socket,
         ip,
         port,
-        <<@udp_protocol_id::binary, @connect::binary, transaction_id::32>>
+        [@udp_protocol_id, @connect, <<transaction_id::32>>]
       )
 
     case :gen_udp.recv(socket, 0, timeout * 1_000) do
@@ -141,10 +142,21 @@ defmodule Tracker do
   defp udp_announce(socket, ip, port, connection_id, torrent, peer_id, my_port, key) do
     transaction_id = generate_transaction_id()
 
-    message =
-      <<connection_id::binary, @announce::binary, transaction_id::32, torrent.hash::binary,
-        peer_id::binary, torrent.downloaded::64, torrent.left::64, torrent.uploaded::64,
-        torrent.event::32, ip()::binary(), key::32, numwant(torrent.left)::32, my_port::16>>
+    message = [
+      connection_id,
+      @announce,
+      <<transaction_id::32>>,
+      torrent.hash,
+      peer_id,
+      <<torrent.downloaded::64>>,
+      <<torrent.left::64>>,
+      <<torrent.uploaded::64>>,
+      <<torrent.event::32>>,
+      ip(),
+      <<key::32>>,
+      <<numwant(torrent.left)::32>>,
+      <<my_port::16>>
+    ]
 
     :ok = :gen_udp.send(socket, ip, port, message)
 

@@ -1,31 +1,35 @@
 defmodule Torrent.Downloads do
-  use DynamicSupervisor, restart: :transient, type: :supervisor
   use Via
 
   alias __MODULE__.Piece
 
-  @spec start_link(Torrent.t()) :: Supervisor.on_start()
-  def start_link(%Torrent{hash: hash}) do
-    DynamicSupervisor.start_link(__MODULE__, nil, name: via(hash))
+  def child_spec(hash) do
+    %{
+      id: __MODULE__,
+      restart: :transient,
+      type: :supervisor,
+      start:
+        {DynamicSupervisor, :start_link,
+         [[name: via(hash), extra_arguments: [hash], strategy: :one_for_one, max_restarts: 100]]}
+    }
   end
 
   @spec stop(Torrent.hash()) :: :ok
   def stop(hash), do: DynamicSupervisor.stop(via(hash))
 
-  #@spec piece(Torrent.hash(), Torrent.index(), Torrent.length(), Piece.mode()) :: :ok
-  def piece(hash, index, length, downloaded, requests_are_dealt, mode \\ nil) do
-    DynamicSupervisor.start_child(
-      via(hash),
-      {Piece, [index: index, hash: hash, length: length, downloaded: downloaded, requests_are_dealt: requests_are_dealt]}
-    ) |> case do
-    {:ok, pid} ->
-      pid
-    {:ok, pid, _} ->
-      pid
-    {:error, {:already_started, pid}} ->
-      pid
+  @spec piece(Torrent.hash(), Torrent.index(), (() -> :ok), (() -> :ok)) :: :ok
+  def piece(hash, index, downloaded, requests_are_dealt) do
+    case DynamicSupervisor.start_child(via(hash), {Piece, [index]}) do
+      {:ok, pid} ->
+        pid
+
+      {:ok, pid, _} ->
+        pid
+
+      {:error, {:already_started, pid}} ->
+        pid
     end
-    |> Piece.download(mode)
+    |> Piece.download(downloaded, requests_are_dealt)
   end
 
   defdelegate piece_max_length, to: Piece, as: :max_length
@@ -35,8 +39,4 @@ defmodule Torrent.Downloads do
   defdelegate response(hash, index, peer_id, begin, block), to: Piece
 
   defdelegate reject(hash, index, peer_id, begin, length), to: Piece
-
-  def init(_) do
-    DynamicSupervisor.init(strategy: :one_for_one, max_restarts: 1_000)
-  end
 end

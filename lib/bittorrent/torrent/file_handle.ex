@@ -3,16 +3,16 @@ defmodule Torrent.FileHandle do
   use Via
 
   alias __MODULE__.Piece
+  alias Torrent.Model
 
   @doc """
   FileHandle controls File.io_device() 
   and do not need to be closed manually
   """
 
-  @spec start_link(Torrent.t()) :: Supervisor.on_start()
-  def start_link(torrent) do
-    Supervisor.start_link(__MODULE__, torrent, name: via(torrent.hash))
-  end
+  @spec start_link(Torrent.hash()) :: Supervisor.on_start()
+  def start_link(hash),
+    do: Supervisor.start_link(__MODULE__, hash, name: via(hash))
 
   defdelegate check?(hash, index), to: Piece
 
@@ -20,7 +20,9 @@ defmodule Torrent.FileHandle do
 
   defdelegate write(hash, index, begin, block), to: Piece
 
-  def init(torrent) do
+  def init(hash) do
+    torrent = Model.get(hash)
+
     all_files = init_files(torrent.struct["info"])
     length = torrent.struct["info"]["piece length"]
     pieces_hash = torrent.struct["info"]["pieces"]
@@ -44,15 +46,15 @@ defmodule Torrent.FileHandle do
   defp make_piece(index, length, all_files, torrent_hash, pieces_hash) do
     {offset, files} = files_for_index(index, all_files, length)
 
-    [
-      key: Piece.key(torrent_hash, index),
-      piece: %Piece{
+    {
+      %Piece{
         offset: offset,
         files: files,
         length: length,
         hash: binary_part(pieces_hash, index * 20, 20)
-      }
-    ]
+      },
+      Piece.key(torrent_hash, index)
+    }
   end
 
   defp init_files(%{"files" => files}) do

@@ -2,10 +2,11 @@ defmodule Torrent.Bitfield do
   use GenServer
   use Via
 
-  @spec start_link(Torrent.t()) :: GenServer.on_start()
-  def start_link(%Torrent{hash: hash, last_index: index}) do
-    GenServer.start_link(__MODULE__, index + 1, name: via(hash))
-  end
+  alias Torrent.Model
+
+  @spec start_link(Torrent.hash()) :: GenServer.on_start()
+  def start_link(hash),
+    do: GenServer.start_link(__MODULE__, hash, name: via(hash))
 
   @spec make(pos_integer()) :: Torrent.bitfield()
   def make(count) do
@@ -27,10 +28,13 @@ defmodule Torrent.Bitfield do
   @spec have?(Torrent.hash(), Torrent.index()) :: boolean()
   def have?(hash, index), do: GenServer.call(via(hash), {:have?, index})
 
-  def init(count), do: {:ok, __MODULE__.make(count)}
+  def init(hash) do
+    count = Model.get(hash, :pieces_count)
+    {:ok, make(count)}
+  end
 
-  def handle_call(:get, _, bitfield), 
-  do: {:reply, bitfield, bitfield}
+  def handle_call(:get, _, bitfield),
+    do: {:reply, bitfield, bitfield}
 
   def handle_call({:have?, index}, _, state) do
     <<_::bits-size(index), x::1, _::bits>> = state
@@ -41,6 +45,7 @@ defmodule Torrent.Bitfield do
     <<prefix::bits-size(index), _::1, postfix::bits>> = state
     {:noreply, <<prefix::bits, x::1, postfix::bits>>}
   end
+
   defp size(pieces_count) do
     (pieces_count / 8)
     |> Float.ceil()

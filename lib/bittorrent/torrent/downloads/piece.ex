@@ -1,5 +1,5 @@
 defmodule Torrent.Downloads.Piece do
-  use GenServer, restart: :temporary
+  use GenServer
   use Via
 
   require Logger
@@ -8,30 +8,28 @@ defmodule Torrent.Downloads.Piece do
   alias Torrent.{FileHandle, PiecesStatistic}
 
   @type mode :: :endgame | nil
-  @type args :: [index: Torrent.index(), hash: Torrent.hash(), length: Torrent.length()]
   @type callback_peer_request :: (Torrent.index(), Torrent.begin(), Torrent.length() -> any())
 
   @max_length trunc(:math.pow(2, 14))
   @compile {:inline, max_length: 0}
 
-  @spec start_link(args()) :: GenServer.on_start()
-  def start_link(args) do
-    GenServer.start_link(
-      __MODULE__,
-      args,
-      name:
-        key(
-          Keyword.fetch!(args, :index),
-          Keyword.fetch!(args, :hash)
-        )
-    )
+  def child_spec(args) do
+    %{
+      id: __MODULE__,
+      restart: :transient,
+      start: {__MODULE__, :start_link, args}
+    }
+  end
+
+  @spec start_link(Torrent.hash(), Torrent.index()) :: GenServer.on_start()
+  def start_link(hash, index) do
+    GenServer.start_link(__MODULE__, {hash, index}, name: key(index, hash))
   end
 
   def max_length, do: @max_length
 
-  @spec download(pid(), mode()) :: :ok
-  def download(pid, mode \\ nil),
-  do: GenServer.cast(pid, {:download, [mode]})
+  def download(pid, downloaded, requests_are_dealt),
+    do: GenServer.cast(pid, {:download, [downloaded, requests_are_dealt]})
 
   @spec request(Torrent.hash(), Torrent.index(), Peer.id(), callback_peer_request()) :: :ok
   def request(hash, index, peer_id, callback) do
@@ -88,7 +86,7 @@ defmodule Torrent.Downloads.Piece do
         state.downloaded.()
         :normal
       else
-        {:error, :wrong_subpiece}
+        {:shutdown, :wrong_subpiece}
       end
 
     {:stop, reason, nil}

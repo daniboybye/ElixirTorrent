@@ -1,6 +1,6 @@
 defmodule Tracker.Response do
   @enforce_keys [:interval, :peers, :complete, :incomplete]
-  defstruct [:interval, :peers, :complete, :incomplete]
+  defstruct [:interval, :peers, :complete, :incomplete, external_ip: nil]
 
   @type t :: %__MODULE__{
           # in seconds

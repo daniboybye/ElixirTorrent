@@ -7,9 +7,15 @@ defmodule Torrent.PiecesStatistic do
 
   @spec init(Torrent.t()) :: :ok
   def init(%Torrent{hash: hash, last_index: count}) do
+    # file_name = hash <> ".bin"
+
+    # if File.exists?(file_name) do
+    #   {:ok, ref} = :ets.file2tab(file_name) 
+    # else
     ref = :ets.new(nil, [:set, :public, keypos: 1, write_concurrency: true])
-    Registry.register(Registry, key(hash), ref)
     true = :ets.insert(ref, Enum.map(0..count, &{&1, 0, nil}))
+    # end
+    {:ok, _} = Registry.register(Registry, key(hash), ref)
     :ok
   end
 
@@ -54,9 +60,8 @@ defmodule Torrent.PiecesStatistic do
   end
 
   @spec update(Torrent.hash(), Torrent.bitfield(), non_neg_integer()) :: :ok
-  def update(hash, bitfield, size) do
-    indices_inc(bitfield, size, table_ref(hash))
-  end
+  def update(hash, bitfield, size),
+    do: indices_inc(bitfield, size, table_ref(hash))
 
   @spec inc_all(Torrent.hash(), Torrent.index()) :: :ok
   def inc_all(hash, last_index) do
@@ -64,9 +69,26 @@ defmodule Torrent.PiecesStatistic do
     Enum.each(0..last_index, &update_counter(ref, &1))
   end
 
-  defp update_counter(ref, index) do
-    :ets.update_counter(ref, index, 1)
-  end
+  def get_status(hash, index),
+    do: :ets.lookup_element(table_ref(hash), index, 3)
+
+  # def pieces_for_check(hash) do
+  #   :ets.select(table_ref(hash),[
+  #     {{:"$1", :"$2", :_},
+  #     [{:orelse, {:"=:=", :"$2", :processing}, {:"=:=", :"$2", :complete}}],
+  #     [:"$1"]}
+  #   ])
+  # end
+
+  # @spec to_file!(Torrent.hash()) :: :ok
+  # def to_file!(hash) do
+  #   file_name = hash <> ".bin"
+  #   File.touch!(file_name)
+  #   :ok = :ets.tab2file(table_ref(hash), file_name) 
+  # end
+
+  defp update_counter(ref, index),
+    do: :ets.update_counter(ref, index, 1)
 
   defp indices_inc(bin, size, ref, index \\ 0)
 
@@ -78,7 +100,7 @@ defmodule Torrent.PiecesStatistic do
     indices_inc(bin, size, ref, index + 1)
   end
 
-  defp key(hash), do: {hash, __MODULE__}
+  defp key(hash), do: {__MODULE__, hash}
 
   defp table_ref(hash) do
     [{_pid, ref}] = Registry.lookup(Registry, key(hash))

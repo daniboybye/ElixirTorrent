@@ -1,23 +1,23 @@
 defmodule Torrent.Swarm do
-  use DynamicSupervisor
   use Via
 
-  @spec start_link(Torrent.t()) :: Supervisor.on_start()
-  def start_link(%Torrent{hash: hash}) do
-    DynamicSupervisor.start_link(__MODULE__, nil, name: via(hash))
-  end
-
-  @spec new_peers(Torrent.hash(), list(Peer.t())) :: :ok
-  def new_peers(hash, list) do
-    swarm =
-      via(hash)
-      |> DynamicSupervisor.which_children()
-      |> Enum.map(&(elem(&1, 1) |> Peer.get_id()))
-      |> MapSet.new()
-
-    list
-    |> Enum.reject(&MapSet.member?(swarm, &1.id))
-    |> Enum.each(&Acceptor.send(&1, hash))
+  def child_spec(hash) do
+    %{
+      id: __MODULE__,
+      type: :supervisor,
+      start: {
+        DynamicSupervisor,
+        :start_link,
+        [
+          [
+            name: via(hash),
+            extra_arguments: [hash],
+            strategy: :one_for_one,
+            max_restarts: 0
+          ]
+        ]
+      }
+    }
   end
 
   @spec interested(Torrent.hash(), Torrent.index()) :: :ok
@@ -28,8 +28,8 @@ defmodule Torrent.Swarm do
   @spec seed(Torrent.hash()) :: :ok
   def seed(hash), do: each_childred(hash, &Peer.seed/1)
 
-  @spec broadcast_have(Torrent.hash(), Torrent.index()) :: :ok
-  def broadcast_have(hash, index), do: each_childred(hash, &Peer.have(&1, index))
+  @spec have(Torrent.hash(), Torrent.index()) :: :ok
+  def have(hash, index), do: each_childred(hash, &Peer.have(&1, index))
 
   @spec reset_rank(Torrent.hash()) :: :ok
   def reset_rank(hash), do: each_childred(hash, &Peer.reset_rank/1)
@@ -57,23 +57,13 @@ defmodule Torrent.Swarm do
     Enum.each(choking, fn {_, id} -> Peer.choke(hash, id) end)
   end
 
-  @spec add_peer(Torrent.hash(), Peer.id(), Peer.reserved(), port()) ::
+  @spec add(Torrent.hash(), Peer.id(), Peer.reserved(), port()) ::
           DynamicSupervisor.on_start_child()
-  def add_peer(hash, id, reserved, socket) do
-    DynamicSupervisor.start_child(via(hash), {Peer, {id, hash, socket, reserved}})
-  end
+  def add(hash, id, reserved, socket),
+    do: DynamicSupervisor.start_child(via(hash), {Peer, [id, socket, reserved]})
 
-  @spec count(Torrent.hash()) :: %{
-          specs: non_neg_integer(),
-          active: non_neg_integer(),
-          supervisors: non_neg_integer(),
-          workers: non_neg_integer()
-        }
-  def count(hash), do: DynamicSupervisor.count_children(via(hash))
-
-  def init(_) do
-    DynamicSupervisor.init(strategy: :one_for_one, max_restarts: 0)
-  end
+  @spec count(Torrent.hash()) :: non_neg_integer()
+  def count(hash), do: DynamicSupervisor.count_children(via(hash)).active
 
   defp each_childred(hash, fun) do
     via(hash)

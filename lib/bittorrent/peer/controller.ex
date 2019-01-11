@@ -4,18 +4,17 @@ defmodule Peer.Controller do
 
   require Logger
 
-  alias Acceptor.BlackList
   alias __MODULE__.{State, FastExtension}
   alias Peer.Sender
   alias Torrent.{Uploader, Downloads}
 
   import Peer, only: [make_key: 2, key_to_id: 1, key_to_hash: 1]
 
-  @spec start_link({Peer.id(), Torrent.hash(), port(), Peer.reserved()}) :: GenServer.on_start()
-  def start_link({id, hash, _socket, _reserved} = args) do
+  # @spec start_link({Peer.id(), Torrent.hash(), port(), Peer.reserved()}) :: GenServer.on_start()
+  def start_link([hash, id, socket, reserved]) do
     GenServer.start_link(
       __MODULE__,
-      args,
+      [hash, id, socket, reserved],
       name: via(make_key(hash, id))
     )
   end
@@ -24,8 +23,8 @@ defmodule Peer.Controller do
   def have(key, index), do: GenServer.cast(via(key), {:have, [index]})
 
   @spec interested(Peer.key(), Torrent.index()) :: :ok
-  def interested(key, index), 
-  do: GenServer.cast(via(key), {:interested, [index]})
+  def interested(key, index),
+    do: GenServer.cast(via(key), {:interested, [index]})
 
   @spec cancel(Torrent.hash(), Peer.id(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           :ok
@@ -58,15 +57,6 @@ defmodule Peer.Controller do
   @spec reset_rank(Peer.key()) :: :ok
   def reset_rank(key), do: GenServer.cast(via(key), {:reset_rank, []})
 
-  @spec piece(Torrent.hash(), Peer.id(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
-  def piece(hash, id, index, begin, block) do
-    key = make_key(hash, id)
-
-    Sender.piece(key, index, begin, block)
-
-    GenServer.cast(via(key), {:upload, [byte_size(block)]})
-  end
-
   @spec handle_choke(Peer.key()) :: :ok
   def handle_choke(key), do: GenServer.cast(via(key), {:handle_choke, []})
 
@@ -74,22 +64,20 @@ defmodule Peer.Controller do
   def handle_unchoke(key), do: GenServer.cast(via(key), {:handle_unchoke, []})
 
   @spec handle_interested(Peer.key()) :: :ok
-  def handle_interested(key) do
-    GenServer.cast(via(key), {:handle_interested, []})
-  end
+  def handle_interested(key),
+    do: GenServer.cast(via(key), {:handle_interested, []})
 
   @spec handle_not_interested(Peer.key()) :: :ok
-  def handle_not_interested(key) do
-    GenServer.cast(via(key), {:handle_not_interested, []})
-  end
+  def handle_not_interested(key),
+    do: GenServer.cast(via(key), {:handle_not_interested, []})
 
   @spec handle_have(Peer.key(), Torrent.index()) :: :ok
-  def handle_have(key, index), 
-  do: GenServer.cast(via(key), {:handle_have, [index]})
+  def handle_have(key, index),
+    do: GenServer.cast(via(key), {:handle_have, [index]})
 
   @spec handle_bitfield(Peer.key(), Torrent.bitfield()) :: :ok
-  def handle_bitfield(key, bitfield), 
-  do: GenServer.cast(via(key), {:handle_bitfield, [bitfield]})
+  def handle_bitfield(key, bitfield),
+    do: GenServer.cast(via(key), {:handle_bitfield, [bitfield]})
 
   @spec handle_request(Peer.key(), Torrent.index(), Torrent.begin(), Torrent.length()) :: :ok
   def handle_request(key, index, begin, length) do
@@ -108,21 +96,20 @@ defmodule Peer.Controller do
   end
 
   @spec handle_port(Peer.key(), :inet.port_number()) :: :ok
-  def handle_port(key, port), 
-  do: GenServer.cast(via(key), {:handle_port, [port]})
+  def handle_port(key, port),
+    do: GenServer.cast(via(key), {:handle_port, [port]})
 
   @spec handle_have_all(Peer.key()) :: :ok
-  def handle_have_all(key), 
-  do: GenServer.cast(via(key), {:handle_have_all, []})
+  def handle_have_all(key),
+    do: GenServer.cast(via(key), {:handle_have_all, []})
 
   @spec handle_have_none(Peer.key()) :: :ok
   def handle_have_none(key),
-  do: GenServer.cast(via(key), {:handle_have_none, []})
+    do: GenServer.cast(via(key), {:handle_have_none, []})
 
   @spec handle_suggest_piece(Peer.key(), Torrent.index()) :: :ok
-  def handle_suggest_piece(key, index) do
-    GenServer.cast(via(key), {:handle_suggest_piece, [index]})
-  end
+  def handle_suggest_piece(key, index),
+    do: GenServer.cast(via(key), {:handle_suggest_piece, [index]})
 
   @spec handle_reject(Peer.key(), Torrent.index(), Torrent.begin(), Torrent.length()) :: :ok
   def handle_reject(key, index, begin, length) do
@@ -130,29 +117,29 @@ defmodule Peer.Controller do
   end
 
   @spec handle_allowed_fast(Peer.key(), Torrent.index()) :: :ok
-  def handle_allowed_fast(key, index) do
-    GenServer.cast(via(key), {:handle_allowed_fast, [index]})
-  end
+  def handle_allowed_fast(key, index),
+    do: GenServer.cast(via(key), {:handle_allowed_fast, [index]})
 
-  def init({id, hash, socket, reserved}) do
-    %Torrent{} = torrent = Torrent.get(hash)
+  def init([hash, id, socket, reserved]) do
+    [status, count, downloaded, _piece_length] =
+      Torrent.get(hash, [:peer_status, :pieces_count, :downloaded, :piece_length])
 
     state = %State{
       hash: hash,
       id: id,
       socket: socket,
       fast_extension: FastExtension.make(reserved),
-      status: torrent.peer_status,
-      pieces_count: torrent.last_index + 1
+      status: status,
+      pieces_count: count
     }
 
-    State.first_message(state, torrent.downloaded)
+    State.first_message(state, downloaded)
 
     {:ok, state}
   end
 
-  def terminate({:shutdown, :protocol_error}, state), 
-  do: BlackList.put(state.id)
+  def terminate({:shutdown, :protocol_error}, state),
+    do: Acceptor.malicious_peer(state.id)
 
   def terminate(_, _), do: :ok
 
