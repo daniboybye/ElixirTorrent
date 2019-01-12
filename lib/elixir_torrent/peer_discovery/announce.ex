@@ -37,6 +37,9 @@ defmodule PeerDiscovery.Announce do
   def get(hash),
     do: GenServer.call(via(hash), :get)
 
+  def connecting_to_peers(hash),
+  do: GenServer.cast(via(hash), :connecting_to_peers)
+
   def init([pid, torrent]) do
     state = torrent.struct
     |> extract_announce
@@ -49,6 +52,11 @@ defmodule PeerDiscovery.Announce do
 
   def handle_call(:get, _, state),
     do: {:reply, state.peers, state}
+
+  def handle_cast(:connecting_to_peers, state) do
+    Acceptor.handshakes(state.peers, state.hash)
+    {:noreply, state}
+  end
 
   def handle_info(:request, state) do
     case state.announce do
@@ -76,7 +84,7 @@ defmodule PeerDiscovery.Announce do
     do: {:noreply, state}
 
   def handle_info({:DOWN, _, :process, _, _}, state),
-    do: next_request(state)
+    do: {:noreply, next_request(state)}
 
   def handle_info(
         {_,
@@ -95,17 +103,16 @@ defmodule PeerDiscovery.Announce do
   end
 
   def handle_info({_, %Tracker.Error{reason: "Overloaded", retry_in: <<str::binary>>}}, state) do
-    String.split(str, ~r"[^0-9]", part: 2)
-    |> hd()
-    |> case do
-      <<>> ->
+    state = case String.split(str, ~r"[^0-9]", part: 2) do
+      [<<>>, _] ->
         state
 
-      _number ->
+      # [number, _]
+      _ ->
         # ignor timeout
         state
     end
-    |> next_request
+    {:noreply, next_request(state)}
   end
 
   def handle_info({_, %Tracker.Error{reason: reason}}, state) do
@@ -117,7 +124,7 @@ defmodule PeerDiscovery.Announce do
   defp request(%__MODULE__{request: nil}),
     do: send_after(self(), :request, Tracker.default_interval() * 1_000)
 
-  defp request(%__MODULE__{request: announce, hash: hash}) do
+  defp request(%__MODULE__{request: announce, hash: hash} = state) do
     Task.Supervisor.async_nolink(
       Requests,
       fn ->
@@ -130,6 +137,7 @@ defmodule PeerDiscovery.Announce do
         )
       end
     )
+    state
   end
 
   defp delete(state, announce) do
@@ -171,7 +179,7 @@ defmodule PeerDiscovery.Announce do
       {[x | _], _} ->
         x
 
-      {[], [x | _]} ->
+      {[], [[x|_] | _]} ->
         x
 
       {[], []} ->

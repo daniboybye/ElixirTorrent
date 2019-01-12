@@ -13,6 +13,7 @@ defmodule Tracker do
   @announce <<1::32>>
   @scrape <<2::32>>
   @error <<3::32>>
+  @bento_nil Bento.encode!(nil)
   @timeout 25_000
 
   @spec udp_connect_timeout() :: pos_integer()
@@ -59,7 +60,7 @@ defmodule Tracker do
           interval: Map.get(map, "interval", default_interval()),
           complete: Map.get(map, "complete", 0),
           incomplete: Map.get(map, "incomplete", 0),
-          external_ip: Map.get(map, "external ip", Bento.encode!("")) |> Bento.decode!(),
+          external_ip: Map.get(map, "external ip", @bento_nil) |> Bento.decode!(),
           peers: Map.get(map, "peers", []) |> to_peers()
         }
     end
@@ -69,10 +70,7 @@ defmodule Tracker do
     %URI{port: port, host: host} =
       announce
       |> URI.parse()
-      |> Map.update!(:port, fn
-        nil -> 6969
-        x -> x
-      end)
+      |> Map.update!(:port, &if(&1, do: &1, else: 6969))
 
     {:ok, ip} =
       host

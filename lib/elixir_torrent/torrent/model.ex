@@ -125,11 +125,13 @@ defmodule Torrent.Model do
 
   # else mode: nil
 
+  defp do_get(:name, torrent), do: torrent.struct["info"]["name"]
+
   defp do_get(key, torrent), do: Map.get(torrent, key)
 
   # Kb/s
   defp detected_the_speed(current, old),
-    do: (current - old) / (@timeout_detect_the_speed / 1_000)
+    do: (current - old) / @timeout_detect_the_speed
 
   defp message_for_next_detection(torrent) do
     message = {:detected_the_speed, torrent.downloaded, torrent.uploaded}

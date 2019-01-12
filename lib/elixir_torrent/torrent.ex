@@ -6,7 +6,7 @@ defmodule Torrent do
   @type index :: non_neg_integer()
   @type begin :: non_neg_integer()
   @type length :: pos_integer()
-  @type block :: binary()
+  @type block :: iodata()
   @type bitfield :: binary()
   @type speed :: %{:download => non_neg_integer(), :upload => non_neg_integer()}
 

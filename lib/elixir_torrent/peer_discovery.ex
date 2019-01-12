@@ -32,5 +32,7 @@ defmodule PeerDiscovery do
 
   defdelegate get(hash), to: Announce
 
+  defdelegate connecting_to_peers(hash), to: Announce
+
   defdelegate connection_id(announce, socket, ip, port), to: ConnectionIds, as: :get
 end

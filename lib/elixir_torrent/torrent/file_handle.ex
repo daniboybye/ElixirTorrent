@@ -21,23 +21,24 @@ defmodule Torrent.FileHandle do
   defdelegate write(hash, index, begin, block), to: Piece
 
   def init(hash) do
-    torrent = Model.get(hash)
+    [struct, last_index, last_piece_length] = 
+      Model.get(hash, [:struct, :last_index, :last_piece_length])
 
-    all_files = init_files(torrent.struct["info"])
-    length = torrent.struct["info"]["piece length"]
-    pieces_hash = torrent.struct["info"]["pieces"]
+    all_files = init_files(struct["info"])
+    length = struct["info"]["piece length"]
+    pieces_hash = struct["info"]["pieces"]
 
     last_piece =
       make_piece(
-        torrent.last_index,
-        torrent.last_piece_length,
+        last_index,
+        last_piece_length,
         all_files,
-        torrent.hash,
+        hash,
         pieces_hash
       )
 
-    0..(torrent.last_index - 1)
-    |> Enum.map(&make_piece(&1, length, all_files, torrent.hash, pieces_hash))
+    0..(last_index - 1)
+    |> Enum.map(&make_piece(&1, length, all_files, hash, pieces_hash))
     |> (&[last_piece | &1]).()
     |> Enum.map(&{Piece, &1})
     |> Supervisor.init(strategy: :one_for_one)

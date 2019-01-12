@@ -208,7 +208,7 @@ defmodule Peer.Controller.State do
 
         callback = fn block ->
           Sender.piece(sender_key, index, begin, block)
-          GenServer.cast(pid, {:upload, [byte_size(block)]})
+          GenServer.cast(pid, {:upload, [length]})
         end
 
         Uploader.request(state.hash, state.id, index, begin, length, callback)

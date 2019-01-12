@@ -1,5 +1,5 @@
 defmodule Peer.Sender do
-  use GenServer
+  use GenServer, restart: :permanent
   use Via
   use Peer.Const
 
@@ -43,7 +43,7 @@ defmodule Peer.Sender do
   def request(key, index, begin, length),
     do: GenServer.cast(via(key), {:request, index, begin, length})
 
-  @spec piece(Peer.key(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
+  @spec piece(Peer.key(), Torrent.index(), Torrent.begin(), iodata()) :: :ok
   def piece(key, index, begin, block),
     do: GenServer.cast(via(key), {:piece, index, begin, block})
 
@@ -114,7 +114,7 @@ defmodule Peer.Sender do
   def handle_info(:timeout, socket), do: do_send(socket, [])
 
   defp do_send(socket, msg) do
-    :gen_tcp.send(socket, [<<IO.iodata_length(msg)::32>>, msg])
+    :ok = :gen_tcp.send(socket, [<<IO.iodata_length(msg)::32>>, msg])
     {:noreply, socket, @timeout}
   end
 end

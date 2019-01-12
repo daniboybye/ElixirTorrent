@@ -32,7 +32,7 @@ defmodule Acceptor.Connection.Handshakes do
   @pstr "BitTorrent protocol"
   @pstrlen <<byte_size(@pstr)>>
   @msg_length 68
-  @timeout 120_000
+  @timeout 2 * 60 * 1_000
 
   alias Acceptor.BlackList
 

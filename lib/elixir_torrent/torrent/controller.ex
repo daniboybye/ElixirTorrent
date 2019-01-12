@@ -28,6 +28,7 @@ defmodule Torrent.Controller do
 
       0 ->
         Model.set_peer_status(hash, :connecting_to_peers)
+        PeerDiscovery.connecting_to_peers(hash)
         send_after(self(), msg, 20_000)
     end
 

@@ -24,25 +24,23 @@ defmodule Torrent.FileHandle.Piece do
 
   @spec check?(Torrent.hash(), Torrent.index()) :: boolean()
   def check?(hash, index) do
-    GenServer.call(vk(hash, index), {:check?, hash, index}, 2 * 60 * 1_000)
+    GenServer.call(vk(hash, index), {:check?, hash, index}, 60 * 1_000)
   end
 
   @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
-          (() -> binary())
-  def read(hash, index, begin, length) do
-    GenServer.call(vk(hash, index), {:read, begin, length}, 2 * 60 * 1_000)
-  end
+          (() -> iodata())
+  def read(hash, index, begin, length),
+  do: GenServer.call(vk(hash, index), {:read, begin, length})
 
-  @spec write(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
-  def write(hash, index, begin, block) do
-    GenServer.cast(vk(hash, index), {:write, begin, block})
-  end
+  @spec write(Torrent.hash(), Torrent.index(), Torrent.begin(), binary()) :: :ok
+  def write(hash, index, begin, block), 
+  do: GenServer.cast(vk(hash, index), {:write, begin, block})
 
   def init({piece, key}), do: {:ok, piece, {:continue, {:check, key}}}
 
-  def handle_continue({:check, {index, torrent_hash}}, piece) do
-    with x when x in [:complete, :processing] <- PiecesStatistic.get_status(torrent_hash, index),
-         do: do_check(torrent_hash, index, piece)
+  def handle_continue({:check, {index, hash}}, piece) do
+    with x when x in [:complete, :processing] <- PiecesStatistic.get_status(hash, index),
+         do: do_check(hash, index, piece)
 
     {:noreply, piece, :hibernate}
   end
@@ -51,27 +49,29 @@ defmodule Torrent.FileHandle.Piece do
     do: {:reply, do_check(hash, index, piece), piece, @timeout_hibernate}
 
   def handle_call({:read, begin, length}, _, piece) do
-    fun = fn -> do_read(piece.offset + begin, length, piece.files) end
+    {offset, files} = find_files(begin + piece.offset, piece.files) 
+    fun = fn -> do_read(offset, length, files) end
     {:reply, fun, piece, @timeout_hibernate}
   end
 
   def handle_cast({:write, begin, block}, piece) do
-    do_write(piece.offset + begin, piece.files, block)
+    {offset, files} = find_files(begin + piece.offset, piece.files)
+    do_write(offset, files, block)
     {:noreply, piece, @timeout_hibernate}
   end
 
   def handle_info(:timeout, piece),
     do: {:noreply, piece, :hibernate}
 
-  defp do_read(offset, length, files, res \\ <<>>)
+  defp do_read(offset, length, files, data \\ [])
 
-  defp do_read(_, _, [], res), do: res
+  defp do_read(_, 0, _, data), do: data
 
-  defp do_read(_, 0, _, res), do: res
+  defp do_read(_, _, [], data), do: data
 
-  defp do_read(offset, length, [{pid, _} | files], res) do
+  defp do_read(offset, length, [{pid, _} | files], data) do
     {:ok, block} = :file.pread(pid, {:bof, offset}, length)
-    do_read(0, length - byte_size(block), files, res <> block)
+    do_read(0, length - byte_size(block), files, [data, block])
   end
 
   defp do_write(_, _, <<>>), do: :ok
@@ -98,5 +98,10 @@ defmodule Torrent.FileHandle.Piece do
     end
 
     res
+  end
+
+  defp find_files(offset, files) do
+    {left, right} = Enum.split_while(files, &(elem(&1, 1) <= offset))
+    {offset - elem(List.last([{nil, 0} | left]), 1), right}
   end
 end

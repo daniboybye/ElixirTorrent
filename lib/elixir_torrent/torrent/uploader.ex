@@ -18,7 +18,7 @@ defmodule Torrent.Uploader do
           Torrent.begin(),
           Torrent.index(),
           Torrent.length(),
-          (binary() -> any())
+          (iodata() -> any())
         ) :: DynamicSupervisor.on_start_child()
   def request(hash, peer_id, index, begin, length, callback) do
     Task.Supervisor.start_child(

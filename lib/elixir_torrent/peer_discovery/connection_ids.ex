@@ -1,5 +1,5 @@
 defmodule PeerDiscovery.ConnectionIds do
-  use GenServer, start: {__MODULE__, :start_link, []}
+  use GenServer, start: {GenServer, :start_link, [__MODULE__, nil, [name: __MODULE__]]}
 
   @moduledoc """
     UDP Tracker Protocol only
@@ -9,18 +9,13 @@ defmodule PeerDiscovery.ConnectionIds do
 
   @timeout 60_000
 
-  @spec start_link() :: GenServer.on_start()
-  def start_link() do
-    GenServer.start_link(__MODULE__, nil, name: __MODULE__)
-  end
-
   @spec get(Tracker.announce(), port(), :inet.ip_address(), :inet.port_number()) ::
           Tracker.connection_id() | Tracker.Error.t() | nil
   def get(announce, socket, ip, port) do
     GenServer.call(
       __MODULE__,
       {announce, socket, ip, port},
-      2 * 60 * 60 * 1_000
+      1 * 1 * 20 * 1_000
     )
   end
 
@@ -52,33 +47,29 @@ defmodule PeerDiscovery.ConnectionIds do
     end
   end
 
-  def handle_info({:DOWN, _, :process, _, :normal}, state) do
-    {:noreply, state}
-  end
+  def handle_info({:timeout, announce}, state), 
+  do: {:noreply, Map.update!(state, :ids, &Map.delete(&1, announce))}
 
-  def handle_info({:DOWN, ref, :process, _, _}, state) do
-    failure(ref, state, nil)
-  end
+  def handle_info({:DOWN, _, :process, _, :normal}, state), 
+  do: {:noreply, state}
 
-  def handle_info({ref, %Tracker.Error{} = error}, state) when is_reference(ref) do
-    failure(ref, state, error)
-  end
+  def handle_info({:DOWN, ref, :process, _, _}, state), 
+  do: failure(ref, state, nil)
 
-  def handle_info({ref, connection_id}, state) when is_reference(ref) do
+  def handle_info({ref, %Tracker.Error{} = error}, state), 
+  do: failure(ref, state, error)
+
+  def handle_info({ref, <<connection_id::binary>>}, state) do
     {announce, state} = pop_in(state, [Access.key!(:requests), ref])
     Process.send_after(self(), {:timeout, announce}, @timeout)
 
-    {:noreply,
+    state = 
      update_in(state, [Access.key!(:ids), announce], fn list ->
        Enum.each(list, &GenServer.reply(&1, connection_id))
        connection_id
-     end)}
-  end
+     end)
 
-  def handle_info({:timeout, announce}, state) do
-    state
-    |> Map.update!(:ids, &Map.delete(&1, announce))
-    |> (&{:noreply, &1}).()
+    {:noreply, state}
   end
 
   defp failure(ref, state, error) do
