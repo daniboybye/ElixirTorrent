@@ -22,6 +22,7 @@ defmodule Torrent do
     :left,
     :last_index,
     :last_piece_length,
+    bitfield: nil,
     peer_status: nil,
     uploaded: 0,
     downloaded: 0,
@@ -50,13 +51,14 @@ defmodule Torrent do
           downloaded: non_neg_integer(),
           # "started" | "empty" | "completed" | "stopped"
           event: 0..3,
-          speed: speed()
+          speed: speed(),
+          bitfield: bitfield() | nil
         }
 
   alias __MODULE__.{
     Controller,
     Swarm,
-    Bitfield,
+    #Bitfield,
     PiecesStatistic,
     FileHandle,
     Uploader,
@@ -124,7 +126,6 @@ defmodule Torrent do
 
     children = [
       {Model, torrent},
-      {Bitfield, hash},
       {FileHandle, hash},
       {Uploader, hash},
       {Downloads, hash},
@@ -162,7 +163,7 @@ defmodule Torrent do
       left: bytes,
       last_piece_length: bytes - last_index * struct["info"]["piece length"],
       struct: struct,
-      last_index: last_index
+      last_index: last_index,
     }
   end
 

@@ -2,6 +2,8 @@ defmodule Torrent.Model do
   use GenServer
   use Via
 
+  alias Torrent.Bitfield
+
   @timeout_detect_the_speed 5 * 1_000
   @until_endgame 0
   @stopped Torrent.stopped()
@@ -18,7 +20,7 @@ defmodule Torrent.Model do
   def downloaded?(hash),
     do: GenServer.call(via(hash), :downloaded?)
 
-  @spec get(Torrent.hash(), atom() | [atom()]) :: any()
+  @spec get(Torrent.hash(), atom() | [atom()]) :: list(any())
   def get(hash, key),
     do: GenServer.call(via(hash), {:get, key})
 
@@ -34,6 +36,10 @@ defmodule Torrent.Model do
   def downloaded_piece(hash, index),
     do: GenServer.cast(via(hash), {:downloaded_piece, index})
 
+  @spec hash_check_failure(Torrent.hash(), Torrent.index()) :: :ok
+  def hash_check_failure(hash, index),
+    do: GenServer.cast(via(hash), {:hash_check_failure, index})
+
   def update_event(hash),
     do: GenServer.cast(via(hash), :update_event)
 
@@ -44,7 +50,14 @@ defmodule Torrent.Model do
     do: GenServer.cast(via(hash), {:set_peer_status, status})
 
   def init(torrent) do
+    bitfield = torrent
+      |> do_pieces_count
+      |> Bitfield.make
+
+    torrent = %Torrent{torrent | bitfield: bitfield}
+    
     message_for_next_detection(torrent)
+
     {:ok, torrent}
   end
 
@@ -64,21 +77,21 @@ defmodule Torrent.Model do
     do: {:reply, torrent.left === 0, torrent}
 
   def handle_cast({:downloaded_piece, index}, torrent) do
-    length = do_piece_length(index, torrent)
+    if Bitfield.have?(torrent.bitfield, index) do
+      {:noreply, torrent}
+    else
+      torrent = torrent
+        |> update_downloaded_bytes(index, 1)
+        |> if_downloaded
 
-    torrent = %Torrent{
-      torrent
-      | downloaded: torrent.downloaded + length,
-        left: torrent.left - length
-    }
+      {:noreply, torrent}
+    end
+  end
 
-    torrent =
-      with %Torrent{left: 0} <- torrent do
-        IO.puts("downloaded #{torrent.struct["info"]["name"]}")
-        %Torrent{torrent | event: Torrent.completed(), peer_status: :seed}
-      end
-
-    {:noreply, torrent}
+  def handle_cast({:hash_check_failure, index}, torrent) do
+    if Bitfield.have?(torrent.bitfield, index), 
+    do: {:noreply, update_downloaded_bytes(torrent, index, 0)},
+    else: {:noreply, torrent}
   end
 
   def handle_cast({:uploaded_subpiece, bytes_size}, torrent),
@@ -110,22 +123,22 @@ defmodule Torrent.Model do
   defp do_get(:bytes_size, %Torrent{downloaded: n, left: m}),
     do: n + m
 
-  defp do_get(:pieces_count, %Torrent{last_index: i}),
-    do: i + 1
+  defp do_get(:pieces_count, torrent),
+    do: do_pieces_count(torrent)
 
   defp do_get(:piece_length, torrent),
-    do: torrent.struct["info"]["piece length"]
+    do: do_piece_length(torrent)
 
   defp do_get(:mode, %Torrent{left: 0}), do: nil
 
   defp do_get(:mode, torrent) do
-    if torrent.left <= @until_endgame * do_get(:piece_length, torrent),
+    if torrent.left <= @until_endgame * do_piece_length(torrent),
       do: :endgame
   end
 
   # else mode: nil
 
-  defp do_get(:name, torrent), do: torrent.struct["info"]["name"]
+  defp do_get(:name, torrent), do: do_name(torrent)
 
   defp do_get(key, torrent), do: Map.get(torrent, key)
 
@@ -143,5 +156,30 @@ defmodule Torrent.Model do
        do: torrent.last_piece_length
 
   defp do_piece_length(_, torrent),
-    do: do_get(:piece_length, torrent)
+    do: do_piece_length(torrent)
+
+  defp do_piece_length(torrent),
+    do: torrent.struct["info"]["piece length"]
+
+  defp do_pieces_count(%Torrent{last_index: i}), do: i+1
+
+  defp do_name(torrent), do: torrent.struct["info"]["name"]
+
+  defp update_downloaded_bytes(torrent, index, x) do
+    length = do_piece_length(index, torrent)
+    coef = trunc(:math.pow(-1, x))
+    %Torrent{
+      torrent
+      | downloaded: torrent.downloaded - coef * length,
+        left: torrent.left + coef * length,
+        bitfield: Bitfield.set(torrent.bitfield, index, x)
+    }
+  end
+
+  defp if_downloaded(%Torrent{left: 0} = torrent) do
+    IO.puts("downloaded #{do_name(torrent)}")
+    %Torrent{torrent | event: Torrent.completed(), peer_status: :seed}
+  end
+
+  defp if_downloaded(torrent), do: torrent
 end

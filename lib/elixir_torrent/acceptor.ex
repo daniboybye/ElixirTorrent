@@ -22,8 +22,13 @@ defmodule Acceptor do
   @spec port_range() :: Range.t()
   def port_range(), do: 6881..9999
 
-  @spec open_udp() :: port() | nil
-  def open_udp(), do: Enum.find_value(port_range(), &set_up/1)
+  @spec open_udp() :: {:ok, port()} | :error
+  def open_udp() do 
+    Enum.find_value(port_range(), :error, fn number ->
+      with {:error, _} <- :gen_udp.open(number, socket_options()),
+      do: nil
+    end)
+  end
 
   @key :math.pow(2, 32) |> trunc() |> :rand.uniform() |> Kernel.-(1)
 
@@ -50,15 +55,5 @@ defmodule Acceptor do
     ip()
     |> Tuple.to_list()
     |> :binary.list_to_bin()
-  end
-
-  defp set_up(n) do
-    case :gen_udp.open(n, Acceptor.socket_options()) do
-      {:ok, socket} ->
-        socket
-
-      {:error, _} ->
-        nil
-    end
   end
 end

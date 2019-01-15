@@ -6,17 +6,12 @@ defmodule Torrent.FileHandle.Piece do
   use GenServer
   use Via
 
-  alias Torrent.{Bitfield, PiecesStatistic, Model}
+  alias Torrent.{PiecesStatistic, Model}
 
   @timeout_hibernate 30 * 1_000
 
-  def start_link({_, key} = arg) do
-    GenServer.start_link(__MODULE__, arg, name: via(key))
-  end
-
-  def child_spec({_, {index, _}} = arg) do
-    %{id: {__MODULE__, index}, start: {__MODULE__, :start_link, [arg]}}
-  end
+  def start_link({_, key} = arg),
+  do: GenServer.start_link(__MODULE__, arg, name: via(key))
 
   def key(hash, index), do: {index, hash}
 
@@ -91,10 +86,9 @@ defmodule Torrent.FileHandle.Piece do
     if res do
       Model.downloaded_piece(torrent_hash, index)
       PiecesStatistic.set(torrent_hash, index, :complete)
-      Bitfield.up(torrent_hash, index)
     else
+      Model.hash_check_failure(torrent_hash, index)
       PiecesStatistic.set(torrent_hash, index, nil)
-      Bitfield.down(torrent_hash, index)
     end
 
     res

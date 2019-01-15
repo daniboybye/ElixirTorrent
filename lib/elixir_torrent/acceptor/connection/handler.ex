@@ -4,7 +4,7 @@ defmodule Acceptor.Connection.Handler do
   alias Acceptor.Connection.Handshakes
   require Logger
 
-  @doc """
+  @docmodule """
   ListenSocket controls a :gen_tcp.listen 
   and do not need to be closed manually
   """
@@ -13,12 +13,9 @@ defmodule Acceptor.Connection.Handler do
   def port(), do: GenServer.call(__MODULE__, :port)
 
   def init(_) do
-    with socket when is_port(socket) <- Enum.find_value(Acceptor.port_range(), &set_up/1) do
-      Task.start_link(fn -> loop(socket) end)
+    with {:ok, socket} <- open_listen_socket({:stop, :no_free_port}) do
+      {:ok, _} = Task.start_link(fn -> loop(socket) end)
       {:ok, socket}
-    else
-      _ ->
-        {:stop, :not_free_port}
     end
   end
 
@@ -34,13 +31,15 @@ defmodule Acceptor.Connection.Handler do
     loop(socket)
   end
 
-  defp set_up(number) do
-    case :gen_tcp.listen(number, Acceptor.socket_options()) do
-      {:ok, socket} ->
-        socket
-
-      {:error, _} ->
-        nil
-    end
+  defp open_listen_socket(default) do
+    Enum.find_value(
+        Acceptor.port_range(),
+        default, 
+        fn number ->
+          with  {:error, _} <- 
+            :gen_tcp.listen(number, Acceptor.socket_options()), 
+          do: nil
+        end
+    )
   end
 end

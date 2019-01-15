@@ -10,7 +10,7 @@ defmodule PeerDiscovery.ConnectionIds do
   @timeout 60_000
 
   @spec get(Tracker.announce(), port(), :inet.ip_address(), :inet.port_number()) ::
-          Tracker.connection_id() | Tracker.Error.t() | nil
+          Tracker.connection_id() | Tracker.Error.t()
   def get(announce, socket, ip, port) do
     GenServer.call(
       __MODULE__,

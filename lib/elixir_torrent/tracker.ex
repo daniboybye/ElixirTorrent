@@ -23,8 +23,9 @@ defmodule Tracker do
   def default_interval(), do: 5 * 60
 
   @spec request!(announce(), Torrent.t(), Peer.id(), :inet.port_number(), key()) ::
-          Response.t() | Error.t() | no_return()
-  def request!(<<"http:", _::binary>> = announce, torrent, peer_id, port, key) do
+          Response.t() | Error.t() | none()
+  def request!(<<"http", _::binary>> = announce, torrent, peer_id, port, key) do
+    #http: and https: clauce
     # obfuscation = Keyword.get(options, :obfuscation, true)
 
     %{
@@ -77,15 +78,11 @@ defmodule Tracker do
       |> String.to_charlist()
       |> :inet.getaddr(:inet)
 
-    socket = Acceptor.open_udp()
+    {:ok, socket} = Acceptor.open_udp()
 
-    case PeerDiscovery.connection_id(announce, socket, ip, port) do
-      %Error{} = error ->
-        error
-
-      id ->
-        udp_announce(socket, ip, port, id, torrent, peer_id, my_port, key)
-    end
+    with id when is_binary(id) <-
+     PeerDiscovery.connection_id(announce, socket, ip, port), 
+     do: udp_announce(socket, ip, port, id, torrent, peer_id, my_port, key)
   end
 
   @spec udp_connect(port(), :inet.ip_address(), :inet.port_number()) ::
@@ -176,15 +173,9 @@ defmodule Tracker do
 
   @spec ip() :: <<_::32>>
   defp ip() do
-    Acceptor.ip_binary()
-    |> byte_size()
-    |> case do
-      4 ->
-        Acceptor.ip_binary()
+    ip = Acceptor.ip_binary()
 
-      _ ->
-        <<0::32>>
-    end
+    if byte_size(ip) === 4, do: ip, else: <<0::32>>
   end
 
   @docmodule """
@@ -229,9 +220,7 @@ defmodule Tracker do
   """
 
   defp to_peers(bin) when is_binary(bin) do
-    Acceptor.ip()
-    |> tuple_size()
-    |> case do
+    case tuple_size(Acceptor.ip()) do
       4 -> do_parse_ipv4([], bin)
       8 -> do_parse_ipv6([], bin)
     end

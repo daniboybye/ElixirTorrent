@@ -137,7 +137,6 @@ defmodule PeerDiscovery.Announce do
         )
       end
     )
-    state
   end
 
   defp delete(state, announce) do
@@ -171,7 +170,13 @@ defmodule PeerDiscovery.Announce do
     }
   end
 
-  defp next_request(%__MODULE__{request: announce} = state) do
+  defp next_request(%__MODULE__{request: <<_::binary>>} = state) do
+    state = %__MODULE__{state | request: next_announce(state)}
+    request(state)
+    state
+  end
+
+  defp next_announce(%__MODULE__{request: announce} = state) do
     state.announce
     |> Enum.drop_while(&(not Enum.member?(&1, announce)))
     |> (fn [x | y] -> {tl(Enum.drop_while(x, &(announce != &1))), y} end).()
@@ -185,8 +190,6 @@ defmodule PeerDiscovery.Announce do
       {[], []} ->
         nil
     end
-    |> (&%__MODULE__{state | request: &1}).()
-    |> request
   end
 
   defp extract_announce(%{"announce-list" => x}), do: x

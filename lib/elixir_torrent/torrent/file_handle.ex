@@ -40,22 +40,22 @@ defmodule Torrent.FileHandle do
     0..(last_index - 1)
     |> Enum.map(&make_piece(&1, length, all_files, hash, pieces_hash))
     |> (&[last_piece | &1]).()
-    |> Enum.map(&{Piece, &1})
     |> Supervisor.init(strategy: :one_for_one)
   end
 
   defp make_piece(index, length, all_files, torrent_hash, pieces_hash) do
     {offset, files} = files_for_index(index, all_files, length)
 
-    {
-      %Piece{
-        offset: offset,
-        files: files,
-        length: length,
-        hash: binary_part(pieces_hash, index * 20, 20)
-      },
-      Piece.key(torrent_hash, index)
+    piece = %Piece{
+      offset: offset,
+      files: files,
+      length: length,
+      hash: binary_part(pieces_hash, index * 20, 20)
     }
+
+    name = Piece.key(torrent_hash, index)
+    
+    Supervisor.child_spec({Piece, {piece, name}}, id: index)
   end
 
   defp init_files(%{"files" => files}) do
