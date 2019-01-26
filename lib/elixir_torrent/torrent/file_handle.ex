@@ -21,12 +21,12 @@ defmodule Torrent.FileHandle do
   defdelegate write(hash, index, begin, block), to: Piece
 
   def init(hash) do
-    [struct, last_index, last_piece_length] = 
-      Model.get(hash, [:struct, :last_index, :last_piece_length])
+    [metadata, last_index, last_piece_length] =
+      Model.get(hash, [:metadata, :last_index, :last_piece_length])
 
-    all_files = init_files(struct["info"])
-    length = struct["info"]["piece length"]
-    pieces_hash = struct["info"]["pieces"]
+    all_files = init_files(metadata["info"])
+    length = metadata["info"]["piece length"]
+    pieces_hash = metadata["info"]["pieces"]
 
     last_piece =
       make_piece(
@@ -54,7 +54,7 @@ defmodule Torrent.FileHandle do
     }
 
     name = Piece.key(torrent_hash, index)
-    
+
     Supervisor.child_spec({Piece, {piece, name}}, id: index)
   end
 

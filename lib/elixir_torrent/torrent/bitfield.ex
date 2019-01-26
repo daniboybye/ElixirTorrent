@@ -15,8 +15,8 @@ defmodule Torrent.Bitfield do
 
   @spec have?(binary(), non_neg_integer()) :: boolean()
   def have?(bitfield, index) do
-     <<_::bits-size(index), x::1, _::bits>> = bitfield
-     x === 1
+    <<_::bits-size(index), x::1, _::bits>> = bitfield
+    x === 1
   end
 
   defp size(pieces_count) do

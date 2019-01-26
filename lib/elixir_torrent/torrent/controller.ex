@@ -19,7 +19,7 @@ defmodule Torrent.Controller do
 
   def handle_info({:next_piece, strategy} = msg, hash) do
     with false <- Model.downloaded?(hash),
-         count when count > 0 <- Swarm.count(hash) do
+         count when count > 4 <- Swarm.count(hash) do
       next_piece(hash, strategy)
     else
       true ->
@@ -53,15 +53,10 @@ defmodule Torrent.Controller do
     if index = PiecesStatistic.choice_piece(hash, strategy) do
       pid = self()
 
-      downloaded = fn ->
-        Swarm.have(hash, index)
-        #GenServer.cast(pid, :downloaded_piece)
-      end
-
       Downloads.piece(
         hash,
         index,
-        downloaded,
+        fn -> Swarm.have(hash, index) end,
         fn -> send(pid, {:next_piece, :rare}) end
       )
     else

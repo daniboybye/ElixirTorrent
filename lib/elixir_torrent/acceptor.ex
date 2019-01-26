@@ -23,16 +23,16 @@ defmodule Acceptor do
   def port_range(), do: 6881..9999
 
   @spec open_udp() :: {:ok, port()} | :error
-  def open_udp() do 
+  def open_udp() do
     Enum.find_value(port_range(), :error, fn number ->
       with {:error, _} <- :gen_udp.open(number, socket_options()),
-      do: nil
+           do: nil
     end)
   end
 
-  @key :math.pow(2, 32) |> trunc() |> :rand.uniform() |> Kernel.-(1)
+  @key :crypto.strong_rand_bytes(4)
 
-  @spec key() :: Tracker.key()
+  @spec key() :: <<_::32>>
   def key(), do: @key
 
   @spec ip() :: tuple()

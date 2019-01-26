@@ -3,7 +3,6 @@ defmodule Tracker do
 
   alias __MODULE__.{Error, Response}
 
-  @type key :: non_neg_integer()
   @type connection_id :: <<_::64>>
   @type announce :: binary()
 
@@ -14,38 +13,41 @@ defmodule Tracker do
   @scrape <<2::32>>
   @error <<3::32>>
   @bento_nil Bento.encode!(nil)
-  @timeout 25_000
+  @timeout 5 * 60 * 1_000
 
+  # in miliseconds
   @spec udp_connect_timeout() :: pos_integer()
   def udp_connect_timeout(), do: @udp_connect_timeout
 
+  # in seconds
   @spec default_interval() :: pos_integer()
-  def default_interval(), do: 5 * 60
+  def default_interval(), do: 30 * 60
 
-  @spec request!(announce(), Torrent.t(), Peer.id(), :inet.port_number(), key()) ::
-          Response.t() | Error.t() | none()
-  def request!(<<"http", _::binary>> = announce, torrent, peer_id, port, key) do
-    #http: and https: clauce
+  @spec request!(binary(), Torrent.hash()) :: Response.t() | Error.t() | none()
+  def request!(<<"http", _::binary>> = announce, hash) do
+    # http: and https: clauce
     # obfuscation = Keyword.get(options, :obfuscation, true)
-
+    [uploaded, downloaded, left, event] = 
+      Torrent.get(hash, [:uploaded, :downloaded, :left, :event])
+    
     %{
       # "sha_ih" => :crypto.hash(:sha, torrent.hash)
-      "info_hash" => torrent.hash,
-      "peer_id" => peer_id,
+      "info_hash" => hash,
+      "peer_id" => Peer.id(),
       # obfuscation
-      "port" => port,
+      "port" => Acceptor.port(),
       "compact" => 1,
-      "uploaded" => torrent.uploaded,
-      "downloaded" => torrent.downloaded,
-      "left" => torrent.left,
-      "event" => Torrent.event_to_string(torrent.event),
-      "numwant" => numwant(torrent.left),
-      # "key" => key,
+      "uploaded" => uploaded,
+      "downloaded" => downloaded,
+      "left" => left,
+      "event" => Torrent.event_to_string(event),
+      "numwant" => numwant(left),
+      "key" => Acceptor.key(),
       # obfuscation
       "ip" => Acceptor.ip_string()
     }
     |> URI.encode_query()
-    |> (&<<announce::binary, "?", &1::binary>>).()
+    |> (& announce <> "?" <> &1).()
     |> HTTPoison.get!([], timeout: @timeout, recv_timeout: @timeout)
     |> Map.fetch!(:body)
     |> Bento.decode!()
@@ -67,7 +69,7 @@ defmodule Tracker do
     end
   end
 
-  def request!(<<"udp:", _::binary>> = announce, torrent, peer_id, my_port, key) do
+  def request!(<<"udp:", _::binary>> = announce, hash) do
     %URI{port: port, host: host} =
       announce
       |> URI.parse()
@@ -80,9 +82,8 @@ defmodule Tracker do
 
     {:ok, socket} = Acceptor.open_udp()
 
-    with id when is_binary(id) <-
-     PeerDiscovery.connection_id(announce, socket, ip, port), 
-     do: udp_announce(socket, ip, port, id, torrent, peer_id, my_port, key)
+    with {:ok, id} <- PeerDiscovery.connection_id(announce, socket, ip, port),
+         do: udp_announce(socket, ip, port, id, hash)
   end
 
   @spec udp_connect(port(), :inet.ip_address(), :inet.port_number()) ::
@@ -93,7 +94,7 @@ defmodule Tracker do
   end
 
   @spec do_udp_connect(
-          non_neg_integer(),
+          <<_::32>>,
           port(),
           :inet.ip_address(),
           non_neg_integer(),
@@ -109,14 +110,14 @@ defmodule Tracker do
         socket,
         ip,
         port,
-        [@udp_protocol_id, @connect, <<transaction_id::32>>]
+        [@udp_protocol_id, @connect, transaction_id]
       )
 
     case :gen_udp.recv(socket, 0, timeout * 1_000) do
-      {:ok, {^ip, ^port, <<@connect, ^transaction_id::32, connection_id::bytes-size(8)>>}} ->
+      {:ok, {^ip, ^port, <<@connect, ^transaction_id, connection_id::bytes-size(8)>>}} ->
         connection_id
 
-      {:ok, {^ip, ^port, <<@error, ^transaction_id::32, reason::binary>>}} ->
+      {:ok, {^ip, ^port, <<@error, ^transaction_id, reason::binary>>}} ->
         %Error{reason: reason}
 
       {:error, :timeout} ->
@@ -129,39 +130,22 @@ defmodule Tracker do
           :inet.ip_address(),
           :inet.port_number(),
           connection_id(),
-          Torrent.t(),
-          Peer.id(),
-          :inet.port_number(),
-          key()
+          Torrent.hash()
         ) :: Response.t() | no_return()
-  defp udp_announce(socket, ip, port, connection_id, torrent, peer_id, my_port, key) do
+  defp udp_announce(socket, ip, port, connection_id, hash) do
     transaction_id = generate_transaction_id()
-
-    message = [
-      connection_id,
-      @announce,
-      <<transaction_id::32>>,
-      torrent.hash,
-      peer_id,
-      <<torrent.downloaded::64>>,
-      <<torrent.left::64>>,
-      <<torrent.uploaded::64>>,
-      <<torrent.event::32>>,
-      ip(),
-      <<key::32>>,
-      <<numwant(torrent.left)::32>>,
-      <<my_port::16>>
-    ]
+    
+    message = make_msg_udp_request(connection_id, transaction_id, hash)
 
     :ok = :gen_udp.send(socket, ip, port, message)
 
     case :gen_udp.recv(socket, 0, @timeout) do
-      {:ok, {^ip, ^port, <<@error, ^transaction_id::32, reason::binary>>}} ->
+      {:ok, {^ip, ^port, <<@error, ^transaction_id, reason::binary>>}} ->
         %Error{reason: reason}
 
       {:ok,
        {^ip, ^port,
-        <<@announce, ^transaction_id::32, interval::32, leechers::32, seeders::32, peers::binary>>}} ->
+        <<@announce, ^transaction_id, interval::32, leechers::32, seeders::32, peers::binary>>}} ->
         %Response{
           interval: interval,
           complete: seeders,
@@ -169,13 +153,6 @@ defmodule Tracker do
           peers: to_peers(peers)
         }
     end
-  end
-
-  @spec ip() :: <<_::32>>
-  defp ip() do
-    ip = Acceptor.ip_binary()
-
-    if byte_size(ip) === 4, do: ip, else: <<0::32>>
   end
 
   @docmodule """
@@ -253,15 +230,34 @@ defmodule Tracker do
     |> do_parse_ipv6(bin)
   end
 
-  @spec generate_transaction_id() :: non_neg_integer()
-  defp generate_transaction_id() do
-    :math.pow(2, 32)
-    |> trunc()
-    |> :rand.uniform()
-    |> Kernel.-(1)
+  defp make_msg_udp_request(connection_id, transaction_id, hash) do
+    [downloaded, left, uploaded, event] = 
+      Torrent.get(hash, [:downloaded, :left, :uploaded, :event])
+
+    ip = Acceptor.ip_binary()
+    ip_field = if byte_size(ip) === 4, do: ip, else: <<0::32>>
+    [
+      connection_id,
+      @announce,
+      transaction_id,
+      hash,
+      Peer.id(),
+      <<downloaded::64>>,
+      <<left::64>>,
+      <<uploaded::64>>,
+      <<event::32>>,
+      ip_field,
+      Acceptor.key(),
+      <<numwant(left)::32>>,
+      <<Acceptor.port()::16>>
+    ]
   end
+
+  @spec generate_transaction_id() :: <<_::32>>
+  defp generate_transaction_id(), 
+    do: :crypto.strong_rand_bytes(4)
 
   defp numwant(0), do: 0
 
-  defp numwant(_), do: 100
+  defp numwant(_), do: 60
 end

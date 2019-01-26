@@ -50,12 +50,13 @@ defmodule Torrent.Model do
     do: GenServer.cast(via(hash), {:set_peer_status, status})
 
   def init(torrent) do
-    bitfield = torrent
+    bitfield =
+      torrent
       |> do_pieces_count
-      |> Bitfield.make
+      |> Bitfield.make()
 
     torrent = %Torrent{torrent | bitfield: bitfield}
-    
+
     message_for_next_detection(torrent)
 
     {:ok, torrent}
@@ -80,7 +81,8 @@ defmodule Torrent.Model do
     if Bitfield.have?(torrent.bitfield, index) do
       {:noreply, torrent}
     else
-      torrent = torrent
+      torrent =
+        torrent
         |> update_downloaded_bytes(index, 1)
         |> if_downloaded
 
@@ -89,9 +91,9 @@ defmodule Torrent.Model do
   end
 
   def handle_cast({:hash_check_failure, index}, torrent) do
-    if Bitfield.have?(torrent.bitfield, index), 
-    do: {:noreply, update_downloaded_bytes(torrent, index, 0)},
-    else: {:noreply, torrent}
+    if Bitfield.have?(torrent.bitfield, index),
+      do: {:noreply, update_downloaded_bytes(torrent, index, 0)},
+      else: {:noreply, torrent}
   end
 
   def handle_cast({:uploaded_subpiece, bytes_size}, torrent),
@@ -159,15 +161,16 @@ defmodule Torrent.Model do
     do: do_piece_length(torrent)
 
   defp do_piece_length(torrent),
-    do: torrent.struct["info"]["piece length"]
+    do: torrent.metadata["info"]["piece length"]
 
-  defp do_pieces_count(%Torrent{last_index: i}), do: i+1
+  defp do_pieces_count(%Torrent{last_index: i}), do: i + 1
 
-  defp do_name(torrent), do: torrent.struct["info"]["name"]
+  defp do_name(torrent), do: torrent.metadata["info"]["name"]
 
   defp update_downloaded_bytes(torrent, index, x) do
     length = do_piece_length(index, torrent)
     coef = trunc(:math.pow(-1, x))
+
     %Torrent{
       torrent
       | downloaded: torrent.downloaded - coef * length,

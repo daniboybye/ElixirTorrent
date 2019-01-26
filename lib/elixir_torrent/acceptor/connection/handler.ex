@@ -33,13 +33,12 @@ defmodule Acceptor.Connection.Handler do
 
   defp open_listen_socket(default) do
     Enum.find_value(
-        Acceptor.port_range(),
-        default, 
-        fn number ->
-          with  {:error, _} <- 
-            :gen_tcp.listen(number, Acceptor.socket_options()), 
-          do: nil
-        end
+      Acceptor.port_range(),
+      default,
+      fn number ->
+        with {:error, _} <- :gen_tcp.listen(number, Acceptor.socket_options()),
+             do: nil
+      end
     )
   end
 end

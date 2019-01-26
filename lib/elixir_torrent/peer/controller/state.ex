@@ -201,7 +201,7 @@ defmodule Peer.Controller.State do
   @spec handle_request(t(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           t() | {:error, :protocol_error, t()}
   def handle_request(state, index, begin, length) do
-    if index < state.pieces_count and Bitfield.have?(state.hash, index) do
+    if index < state.pieces_count and Torrent.have?(state.hash, index) do
       if not state.choke or FastExtension.upload?(state.fast_extension, index) do
         pid = self()
         sender_key = key(state)
@@ -287,7 +287,7 @@ defmodule Peer.Controller.State do
 
   @spec handle_allowed_fast(t(), Torrent.index()) :: t()
   def handle_allowed_fast(state, index) do
-    unless Bitfield.have?(state.hash, index) do
+    unless PiecesStatistic.get_status(state.hash, index) in [:complete, :processing] do
       PiecesStatistic.set(state.hash, index, :allowed_fast)
     end
 

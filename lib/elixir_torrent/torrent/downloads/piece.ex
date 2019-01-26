@@ -32,8 +32,8 @@ defmodule Torrent.Downloads.Piece do
     do: GenServer.cast(pid, {:download, [downloaded, requests_are_dealt]})
 
   @spec request(Torrent.hash(), Torrent.index(), Peer.id(), callback_peer_request()) :: :ok
-  def request(hash, index, peer_id, callback), 
-  do: GenServer.cast(key(index, hash), {:request, [peer_id, callback]})
+  def request(hash, index, peer_id, callback),
+    do: GenServer.cast(key(index, hash), {:request, [peer_id, callback]})
 
   @spec response(
           Torrent.hash(),

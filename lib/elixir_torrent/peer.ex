@@ -11,6 +11,8 @@ defmodule Peer do
 
   alias __MODULE__.{Sender, Controller, Receiver}
 
+  import ElixirTorrent, only: [version: 0]
+
   def child_spec(args) do
     %{
       id: __MODULE__,
@@ -40,8 +42,7 @@ defmodule Peer do
 
   @reserved <<0, 0, 0, 0, 0, 0, 0, 4>>
   @id_length 20
-  @id <<ElixirTorrent.version()::binary, "-",
-        :crypto.strong_rand_bytes(@id_length - byte_size(ElixirTorrent.version()) - 1)::binary>>
+  @id version() <> "-" <> :crypto.strong_rand_bytes(@id_length - byte_size(version()) - 1)
 
   @type t :: %__MODULE__{
           ip: ip(),

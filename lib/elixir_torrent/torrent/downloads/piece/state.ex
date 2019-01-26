@@ -51,7 +51,7 @@ defmodule Torrent.Downloads.Piece.State do
   end
 
   def download(%__MODULE__{waiting: []} = state, _, _) do
-    IO.inspect(Model.get(state.hash), label: "choicing processing piece")
+    IO.inspect(PiecesStatistic.get_status(state.hash, state.index), label: "choosing processing piece")
     state.requests_are_dealt.()
     state
   end
@@ -236,7 +236,7 @@ defmodule Torrent.Downloads.Piece.State do
     end
   end
 
-  #@spec new_request(t(), Piece.callback(), Request.t()) :: t()
+  # @spec new_request(t(), Piece.callback(), Request.t()) :: t()
   defp new_request(state, callback, request) do
     {begin, length} = request.subpiece
 

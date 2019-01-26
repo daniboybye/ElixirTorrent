@@ -88,7 +88,7 @@ defmodule Peer.Sender do
     do: do_send(socket, @have_none_id)
 
   def handle_cast({:bitfield, hash}, socket),
-    do: do_send(socket, [@bitfield_id, Torrent.get(hash, :bitfiled)])
+    do: do_send(socket, [@bitfield_id, Torrent.get(hash, :bitfield)])
 
   def handle_cast({:request, index, begin, len}, socket),
     do: do_send(socket, [@request_id, <<index::32>>, <<begin::32>>, <<len::32>>])

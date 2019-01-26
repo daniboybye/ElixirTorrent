@@ -1,6 +1,6 @@
 defmodule PeerDiscovery.Announce do
-  @enforce_keys [:torrent_pid, :announce, :hash]
-  defstruct [:torrent_pid, :announce, :hash, request: nil, peers: []]
+  @enforce_keys [:torrent_pid, :hash]
+  defstruct [:torrent_pid, :hash, requests: %{}, peers: %{}]
 
   use GenServer
   use Via
@@ -28,8 +28,6 @@ defmodule PeerDiscovery.Announce do
   alias Torrent.Model
   require Logger
 
-  # timeout solve Bento.decode!("")
-
   def start_link([_pid, torrent] = args) do
     GenServer.start_link(__MODULE__, args, name: via(torrent.hash))
   end
@@ -38,42 +36,56 @@ defmodule PeerDiscovery.Announce do
     do: GenServer.call(via(hash), :get)
 
   def connecting_to_peers(hash),
-  do: GenServer.cast(via(hash), :connecting_to_peers)
+    do: GenServer.cast(via(hash), :connecting_to_peers)
 
   def init([pid, torrent]) do
-    state = torrent.struct
-    |> extract_announce
-    |> Enum.map(&Enum.shuffle/1)
-    |> (&%__MODULE__{torrent_pid: pid, announce: &1, hash: torrent.hash}).()
     Process.monitor(pid)
-    send_after(self(), :request, 1_000)
+
+    torrent.metadata
+    |> extract_announce
+    |> Enum.reduce(0, fn announce, timeout ->
+      send_after(self(), {:request, announce}, timeout)
+      timeout + 500
+    end)
+
+    state = %__MODULE__{
+      torrent_pid: pid,
+      hash: torrent.hash
+    }
+
     {:ok, state}
   end
 
   def handle_call(:get, _, state),
-    do: {:reply, state.peers, state}
+    do: {:reply, Map.values(state.peers), state}
 
   def handle_cast(:connecting_to_peers, state) do
-    Acceptor.handshakes(state.peers, state.hash)
+    Acceptor.handshakes(Map.values(state.peers), state.hash)
     {:noreply, state}
   end
 
-  def handle_info(:request, state) do
-    case state.announce do
-      [[announce | _] | _] ->
-        state = %__MODULE__{state | request: announce}
-        request(state)
-        {:noreply, state}
+  def handle_info({:request, announce}, %__MODULE__{hash: hash} = state) do
+    %Task{ref: ref} =
+      Task.Supervisor.async_nolink(
+        Requests,
+        Tracker,
+        :request!,
+        [announce, hash]
+      )
 
-      [] ->
-        {:noreply, state}
-    end
+    {:noreply, put_in(state, [Access.key!(:requests), ref], announce)}
   end
 
-  def handle_info({_, %Tracker.Response{} = response}, state) do
-    send_after(self(), :request, response.interval * 1_000)
+  def handle_info({ref, %Tracker.Response{} = response}, state) do
+    {announce, state} = next_request(state, ref, response.interval)
+    state = put_in(state, [Access.key!(:peers), announce], response.peers)
 
-    {:noreply, response(state, response)}
+    Model.update_event(state.hash)
+
+    if Model.get(state.hash, :peer_status) != :seed,
+      do: Acceptor.handshakes(response.peers, state.hash)
+
+    {:noreply, state}
   end
 
   def handle_info({:DOWN, _, :process, pid, _}, %__MODULE__{torrent_pid: p} = state)
@@ -83,124 +95,63 @@ defmodule PeerDiscovery.Announce do
   def handle_info({:DOWN, _, :process, _, :normal}, state),
     do: {:noreply, state}
 
-  def handle_info({:DOWN, _, :process, _, _}, state),
-    do: {:noreply, next_request(state)}
+  def handle_info({:DOWN, ref, :process, _, _}, state),
+    do: failure(state, ref, Tracker.default_interval())
 
   def handle_info(
-        {_,
+        {ref,
          %Tracker.Error{
            reason: "Not a tracker",
            retry_in: "never"
          }},
         state
       ) do
-    new_state =
-      state
-      |> next_request()
-      |> delete(state.request)
-
-    {:noreply, new_state}
+    {:noreply, Map.update!(state, :requests, &Map.delete(&1, ref))}
   end
 
-  def handle_info({_, %Tracker.Error{reason: "Overloaded", retry_in: <<str::binary>>}}, state) do
-    state = case String.split(str, ~r"[^0-9]", part: 2) do
-      [<<>>, _] ->
-        state
+  def handle_info({ref, %Tracker.Error{reason: "Overloaded", retry_in: <<str::binary>>}}, state) do
+    timeout =
+      case String.split(str, ~r"[^0-9]", part: 2) do
+        [<<>>, _] ->
+          Tracker.default_interval()
 
-      # [number, _]
-      _ ->
-        # ignor timeout
-        state
-    end
-    {:noreply, next_request(state)}
+        [number, _] ->
+          number
+      end
+
+    failure(state, ref, timeout)
   end
 
-  def handle_info({_, %Tracker.Error{reason: reason}}, state) do
+  def handle_info({ref, %Tracker.Error{reason: reason}}, state) do
     Logger.warn("request failure reason: #{reason}")
 
-    {:noreply, next_request(state)}
+    failure(state, ref, Tracker.default_interval())
   end
 
-  defp request(%__MODULE__{request: nil}),
-    do: send_after(self(), :request, Tracker.default_interval() * 1_000)
-
-  defp request(%__MODULE__{request: announce, hash: hash} = state) do
-    Task.Supervisor.async_nolink(
-      Requests,
-      fn ->
-        Tracker.request!(
-          announce,
-          Torrent.get(hash),
-          Peer.id(),
-          Acceptor.port(),
-          Acceptor.key()
-        )
-      end
-    )
+  def handle_info({ref, _}, state) do
+    failure(state, ref, Tracker.default_interval())
   end
 
-  defp delete(state, announce) do
-    Map.update!(
-      state,
-      :announce,
-      fn x ->
-        Enum.map(x, &List.delete(&1, announce))
-        |> Enum.reject(&Enum.empty?/1)
-      end
-    )
+  defp next_request(state, ref, timeout) do
+    result = {announce, _} = pop_in(state, [Access.key!(:requests), ref])
+    send_after(self(), {:request, announce}, timeout * 1_000)
+    result
   end
 
-  defp response(state, response) do
-    Model.update_event(state.hash)
-
-    if Model.get(state.hash, :peer_status) != :seed,
-      do: Acceptor.handshakes(response.peers, state.hash)
-
-    send_after(self(), :request, response.interval * 1_000)
-    
-    %__MODULE__{
-      state
-      | announce:
-          List.update_at(
-            state.announce,
-            Enum.find_index(state.announce, &Enum.member?(&1, state.request)),
-            &[state.request | List.delete(&1, state.request)]
-          ),
-        peers: response.peers
-    }
+  defp failure(state, ref, timeout) do
+    {announce, state} = next_request(state, ref, timeout)
+    {:noreply, Map.update!(state, :peers, &Map.delete(&1, announce))}
   end
 
-  defp next_request(%__MODULE__{request: <<_::binary>>} = state) do
-    state = %__MODULE__{state | request: next_announce(state)}
-    request(state)
-    state
-  end
+  defp extract_announce(%{"announce-list" => x}), do: List.flatten(x)
 
-  defp next_announce(%__MODULE__{request: announce} = state) do
-    state.announce
-    |> Enum.drop_while(&(not Enum.member?(&1, announce)))
-    |> (fn [x | y] -> {tl(Enum.drop_while(x, &(announce != &1))), y} end).()
-    |> case do
-      {[x | _], _} ->
-        x
-
-      {[], [[x|_] | _]} ->
-        x
-
-      {[], []} ->
-        nil
-    end
-  end
-
-  defp extract_announce(%{"announce-list" => x}), do: x
-
-  defp extract_announce(%{"announce" => x}), do: [[x]]
+  defp extract_announce(%{"announce" => x}), do: [x]
 
   defp extract_announce(%{"nodes" => _nodes}) do
     # Enum.map(nodes, fn [host, port] -> :ok end)
     # TODO
     Logger.info("not implement: TORRENT without TRACKER")
 
-    [[]]
+    []
   end
 end

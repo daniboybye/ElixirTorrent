@@ -72,6 +72,8 @@ defmodule Torrent.PiecesStatistic do
   def get_status(hash, index),
     do: :ets.lookup_element(table_ref(hash), index, 3)
 
+  def have?(hash, index), do: get_status(hash, index) === :complete
+
   # def pieces_for_check(hash) do
   #   :ets.select(table_ref(hash),[
   #     {{:"$1", :"$2", :_},

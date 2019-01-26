@@ -11,7 +11,7 @@ defmodule Torrent.FileHandle.Piece do
   @timeout_hibernate 30 * 1_000
 
   def start_link({_, key} = arg),
-  do: GenServer.start_link(__MODULE__, arg, name: via(key))
+    do: GenServer.start_link(__MODULE__, arg, name: via(key))
 
   def key(hash, index), do: {index, hash}
 
@@ -25,11 +25,11 @@ defmodule Torrent.FileHandle.Piece do
   @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           (() -> iodata())
   def read(hash, index, begin, length),
-  do: GenServer.call(vk(hash, index), {:read, begin, length})
+    do: GenServer.call(vk(hash, index), {:read, begin, length})
 
   @spec write(Torrent.hash(), Torrent.index(), Torrent.begin(), binary()) :: :ok
-  def write(hash, index, begin, block), 
-  do: GenServer.cast(vk(hash, index), {:write, begin, block})
+  def write(hash, index, begin, block),
+    do: GenServer.cast(vk(hash, index), {:write, begin, block})
 
   def init({piece, key}), do: {:ok, piece, {:continue, {:check, key}}}
 
@@ -44,7 +44,7 @@ defmodule Torrent.FileHandle.Piece do
     do: {:reply, do_check(hash, index, piece), piece, @timeout_hibernate}
 
   def handle_call({:read, begin, length}, _, piece) do
-    {offset, files} = find_files(begin + piece.offset, piece.files) 
+    {offset, files} = find_files(begin + piece.offset, piece.files)
     fun = fn -> do_read(offset, length, files) end
     {:reply, fun, piece, @timeout_hibernate}
   end

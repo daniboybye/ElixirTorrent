@@ -18,20 +18,19 @@ defmodule ElixirTorrent do
 
   defp info(hash) do
     Process.sleep(45_000)
-    [name, speed, downloaded, size] = 
-      Torrent.get(hash, [:name, :speed, :downloaded, :bytes_size])
-    
+    [name, speed, downloaded, size] = Torrent.get(hash, [:name, :speed, :downloaded, :bytes_size])
+
     if downloaded === size do
       :normal
     else
       [
-        name, 
+        name,
         "download: #{speed.download} Kb/s",
-      "upload: #{speed.upload} Kb/s",
-      "#{Float.ceil(downloaded*100 / size)}%",
-      "---------------------------------------"
+        "upload: #{speed.upload} Kb/s",
+        "#{Float.ceil(downloaded * 100 / size)}%",
+        "---------------------------------------"
       ]
-      |>Enum.intersperse("\r\n")
+      |> Enum.intersperse("\r\n")
       |> IO.puts()
 
       info(hash)
