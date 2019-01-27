@@ -19,14 +19,14 @@ defmodule Torrent.Controller do
 
   def handle_info({:next_piece, strategy} = msg, hash) do
     with false <- Model.downloaded?(hash),
-         count when count > 4 <- Swarm.count(hash) do
+         count when count > 2 <- Swarm.count(hash) do
       next_piece(hash, strategy)
     else
       true ->
         Swarm.seed(hash)
         Downloads.stop(hash)
 
-      0 ->
+      _ ->
         Model.set_peer_status(hash, :connecting_to_peers)
         PeerDiscovery.connecting_to_peers(hash)
         send_after(self(), msg, 20_000)

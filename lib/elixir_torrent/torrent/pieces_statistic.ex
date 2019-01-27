@@ -74,6 +74,8 @@ defmodule Torrent.PiecesStatistic do
 
   def have?(hash, index), do: get_status(hash, index) === :complete
 
+  def i(hash), do: :ets.i(table_ref(hash))
+
   # def pieces_for_check(hash) do
   #   :ets.select(table_ref(hash),[
   #     {{:"$1", :"$2", :_},
@@ -111,14 +113,16 @@ defmodule Torrent.PiecesStatistic do
 
   defp choice_rare(_, {_, :allowed_fast} = acc), do: acc
 
-  defp choice_rare({_, 0, _}, acc), do: acc
-
-  defp choice_rare({index, _, :allowed_fast}, _), do: {index, :allowed_fast}
-
   defp choice_rare({_, _, status}, acc) when status in [:complete, :processing],
     do: acc
 
+  defp choice_rare({index, _, :allowed_fast}, _), do: {index, :allowed_fast}
+
+  defp choice_rare({index, 0, _}, nil), do: [{index, 1_000_000_000}]
+
   defp choice_rare({index, n, _}, nil), do: [{index, n}]
+
+  defp choice_rare({_, 0, _}, acc), do: acc
 
   defp choice_rare({index, n, _}, acc) do
     list = [{index, n} | acc]

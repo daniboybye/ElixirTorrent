@@ -5,7 +5,7 @@ defmodule Peer.Controller do
   require Logger
 
   alias __MODULE__.{State, FastExtension}
-  alias Peer.Sender
+  #alias Peer.Sender
   alias Torrent.{Uploader, Downloads}
 
   import Peer, only: [make_key: 2, key_to_id: 1, key_to_hash: 1]

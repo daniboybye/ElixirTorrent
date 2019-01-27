@@ -57,10 +57,10 @@ defmodule PeerDiscovery.Announce do
   end
 
   def handle_call(:get, _, state),
-    do: {:reply, Map.values(state.peers), state}
+    do: {:reply, peers(state), state}
 
   def handle_cast(:connecting_to_peers, state) do
-    Acceptor.handshakes(Map.values(state.peers), state.hash)
+    Acceptor.handshakes(peers(state), state.hash)
     {:noreply, state}
   end
 
@@ -153,5 +153,11 @@ defmodule PeerDiscovery.Announce do
     Logger.info("not implement: TORRENT without TRACKER")
 
     []
+  end
+
+  defp peers(state) do
+    state.peers
+    |> Map.values()
+    |> Enum.concat()
   end
 end

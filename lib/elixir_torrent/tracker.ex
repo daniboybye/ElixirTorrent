@@ -10,7 +10,7 @@ defmodule Tracker do
   @udp_protocol_id <<0x41727101980::64>>
   @connect <<0::32>>
   @announce <<1::32>>
-  @scrape <<2::32>>
+  #@scrape <<2::32>>
   @error <<3::32>>
   @bento_nil Bento.encode!(nil)
   @timeout 5 * 60 * 1_000
@@ -82,7 +82,7 @@ defmodule Tracker do
 
     {:ok, socket} = Acceptor.open_udp()
 
-    with {:ok, id} <- PeerDiscovery.connection_id(announce, socket, ip, port),
+    with {:ok, id} <- PeerDiscovery.connection_id(socket, ip, port),
          do: udp_announce(socket, ip, port, id, hash)
   end
 
@@ -112,12 +112,12 @@ defmodule Tracker do
         port,
         [@udp_protocol_id, @connect, transaction_id]
       )
-
+  	
     case :gen_udp.recv(socket, 0, timeout * 1_000) do
-      {:ok, {^ip, ^port, <<@connect, ^transaction_id, connection_id::bytes-size(8)>>}} ->
+      {:ok, {^ip, ^port, <<@connect, ^transaction_id::bytes-size(4), connection_id::bytes-size(8)>>}} ->
         connection_id
 
-      {:ok, {^ip, ^port, <<@error, ^transaction_id, reason::binary>>}} ->
+      {:ok, {^ip, ^port, <<@error, ^transaction_id::bytes-size(4), reason::binary>>}} ->
         %Error{reason: reason}
 
       {:error, :timeout} ->
@@ -140,12 +140,12 @@ defmodule Tracker do
     :ok = :gen_udp.send(socket, ip, port, message)
 
     case :gen_udp.recv(socket, 0, @timeout) do
-      {:ok, {^ip, ^port, <<@error, ^transaction_id, reason::binary>>}} ->
+      {:ok, {^ip, ^port, <<@error, ^transaction_id::bytes-size(4), reason::binary>>}} ->
         %Error{reason: reason}
 
       {:ok,
        {^ip, ^port,
-        <<@announce, ^transaction_id, interval::32, leechers::32, seeders::32, peers::binary>>}} ->
+        <<@announce, ^transaction_id::bytes-size(4), interval::32, leechers::32, seeders::32, peers::binary>>}} ->
         %Response{
           interval: interval,
           complete: seeders,
@@ -155,7 +155,7 @@ defmodule Tracker do
     end
   end
 
-  @docmodule """
+  @moduledoc """
     scrape request:
     Offset          Size            Name            Value
     0               64-bit integer  connection_id
@@ -186,10 +186,10 @@ defmodule Tracker do
         )
 
       case :gen_udp.recv(socket, 0, @timeout) do
-        {:ok, {^ip, ^port, <<@error, ^transaction_id::32, reason::binary>>}} ->
+        {:ok, {^ip, ^port, <<@error::bytes-size(4), ^transaction_id::bytes-size(4), reason::binary>>}} ->
           %Error{reason: reason}
 
-        {:ok, {^ip, ^port, <<@scrape, ^transaction_id::32, _::binary>>}} ->
+        {:ok, {^ip, ^port, <<@scrape::bytes-size(4), ^transaction_id::bytes-size(4), _::binary>>}} ->
           # TODO
           :ok
       end

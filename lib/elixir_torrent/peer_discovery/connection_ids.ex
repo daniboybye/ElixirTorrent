@@ -9,22 +9,23 @@ defmodule PeerDiscovery.ConnectionIds do
 
   @timeout 60_000
 
-  @spec get(Tracker.announce(), port(), :inet.ip_address(), :inet.port_number()) ::
+  @spec get(port(), :inet.ip_address(), :inet.port_number()) ::
           {:ok, Tracker.connection_id()} | Tracker.Error.t() | :error
-  def get(announce, socket, ip, port) do
+  def get(socket, ip, port) do
     GenServer.call(
       __MODULE__,
-      [announce, socket, ip, port],
+      [socket, ip, port],
       90 * 60 * 1_000
     )
   end
 
   def init(_), do: {:ok, %State{}}
 
-  def handle_call([announce, socket, ip, port], from, state) do
-    case Map.fetch(state.ids, announce) do
+  def handle_call([socket, ip, port], from, state) do
+    key = {ip, port}
+    case Map.fetch(state.ids, key) do
       {:ok, [_ | _]} ->
-        {:noreply, update_in(state, [Access.key!(:ids), announce], &[from | &1])}
+        {:noreply, update_in(state, [Access.key!(:ids), key], &[from | &1])}
 
       {:ok, connection_id} ->
         {:reply, {:ok, connection_id}, state}
@@ -41,14 +42,14 @@ defmodule PeerDiscovery.ConnectionIds do
         {:noreply,
          %State{
            state
-           | ids: Map.put(state.ids, announce, [from]),
-             requests: Map.put(state.requests, ref, announce)
+           | ids: Map.put(state.ids, key, [from]),
+             requests: Map.put(state.requests, ref, key)
          }}
     end
   end
 
-  def handle_info({:timeout, announce}, state),
-    do: {:noreply, Map.update!(state, :ids, &Map.delete(&1, announce))}
+  def handle_info({:timeout, key}, state),
+    do: {:noreply, Map.update!(state, :ids, &Map.delete(&1, key))}
 
   def handle_info({:DOWN, _, :process, _, :normal}, state),
     do: {:noreply, state}
@@ -60,11 +61,11 @@ defmodule PeerDiscovery.ConnectionIds do
     do: failure(ref, state, error)
 
   def handle_info({ref, <<connection_id::binary>>}, state) do
-    {announce, state} = pop_in(state, [Access.key!(:requests), ref])
-    Process.send_after(self(), {:timeout, announce}, @timeout)
+    {key, state} = pop_in(state, [Access.key!(:requests), ref])
+    Process.send_after(self(), {:timeout, key}, @timeout)
 
     state =
-      update_in(state, [Access.key!(:ids), announce], fn list ->
+      update_in(state, [Access.key!(:ids), key], fn list ->
         Enum.each(list, &GenServer.reply(&1, {:ok, connection_id}))
         connection_id
       end)
@@ -73,8 +74,8 @@ defmodule PeerDiscovery.ConnectionIds do
   end
 
   defp failure(ref, state, error) do
-    {announce, state} = pop_in(state, [Access.key!(:requests), ref])
-    {list, state} = pop_in(state, [Access.key!(:ids), announce])
+    {key, state} = pop_in(state, [Access.key!(:requests), ref])
+    {list, state} = pop_in(state, [Access.key!(:ids), key])
     Enum.each(list, &GenServer.reply(&1, error))
     {:noreply, state}
   end

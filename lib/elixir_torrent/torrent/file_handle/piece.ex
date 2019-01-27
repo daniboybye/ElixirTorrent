@@ -34,8 +34,9 @@ defmodule Torrent.FileHandle.Piece do
   def init({piece, key}), do: {:ok, piece, {:continue, {:check, key}}}
 
   def handle_continue({:check, {index, hash}}, piece) do
-    with x when x in [:complete, :processing] <- PiecesStatistic.get_status(hash, index),
-         do: do_check(hash, index, piece)
+    if PiecesStatistic.get_status(hash, index) in [:complete, :processing] do
+      do_check(hash, index, piece)
+    end
 
     {:noreply, piece, :hibernate}
   end

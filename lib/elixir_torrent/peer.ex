@@ -2,7 +2,7 @@ defmodule Peer do
   @enforce_keys [:ip, :port]
   defstruct [:ip, :port, id: nil]
 
-  @docmodule """
+  @moduledoc """
   Recommend Peer controls a :gen_tcp.socket 
   and do not need to be closed manually
   """

@@ -5,7 +5,7 @@ defmodule Torrent.Model do
   alias Torrent.Bitfield
 
   @timeout_detect_the_speed 5 * 1_000
-  @until_endgame 0
+  @until_endgame 4
   @stopped Torrent.stopped()
 
   @spec start_link(Torrent.t()) :: GenServer.on_start()
@@ -116,7 +116,7 @@ defmodule Torrent.Model do
 
     speed = %{
       download: detected_the_speed(torrent.downloaded, download),
-      uplaod: detected_the_speed(torrent.uploaded, upload)
+      upload: detected_the_speed(torrent.uploaded, upload)
     }
 
     {:noreply, %Torrent{torrent | speed: speed}}
