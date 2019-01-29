@@ -23,7 +23,7 @@ defmodule Torrent.FileHandle.Piece do
   end
 
   @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
-          (() -> iodata())
+          (() -> {:ok, iodata()} | :error)
   def read(hash, index, begin, length),
     do: GenServer.call(vk(hash, index), {:read, begin, length})
 
@@ -45,14 +45,14 @@ defmodule Torrent.FileHandle.Piece do
     do: {:reply, do_check(hash, index, piece), piece, @timeout_hibernate}
 
   def handle_call({:read, begin, length}, _, piece) do
-    {offset, files} = find_files(begin + piece.offset, piece.files)
+    offset = begin + piece.offset
+    files = piece.files
     fun = fn -> do_read(offset, length, files) end
     {:reply, fun, piece, @timeout_hibernate}
   end
 
   def handle_cast({:write, begin, block}, piece) do
-    {offset, files} = find_files(begin + piece.offset, piece.files)
-    do_write(offset, files, block)
+    do_write(piece.offset + begin, piece.files, block)
     {:noreply, piece, @timeout_hibernate}
   end
 
@@ -61,9 +61,12 @@ defmodule Torrent.FileHandle.Piece do
 
   defp do_read(offset, length, files, data \\ [])
 
-  defp do_read(_, 0, _, data), do: data
+  defp do_read(_, 0, _, data), do: {:ok, data}
 
-  defp do_read(_, _, [], data), do: data
+  defp do_read(_, _, [], _), do: :error
+
+  defp do_read(offset, length, [{_, file_length} | files], data) when offset >= file_length,
+  do: do_read(offset - file_length, length, files, data)
 
   defp do_read(offset, length, [{pid, _} | files], data) do
     {:ok, block} = :file.pread(pid, {:bof, offset}, length)
@@ -71,6 +74,9 @@ defmodule Torrent.FileHandle.Piece do
   end
 
   defp do_write(_, _, <<>>), do: :ok
+
+  defp do_write(offset, [{_, len} | files], bin) when offset >= len,
+  do: do_write(offset - len, files, bin)
 
   defp do_write(offset, [{pid, len} | files], bin) do
     k = min(byte_size(bin), len - offset)
@@ -81,7 +87,7 @@ defmodule Torrent.FileHandle.Piece do
   end
 
   defp do_check(torrent_hash, index, piece) do
-    block = do_read(piece.offset, piece.length, piece.files)
+    {:ok, block} = do_read(piece.offset, piece.length, piece.files)
     res = piece.hash === :crypto.hash(:sha, block)
 
     if res do
@@ -93,10 +99,5 @@ defmodule Torrent.FileHandle.Piece do
     end
 
     res
-  end
-
-  defp find_files(offset, files) do
-    {left, right} = Enum.split_while(files, &(elem(&1, 1) <= offset))
-    {offset - elem(List.last([{nil, 0} | left]), 1), right}
   end
 end

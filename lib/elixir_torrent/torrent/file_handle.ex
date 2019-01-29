@@ -32,19 +32,20 @@ defmodule Torrent.FileHandle do
       make_piece(
         last_index,
         last_piece_length,
+        length,
         all_files,
         hash,
         pieces_hash
       )
 
     0..(last_index - 1)
-    |> Enum.map(&make_piece(&1, length, all_files, hash, pieces_hash))
+    |> Enum.map(&make_piece(&1, length, length, all_files, hash, pieces_hash))
     |> (&[last_piece | &1]).()
     |> Supervisor.init(strategy: :one_for_one)
   end
 
-  defp make_piece(index, length, all_files, torrent_hash, pieces_hash) do
-    {offset, files} = files_for_index(index, all_files, length)
+  defp make_piece(index, length, piece_length, all_files, torrent_hash, pieces_hash) do
+    {offset, files} = files_for_index(index, all_files, piece_length, length)
 
     piece = %Piece{
       offset: offset,
@@ -101,9 +102,19 @@ defmodule Torrent.FileHandle do
     pid
   end
 
-  defp files_for_index(index, files, piece_len) do
-    pos = index * piece_len
-    {left, right} = Enum.split_while(files, &(elem(&1, 0) <= pos))
-    {pos - elem(List.last([{0, 0} | left]), 0), Keyword.values(right)}
+  defp files_for_index(index, files, piece_len, length) do
+    begin_offset = index * piece_len
+
+    #right are the files whose end is before begin_offset
+    {left, right} = 
+      Enum.split_while(files, &(elem(&1, 0) <= begin_offset))
+
+    offset_from_first_file = 
+      begin_offset - elem(List.last([{0, nil} | left]), 0)
+
+    {files, [last_file | _]} = 
+      Enum.split_while(right, &(elem(&1,0) < begin_offset + length - 1))
+    
+    {offset_from_first_file, Keyword.values(files ++ [last_file])}
   end
 end

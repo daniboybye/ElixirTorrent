@@ -23,6 +23,7 @@ defmodule PeerDiscovery.ConnectionIds do
 
   def handle_call([socket, ip, port], from, state) do
     key = {ip, port}
+
     case Map.fetch(state.ids, key) do
       {:ok, [_ | _]} ->
         {:noreply, update_in(state, [Access.key!(:ids), key], &[from | &1])}

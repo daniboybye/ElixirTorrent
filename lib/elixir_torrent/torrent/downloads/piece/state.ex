@@ -51,7 +51,10 @@ defmodule Torrent.Downloads.Piece.State do
   end
 
   def download(%__MODULE__{waiting: []} = state, _, _) do
-    IO.inspect(PiecesStatistic.get_status(state.hash, state.index), label: "choosing processing piece")
+    IO.inspect(PiecesStatistic.get_status(state.hash, state.index),
+      label: "choosing processing piece"
+    )
+
     state.requests_are_dealt.()
     state
   end
@@ -71,12 +74,12 @@ defmodule Torrent.Downloads.Piece.State do
   end
 
   @spec make_subpieces(waiting(), Torrent.length(), Torrent.length() | 0) :: waiting()
-  defp make_subpieces(res, len, pos) when pos + @subpiece_length >= len do
-    [{pos, len - pos} | res]
+  defp make_subpieces(acc, len, pos) when pos + @subpiece_length >= len do
+    [{pos, len - pos} | acc]
   end
 
-  defp make_subpieces(res, len, pos) do
-    [{pos, @subpiece_length} | res]
+  defp make_subpieces(acc, len, pos) do
+    [{pos, @subpiece_length} | acc]
     |> make_subpieces(len, pos + @subpiece_length)
   end
 

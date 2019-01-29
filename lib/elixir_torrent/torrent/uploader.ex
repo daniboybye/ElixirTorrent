@@ -27,7 +27,7 @@ defmodule Torrent.Uploader do
         name = {begin, length, index, peer_id, hash}
         Registry.register(Registry, name, nil)
 
-        block = FileHandle.read(hash, index, begin, length).()
+        {:ok, block} = FileHandle.read(hash, index, begin, length).()
         callback.(block)
         Model.uploaded_subpiece(hash, length)
       end

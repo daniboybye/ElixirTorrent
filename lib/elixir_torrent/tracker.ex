@@ -10,7 +10,7 @@ defmodule Tracker do
   @udp_protocol_id <<0x41727101980::64>>
   @connect <<0::32>>
   @announce <<1::32>>
-  #@scrape <<2::32>>
+  # @scrape <<2::32>>
   @error <<3::32>>
   @bento_nil Bento.encode!(nil)
   @timeout 5 * 60 * 1_000
@@ -27,9 +27,9 @@ defmodule Tracker do
   def request!(<<"http", _::binary>> = announce, hash) do
     # http: and https: clauce
     # obfuscation = Keyword.get(options, :obfuscation, true)
-    [uploaded, downloaded, left, event] = 
+    [uploaded, downloaded, left, event] =
       Torrent.get(hash, [:uploaded, :downloaded, :left, :event])
-    
+
     %{
       # "sha_ih" => :crypto.hash(:sha, torrent.hash)
       "info_hash" => hash,
@@ -47,7 +47,7 @@ defmodule Tracker do
       "ip" => Acceptor.ip_string()
     }
     |> URI.encode_query()
-    |> (& announce <> "?" <> &1).()
+    |> (&(announce <> "?" <> &1)).()
     |> HTTPoison.get!([], timeout: @timeout, recv_timeout: @timeout)
     |> Map.fetch!(:body)
     |> Bento.decode!()
@@ -112,9 +112,10 @@ defmodule Tracker do
         port,
         [@udp_protocol_id, @connect, transaction_id]
       )
-  	
+
     case :gen_udp.recv(socket, 0, timeout * 1_000) do
-      {:ok, {^ip, ^port, <<@connect, ^transaction_id::bytes-size(4), connection_id::bytes-size(8)>>}} ->
+      {:ok,
+       {^ip, ^port, <<@connect, ^transaction_id::bytes-size(4), connection_id::bytes-size(8)>>}} ->
         connection_id
 
       {:ok, {^ip, ^port, <<@error, ^transaction_id::bytes-size(4), reason::binary>>}} ->
@@ -134,7 +135,7 @@ defmodule Tracker do
         ) :: Response.t() | no_return()
   defp udp_announce(socket, ip, port, connection_id, hash) do
     transaction_id = generate_transaction_id()
-    
+
     message = make_msg_udp_request(connection_id, transaction_id, hash)
 
     :ok = :gen_udp.send(socket, ip, port, message)
@@ -145,7 +146,8 @@ defmodule Tracker do
 
       {:ok,
        {^ip, ^port,
-        <<@announce, ^transaction_id::bytes-size(4), interval::32, leechers::32, seeders::32, peers::binary>>}} ->
+        <<@announce, ^transaction_id::bytes-size(4), interval::32, leechers::32, seeders::32,
+          peers::binary>>}} ->
         %Response{
           interval: interval,
           complete: seeders,
@@ -231,11 +233,12 @@ defmodule Tracker do
   end
 
   defp make_msg_udp_request(connection_id, transaction_id, hash) do
-    [downloaded, left, uploaded, event] = 
+    [downloaded, left, uploaded, event] =
       Torrent.get(hash, [:downloaded, :left, :uploaded, :event])
 
     ip = Acceptor.ip_binary()
     ip_field = if byte_size(ip) === 4, do: ip, else: <<0::32>>
+
     [
       connection_id,
       @announce,
@@ -254,7 +257,7 @@ defmodule Tracker do
   end
 
   @spec generate_transaction_id() :: <<_::32>>
-  defp generate_transaction_id(), 
+  defp generate_transaction_id(),
     do: :crypto.strong_rand_bytes(4)
 
   defp numwant(0), do: 0
