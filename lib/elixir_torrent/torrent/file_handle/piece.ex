@@ -66,7 +66,7 @@ defmodule Torrent.FileHandle.Piece do
   defp do_read(_, _, [], _), do: :error
 
   defp do_read(offset, length, [{_, file_length} | files], data) when offset >= file_length,
-  do: do_read(offset - file_length, length, files, data)
+    do: do_read(offset - file_length, length, files, data)
 
   defp do_read(offset, length, [{pid, _} | files], data) do
     {:ok, block} = :file.pread(pid, {:bof, offset}, length)
@@ -76,7 +76,7 @@ defmodule Torrent.FileHandle.Piece do
   defp do_write(_, _, <<>>), do: :ok
 
   defp do_write(offset, [{_, len} | files], bin) when offset >= len,
-  do: do_write(offset - len, files, bin)
+    do: do_write(offset - len, files, bin)
 
   defp do_write(offset, [{pid, len} | files], bin) do
     k = min(byte_size(bin), len - offset)

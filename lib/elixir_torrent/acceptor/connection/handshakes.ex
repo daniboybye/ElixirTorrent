@@ -9,11 +9,8 @@ defmodule Acceptor.Connection.Handshakes do
     }
   end
 
-  defp start(fun),
-    do: Task.Supervisor.start_child(__MODULE__, fun)
-
   def recv(socket) do
-    case start(fn -> do_recv(socket) end) do
+    case start_task(fn -> do_recv(socket) end) do
       {:ok, pid} ->
         :ok = :gen_tcp.controlling_process(socket, pid)
 
@@ -27,7 +24,7 @@ defmodule Acceptor.Connection.Handshakes do
 
   @spec handshakes(list(Peer.t()), Torrent.hash()) :: :ok
   def handshakes(peers, hash),
-    do: Enum.each(peers, &start(fn -> do_send(&1, hash) end))
+    do: Enum.each(peers, &start_task(fn -> do_send(&1, hash) end))
 
   @pstr "BitTorrent protocol"
   @pstrlen <<byte_size(@pstr)>>
@@ -36,47 +33,54 @@ defmodule Acceptor.Connection.Handshakes do
 
   alias Acceptor.BlackList
 
-  @spec do_send(Peer.t(), Torrent.hash()) :: :ok | none()
+  defp start_task(fun),
+    do: Task.Supervisor.start_child(__MODULE__, fun)
+
+  @spec do_send(Peer.t(), Torrent.hash()) :: :ok | any()
   defp do_send(%Peer{} = peer, hash) do
-    false = Peer.exists?(peer, hash)
-    ip = String.to_charlist(peer.ip)
-    opts = Acceptor.socket_options()
-    {:ok, socket} = :gen_tcp.connect(ip, peer.port, opts, @timeout)
-    send_msg(socket, hash)
-    {^hash, peer_id, reserved} = recv_msg(socket)
-    false = BlackList.member?(peer_id)
-    add_peer(hash, peer_id, reserved, socket)
+    with false <- Peer.exists?(peer, hash),
+         ip = String.to_charlist(peer.ip),
+         opts = Acceptor.socket_options(),
+         {:ok, socket} <- :gen_tcp.connect(ip, peer.port, opts, @timeout),
+         :ok <- send_msg(socket, hash),
+         {^hash, peer_id, reserved} <- recv_msg(socket),
+         false <- BlackList.member?(peer_id),
+         :ok <- add_peer(hash, peer_id, reserved, socket),
+         do: :ok
   end
 
-  @spec do_recv(port()) :: :ok | none()
+  @spec do_recv(port()) :: :ok | any()
   defp do_recv(socket) do
-    {hash, peer_id, reserved} = recv_msg(socket)
-    false = BlackList.member?(peer_id)
-    true = Torrent.has_hash?(hash)
-    send_msg(socket, hash)
-    add_peer(hash, peer_id, reserved, socket)
+    with {hash, peer_id, reserved} <- recv_msg(socket),
+         false <- BlackList.member?(peer_id),
+         true <- Torrent.has_hash?(hash),
+         :ok <- send_msg(socket, hash),
+         :ok <- add_peer(hash, peer_id, reserved, socket),
+         do: :ok
   end
 
   defp add_peer(hash, peer_id, reserved, socket) do
-    pid =
-      case Torrent.add_peer(hash, peer_id, reserved, socket) do
-        {:ok, pid} -> pid
-        {:ok, pid, _} -> pid
-      end
+    case Torrent.add_peer(hash, peer_id, reserved, socket) do
+      {:ok, pid} ->
+        :gen_tcp.controlling_process(socket, pid)
 
-    :ok = :gen_tcp.controlling_process(socket, pid)
+      {:ok, pid, _} ->
+        :gen_tcp.controlling_process(socket, pid)
+
+      _ ->
+        :ok
+    end
   end
 
   defp send_msg(socket, hash) do
     msg = [@pstrlen, @pstr, Peer.reserved(), hash, Peer.id()]
-    :ok = :gen_tcp.send(socket, msg)
+    :gen_tcp.send(socket, msg)
   end
 
   defp recv_msg(socket) do
-    {:ok,
-     <<@pstrlen, @pstr, reserved::bytes-size(8), hash::bytes-size(20), peer_id::bytes-size(20)>>} =
-      :gen_tcp.recv(socket, @msg_length, @timeout)
-
-    {hash, peer_id, reserved}
+    with {:ok,
+          <<@pstrlen, @pstr, reserved::bytes-size(8), hash::bytes-size(20),
+            peer_id::bytes-size(20)>>} <- :gen_tcp.recv(socket, @msg_length, @timeout),
+         do: {hash, peer_id, reserved}
   end
 end

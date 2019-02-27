@@ -105,16 +105,13 @@ defmodule Torrent.FileHandle do
   defp files_for_index(index, files, piece_len, length) do
     begin_offset = index * piece_len
 
-    #right are the files whose end is before begin_offset
-    {left, right} = 
-      Enum.split_while(files, &(elem(&1, 0) <= begin_offset))
+    # right are the files whose end is before begin_offset
+    {left, right} = Enum.split_while(files, &(elem(&1, 0) <= begin_offset))
 
-    offset_from_first_file = 
-      begin_offset - elem(List.last([{0, nil} | left]), 0)
+    offset_from_first_file = begin_offset - elem(List.last([{0, nil} | left]), 0)
 
-    {files, [last_file | _]} = 
-      Enum.split_while(right, &(elem(&1,0) < begin_offset + length - 1))
-    
+    {files, [last_file | _]} = Enum.split_while(right, &(elem(&1, 0) < begin_offset + length - 1))
+
     {offset_from_first_file, Keyword.values(files ++ [last_file])}
   end
 end
