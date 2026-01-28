@@ -1,7 +1,6 @@
 defmodule Torrent.PiecesStatistic do
   @type index :: Torrent.index() | nil
   @type status :: :allowed_fast | :complete | :processing | nil
-  @typep element :: {Torrent.index(), non_neg_integer(), status()}
 
   @the_rarest 7
 

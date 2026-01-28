@@ -4,8 +4,8 @@ defmodule Acceptor.Connection.Handler do
   alias Acceptor.Connection.Handshakes
   require Logger
 
-  @docmodule """
-  ListenSocket controls a :gen_tcp.listen 
+  @moduledoc """
+  ListenSocket controls a :gen_tcp.listen
   and do not need to be closed manually
   """
 

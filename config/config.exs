@@ -1,4 +1,4 @@
-use Mix.Config
+import Config
 
 config :logger,
   backends: [{LoggerFileBackend, :debug_log}]

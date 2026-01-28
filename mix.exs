@@ -5,7 +5,7 @@ defmodule ElixirTorrent.MixProject do
     [
       app: :elixir_torrent,
       version: "0.1.0",
-      elixir: "~> 1.7.4 ",
+      elixir: "~> 1.19.5 ",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       escript: escript()
@@ -23,12 +23,12 @@ defmodule ElixirTorrent.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:dialyxir, "~> 1.0.0-rc.4", only: [:dev], runtime: false},
-      {:bento, "~> 0.9"},
-      {:recon, "~> 2.4"},
-      {:logger_file_backend, "~> 0.0.10", github: "onkel-dirtus/logger_file_backend"},
-      {:httpoison, "~> 1.1"},
-      {:mock, "~> 0.3.2", only: :test}
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
+      {:bento, "~> 1.0.0"},
+      {:recon, "~> 2.5.6"},
+      {:logger_file_backend, "~> 0.0.14"},
+      {:httpoison, "~> 2.3"},
+      {:mock, "~> 0.3.9", only: :test}
       # {:dep_from_hexpm, "~> 0.3.0"},
       # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"},
     ]

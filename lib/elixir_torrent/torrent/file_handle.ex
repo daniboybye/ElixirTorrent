@@ -71,7 +71,7 @@ defmodule Torrent.FileHandle do
   end
 
   defp open_file(%{"length" => length, "path" => path}) do
-    name = Path.join([System.cwd!() | path])
+    name = Path.join([File.cwd!() | path])
 
     pid =
       case File.stat(name) do
