@@ -21,7 +21,7 @@ defmodule PeerDiscovery.ConnectionIds do
 
   def init(_), do: {:ok, %State{}}
 
-  def handle_call([socket, ip, port], from, state) do
+  def handle_call([socket, ip, port], from, %State{} = state) do
     key = {ip, port}
 
     case Map.fetch(state.ids, key) do
@@ -40,8 +40,9 @@ defmodule PeerDiscovery.ConnectionIds do
             [socket, ip, port]
           )
 
+        %State{} = state
         {:noreply,
-         %State{
+         %{
            state
            | ids: Map.put(state.ids, key, [from]),
              requests: Map.put(state.requests, ref, key)

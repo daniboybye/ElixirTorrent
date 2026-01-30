@@ -53,7 +53,7 @@ defmodule Peer.Controller.State do
   end
 
   @spec reset_rank(t()) :: t()
-  def reset_rank(state), do: %__MODULE__{state | rank: 0}
+  def reset_rank(%__MODULE__{} = state), do: %__MODULE__{state | rank: 0}
 
   @spec has_index?(t(), Torrent.index()) :: boolean()
   def has_index?(%__MODULE__{bitfield: :all}), do: true
@@ -75,19 +75,19 @@ defmodule Peer.Controller.State do
   end
 
   @spec choke(t()) :: t()
-  def choke(state) do
+  def choke(%__MODULE__{} = state) do
     unless state.choke, do: Sender.choke(key(state))
     %__MODULE__{state | choke: true}
   end
 
   @spec unchoke(t()) :: t()
-  def unchoke(state) do
+  def unchoke(%__MODULE__{} = state) do
     if state.choke, do: Sender.unchoke(key(state))
     %__MODULE__{state | choke: false}
   end
 
   @spec interested(t(), Torrent.index()) :: t()
-  def interested(state, index) do
+  def interested(%__MODULE__{} = state, index) do
     %__MODULE__{state | status: index}
     |> check_interested()
   end
@@ -128,7 +128,7 @@ defmodule Peer.Controller.State do
   @spec seed(t()) :: t() | {:error, :two_seeders, t()}
   def seed(%__MODULE__{bitfield: :all} = x), do: {:error, :two_seeders, x}
 
-  def seed(state) do
+  def seed(%__MODULE__{} = state) do
     if state.interested, do: Sender.not_interested(key(state))
 
     %__MODULE__{state | bitfield: nil, status: :seed, interested: false}
@@ -142,21 +142,21 @@ defmodule Peer.Controller.State do
   def upload(state, _), do: state
 
   @spec handle_choke(t()) :: t()
-  def handle_choke(state), do: %__MODULE__{state | choke_me: true}
+  def handle_choke(%__MODULE__{} = state), do: %__MODULE__{state | choke_me: true}
 
   @spec handle_unchoke(t()) :: t()
-  def handle_unchoke(state) do
+  def handle_unchoke(%__MODULE__{} = state) do
     %__MODULE__{state | choke_me: false}
     |> make_request
   end
 
   @spec handle_interested(t()) :: t()
-  def handle_interested(state) do
+  def handle_interested(%__MODULE__{} = state) do
     %__MODULE__{state | interested_of_me: true}
   end
 
   @spec handle_not_interested(t()) :: t()
-  def handle_not_interested(state) do
+  def handle_not_interested(%__MODULE__{} = state) do
     %__MODULE__{state | interested_of_me: false}
     |> choke
   end
@@ -191,7 +191,7 @@ defmodule Peer.Controller.State do
 
   def handle_bitfield(%__MODULE__{status: :seed} = x, _), do: x
 
-  def handle_bitfield(state, bitfield) do
+  def handle_bitfield(%__MODULE__{} = state, bitfield) do
     PiecesStatistic.update(state.hash, bitfield, state.pieces_count)
 
     %__MODULE__{state | bitfield: bitfield}
@@ -246,7 +246,7 @@ defmodule Peer.Controller.State do
 
   def handle_have_all(%__MODULE__{status: :seed} = x), do: {:error, :two_seeders, x}
 
-  def handle_have_all(state) do
+  def handle_have_all(%__MODULE__{} = state) do
     PiecesStatistic.inc_all(state.hash, state.pieces_count - 1)
 
     %__MODULE__{state | bitfield: :all}
@@ -263,7 +263,7 @@ defmodule Peer.Controller.State do
     |> allowed_fast
   end
 
-  def handle_have_none(state), do: %__MODULE__{state | bitfield: :none}
+  def handle_have_none(%__MODULE__{} = state), do: %__MODULE__{state | bitfield: :none}
 
   @spec handle_reject(t(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           t() | {:error, :protocol_error, t()}

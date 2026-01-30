@@ -123,7 +123,7 @@ defmodule PeerDiscovery.Announce do
   end
 
   def handle_info({ref, %Tracker.Error{reason: reason}}, state) do
-    Logger.warn("request failure reason: #{reason}")
+    Logger.warning("request failure reason: #{reason}")
 
     failure(state, ref, Tracker.default_interval())
   end

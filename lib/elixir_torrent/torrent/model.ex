@@ -49,13 +49,13 @@ defmodule Torrent.Model do
   def set_peer_status(hash, status),
     do: GenServer.cast(via(hash), {:set_peer_status, status})
 
-  def init(torrent) do
+  def init(%Torrent{} = torrent) do
     bitfield =
       torrent
       |> do_pieces_count
       |> Bitfield.make()
 
-    torrent = %Torrent{torrent | bitfield: bitfield}
+    torrent = %{torrent | bitfield: bitfield}
 
     message_for_next_detection(torrent)
 
@@ -90,7 +90,7 @@ defmodule Torrent.Model do
     end
   end
 
-  def handle_cast({:hash_check_failure, index}, torrent) do
+  def handle_cast({:hash_check_failure, index}, %Torrent{} = torrent) do
     if Bitfield.have?(torrent.bitfield, index),
       do: {:noreply, update_downloaded_bytes(torrent, index, 0)},
       else: {:noreply, torrent}
@@ -99,19 +99,19 @@ defmodule Torrent.Model do
   def handle_cast({:uploaded_subpiece, bytes_size}, torrent),
     do: {:noreply, Map.update!(torrent, :uploaded, &(&1 + bytes_size))}
 
-  def handle_cast({:set_peer_status, status}, torrent),
-    do: {:noreply, %Torrent{torrent | peer_status: status}}
+  def handle_cast({:set_peer_status, status}, %Torrent{} = torrent),
+    do: {:noreply, %{torrent | peer_status: status}}
 
   def handle_cast(:update_event, %Torrent{event: @stopped} = torrent),
     do: {:noreply, torrent}
 
   def handle_cast(:update_event, %Torrent{left: 0} = torrent),
-    do: {:noreply, %Torrent{torrent | event: Torrent.completed()}}
+    do: {:noreply, %{torrent | event: Torrent.completed()}}
 
-  def handle_cast(:update_event, torrent),
-    do: {:noreply, %Torrent{torrent | event: Torrent.empty()}}
+  def handle_cast(:update_event, %Torrent{} = torrent),
+    do: {:noreply, %{torrent | event: Torrent.empty()}}
 
-  def handle_info({:detected_the_speed, download, upload}, torrent) do
+  def handle_info({:detected_the_speed, download, upload}, %Torrent{} = torrent) do
     message_for_next_detection(torrent)
 
     speed = %{
@@ -119,7 +119,7 @@ defmodule Torrent.Model do
       upload: detected_the_speed(torrent.uploaded, upload)
     }
 
-    {:noreply, %Torrent{torrent | speed: speed}}
+    {:noreply, %{torrent | speed: speed}}
   end
 
   defp do_get(:bytes_size, %Torrent{downloaded: n, left: m}),
@@ -167,11 +167,11 @@ defmodule Torrent.Model do
 
   defp do_name(torrent), do: torrent.metadata["info"]["name"]
 
-  defp update_downloaded_bytes(torrent, index, x) do
+  defp update_downloaded_bytes(%Torrent{} = torrent, index, x) do
     length = do_piece_length(index, torrent)
     coef = trunc(:math.pow(-1, x))
 
-    %Torrent{
+    %{
       torrent
       | downloaded: torrent.downloaded - coef * length,
         left: torrent.left + coef * length,

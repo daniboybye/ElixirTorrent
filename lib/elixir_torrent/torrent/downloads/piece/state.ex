@@ -59,7 +59,7 @@ defmodule Torrent.Downloads.Piece.State do
     state
   end
 
-  def download(state, downloaded, requests_are_dealt) do
+  def download(%__MODULE__{} = state, downloaded, requests_are_dealt) do
     PiecesStatistic.set(state.hash, state.index, :processing)
 
     mode = Model.get(state.hash, :mode)
@@ -121,7 +121,7 @@ defmodule Torrent.Downloads.Piece.State do
     )
   end
 
-  defp do_request(state, peer_id, callback) do
+  defp do_request(%__MODULE__{} = state, peer_id, callback) do
     [subpiece | waiting] = state.waiting
 
     if Enum.empty?(waiting), do: state.requests_are_dealt.()
@@ -143,7 +143,7 @@ defmodule Torrent.Downloads.Piece.State do
   end
 
   @spec response(t(), Peer.id(), Torrent.begin(), Torrent.block()) :: t()
-  def response(state, peer_id, begin, block) do
+  def response(%__MODULE__{} = state, peer_id, begin, block) do
     length = byte_size(block)
     subpiece = {begin, length}
 
@@ -176,7 +176,7 @@ defmodule Torrent.Downloads.Piece.State do
   end
 
   @spec reject(t(), Peer.id(), Torrent.begin(), Torrent.length()) :: t()
-  def reject(state, peer_id, begin, length) do
+  def reject(%__MODULE__{} = state, peer_id, begin, length) do
     {list, requests} =
       Enum.split_with(state.requests, &(&1.subpiece == {begin, length} and &1.peer_id == peer_id))
 
@@ -185,7 +185,7 @@ defmodule Torrent.Downloads.Piece.State do
   end
 
   @spec timeout(t(), Peer.id()) :: t()
-  def timeout(state, peer_id) do
+  def timeout(%__MODULE__{} = state, peer_id) do
     {list, requests} = Enum.split_with(state.requests, &(&1.peer_id == peer_id))
 
     %__MODULE__{state | requests: requests}
@@ -193,7 +193,7 @@ defmodule Torrent.Downloads.Piece.State do
   end
 
   @spec down(t(), reference()) :: t()
-  def down(state, ref) do
+  def down(%__MODULE__{} = state, ref) do
     {peer_id, new_state} = pop_in(state, [Access.key!(:monitoring), ref])
     timeout(new_state, peer_id)
   end
