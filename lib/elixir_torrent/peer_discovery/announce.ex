@@ -111,7 +111,7 @@ defmodule PeerDiscovery.Announce do
 
   def handle_info({ref, %Tracker.Error{reason: "Overloaded", retry_in: <<str::binary>>}}, state) do
     timeout =
-      case String.split(str, ~r"[^0-9]", part: 2) do
+      case String.split(str, ~r"[^0-9]", parts: 2) do
         [<<>>, _] ->
           Tracker.default_interval()
 
