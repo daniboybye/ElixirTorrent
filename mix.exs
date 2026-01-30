@@ -27,6 +27,7 @@ defmodule ElixirTorrent.MixProject do
       {:bento, "~> 1.0.0"},
       {:recon, "~> 2.5.6"},
       {:logger_file_backend, "~> 0.0.14"},
+      {:logger_backends, "~> 1.0"},
       {:httpoison, "~> 2.3"},
       {:mock, "~> 0.3.9", only: :test}
       # {:dep_from_hexpm, "~> 0.3.0"},
