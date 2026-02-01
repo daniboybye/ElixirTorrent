@@ -142,7 +142,13 @@ defmodule Peer.Controller.State do
   def upload(state, _), do: state
 
   @spec handle_choke(t()) :: t()
-  def handle_choke(%__MODULE__{} = state), do: %__MODULE__{state | choke_me: true}
+  def handle_choke(%__MODULE__{} = state) do
+    Enum.each(state.requests, fn {index, begin, length} ->
+      Downloads.reject(state.hash, index, state.id, begin, length)
+    end)
+
+    %__MODULE__{state | choke_me: true, requests: MapSet.new()}
+  end
 
   @spec handle_unchoke(t()) :: t()
   def handle_unchoke(%__MODULE__{} = state) do
