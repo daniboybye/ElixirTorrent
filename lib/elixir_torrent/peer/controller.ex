@@ -138,10 +138,15 @@ defmodule Peer.Controller do
     {:ok, state}
   end
 
-  def terminate({:shutdown, :protocol_error}, state),
-    do: Acceptor.malicious_peer(state.id)
+  def terminate({:shutdown, :protocol_error}, state) do
+    Torrent.PiecesStatistic.remove_peer(state.hash, state.bitfield, state.pieces_count)
+    Acceptor.malicious_peer(state.id)
+  end
 
-  def terminate(_, _), do: :ok
+  def terminate(_, %State{} = state) do
+    Torrent.PiecesStatistic.remove_peer(state.hash, state.bitfield, state.pieces_count)
+    :ok
+  end
 
   def handle_call(:rank, _, state), do: {:reply, State.rank(state), state}
 

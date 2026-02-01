@@ -178,16 +178,20 @@ defmodule Peer.Controller.State do
   end
 
   def handle_have(state, index) do
-    PiecesStatistic.inc(state.hash, index)
+    if has_index?(state, index) do
+      state
+    else
+      PiecesStatistic.inc(state.hash, index)
 
-    state
-    |> Map.update!(
-      :bitfield,
-      fn <<prefix::bits-size(index), _::1, postfix::bits>> ->
-        <<prefix::bits, 1::1, postfix::bits>>
-      end
-    )
-    |> check_interested()
+      state
+      |> Map.update!(
+        :bitfield,
+        fn <<prefix::bits-size(index), _::1, postfix::bits>> ->
+          <<prefix::bits, 1::1, postfix::bits>>
+        end
+      )
+      |> check_interested()
+    end
   end
 
   @spec handle_bitfield(t(), bitfield()) :: t() | {:error, :protocol_error, t()}

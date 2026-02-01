@@ -54,7 +54,13 @@ defmodule Torrent.PiecesStatistic do
 
   @spec inc(Torrent.hash(), Torrent.index()) :: :ok
   def inc(hash, index) do
-    update_counter(table_ref(hash), index)
+    inc_counter(table_ref(hash), index)
+    :ok
+  end
+
+  @spec dec(Torrent.hash(), Torrent.index()) :: :ok
+  def dec(hash, index) do
+    dec_counter(table_ref(hash), index)
     :ok
   end
 
@@ -65,7 +71,27 @@ defmodule Torrent.PiecesStatistic do
   @spec inc_all(Torrent.hash(), Torrent.index()) :: :ok
   def inc_all(hash, last_index) do
     ref = table_ref(hash)
-    Enum.each(0..last_index, &update_counter(ref, &1))
+    Enum.each(0..last_index, &inc_counter(ref, &1))
+    :ok
+  end
+
+  @spec dec_all(Torrent.hash(), Torrent.index()) :: :ok
+  def dec_all(hash, last_index) do
+    ref = table_ref(hash)
+    Enum.each(0..last_index, &dec_counter(ref, &1))
+    :ok
+  end
+
+  @spec remove_peer(Torrent.hash(), Torrent.bitfield() | :all | :none | nil, pos_integer()) :: :ok
+  def remove_peer(_hash, nil, _pieces_count), do: :ok
+  def remove_peer(_hash, :none, _pieces_count), do: :ok
+
+  def remove_peer(hash, :all, pieces_count) do
+    dec_all(hash, pieces_count - 1)
+  end
+
+  def remove_peer(hash, bitfield, pieces_count) when is_binary(bitfield) do
+    indices_dec(bitfield, pieces_count, table_ref(hash))
   end
 
   def get_status(hash, index),
@@ -90,17 +116,30 @@ defmodule Torrent.PiecesStatistic do
   #   :ok = :ets.tab2file(table_ref(hash), file_name) 
   # end
 
-  defp update_counter(ref, index),
+  defp inc_counter(ref, index),
     do: :ets.update_counter(ref, index, 1)
+
+  defp dec_counter(ref, index),
+    do: :ets.update_counter(ref, index, {2, -1, 0, 0})
 
   defp indices_inc(bin, size, ref, index \\ 0)
 
   defp indices_inc(_, size, _, index) when size == index, do: :ok
 
   defp indices_inc(<<x::1, bin::bits>>, size, ref, index) do
-    if x == 1, do: update_counter(ref, index)
+    if x == 1, do: inc_counter(ref, index)
 
     indices_inc(bin, size, ref, index + 1)
+  end
+
+  defp indices_dec(bin, size, ref, index \\ 0)
+
+  defp indices_dec(_, size, _, index) when size == index, do: :ok
+
+  defp indices_dec(<<x::1, bin::bits>>, size, ref, index) do
+    if x == 1, do: dec_counter(ref, index)
+
+    indices_dec(bin, size, ref, index + 1)
   end
 
   defp key(hash), do: {__MODULE__, hash}
