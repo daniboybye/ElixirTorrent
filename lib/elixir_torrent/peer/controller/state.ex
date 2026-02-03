@@ -42,7 +42,7 @@ defmodule Peer.Controller.State do
           choke_me: boolean()
         }
 
-  @max_unanswered_requests 5
+  @max_unanswered_requests 20
 
   @spec key(t()) :: Peer.key()
   def key(state), do: make_key(state.hash, state.id)
@@ -212,7 +212,13 @@ defmodule Peer.Controller.State do
           t() | {:error, :protocol_error, t()}
   def handle_request(state, index, begin, length) do
     if index < state.pieces_count and Torrent.have?(state.hash, index) do
-      if not state.choke or FastExtension.upload?(state.fast_extension, index) do
+      allowed_while_choked? = FastExtension.upload?(state.fast_extension, index)
+
+      if state.choke and state.fast_extension != nil and not allowed_while_choked? do
+        Sender.reject(key(state), index, begin, length)
+      end
+
+      if not state.choke or allowed_while_choked? do
         pid = self()
         sender_key = key(state)
 
