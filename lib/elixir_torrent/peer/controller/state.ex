@@ -311,17 +311,21 @@ defmodule Peer.Controller.State do
 
   @spec allowed_fast(t()) :: t()
   defp allowed_fast(%__MODULE__{fast_extension: %FastExtension{}} = state) do
-    {:ok, {addr, _port}} = :inet.sockname(state.socket)
+    case :inet.peername(state.socket) do
+      {:ok, {peer_addr, _port}} ->
+        set = AllowedFast.set(peer_addr, state.hash, state.pieces_count)
 
-    set = AllowedFast.set(addr, state.hash, state.pieces_count)
+        Enum.each(set, &Sender.allowed_fast(key(state), &1))
 
-    Enum.each(set, &Sender.allowed_fast(key(state), &1))
+        put_in(
+          state,
+          [Access.key!(:fast_extension), Access.key!(:allowed_fast)],
+          set
+        )
 
-    put_in(
-      state,
-      [Access.key!(:fast_extension), Access.key!(:allowed_fast)],
-      set
-    )
+      _ ->
+        state
+    end
   end
 
   # FastExtansionMessage end
