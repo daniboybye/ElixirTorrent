@@ -42,9 +42,7 @@ defmodule Tracker do
       "left" => left,
       "event" => Torrent.event_to_string(event),
       "numwant" => numwant(left),
-      "key" => Acceptor.key(),
-      # obfuscation
-      "ip" => Acceptor.ip_string()
+      "key" => Acceptor.key()
     }
     |> URI.encode_query()
     |> (&(announce <> "?" <> &1)).()
@@ -59,12 +57,15 @@ defmodule Tracker do
         }
 
       map ->
+        peers_v4 = Map.get(map, "peers", []) |> to_peers_v4()
+        peers_v6 = Map.get(map, "peers6", []) |> to_peers_v6()
+
         %Response{
           interval: Map.get(map, "interval", default_interval()),
           complete: Map.get(map, "complete", 0),
           incomplete: Map.get(map, "incomplete", 0),
           external_ip: Map.get(map, "external ip", @bento_nil) |> Bento.decode!(),
-          peers: Map.get(map, "peers", []) |> to_peers()
+          peers: peers_v4 ++ peers_v6
         }
     end
   end
@@ -75,12 +76,9 @@ defmodule Tracker do
       |> URI.parse()
       |> Map.update!(:port, &if(&1, do: &1, else: 6969))
 
-    {:ok, ip} =
-      host
-      |> String.to_charlist()
-      |> :inet.getaddr(:inet)
+    {:ok, ip, family} = resolve_host(host)
 
-    {:ok, socket} = Acceptor.open_udp()
+    {:ok, socket} = Acceptor.open_udp(family)
 
     with {:ok, id} <- PeerDiscovery.connection_id(socket, ip, port),
          do: udp_announce(socket, ip, port, id, hash)
@@ -152,7 +150,7 @@ defmodule Tracker do
           interval: interval,
           complete: seeders,
           incomplete: leechers,
-          peers: to_peers(peers)
+          peers: to_peers_v4(peers)
         }
     end
   end
@@ -198,38 +196,86 @@ defmodule Tracker do
     end
   """
 
-  defp to_peers(bin) when is_binary(bin) do
-    case tuple_size(Acceptor.ip()) do
-      4 -> do_parse_ipv4([], bin)
-      8 -> do_parse_ipv6([], bin)
+  # HTTP trackers typically return:
+  # - "peers": compact IPv4 peers (6-byte entries) when compact=1 (BEP 23)
+  # - "peers6": compact IPv6 peers (18-byte entries) (BEP 7, widely deployed)
+  @spec to_peers_v4(binary() | list()) :: list(Peer.t())
+  defp to_peers_v4(bin) when is_binary(bin), do: parse_compact_ipv4([], bin)
+  defp to_peers_v4(list) when is_list(list), do: parse_peer_dicts(list)
+
+  @spec to_peers_v6(binary() | list() | any()) :: list(Peer.t())
+  defp to_peers_v6(bin) when is_binary(bin), do: parse_compact_ipv6([], bin)
+  defp to_peers_v6(list) when is_list(list), do: parse_peer_dicts(list)
+  defp to_peers_v6(_), do: []
+
+  @spec parse_compact_ipv4(list(Peer.t()), binary()) :: list(Peer.t())
+  defp parse_compact_ipv4(res, <<>>), do: res
+
+  defp parse_compact_ipv4(res, <<a, b, c, d, port::16, rest::binary>>) do
+    [%Peer{ip: {a, b, c, d}, port: port} | res]
+    |> parse_compact_ipv4(rest)
+  end
+
+  @spec parse_compact_ipv6(list(Peer.t()), binary()) :: list(Peer.t())
+  defp parse_compact_ipv6(res, <<>>), do: res
+
+  defp parse_compact_ipv6(
+         res,
+         <<s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16, port::16,
+           rest::binary>>
+       ) do
+    [%Peer{ip: {s1, s2, s3, s4, s5, s6, s7, s8}, port: port} | res]
+    |> parse_compact_ipv6(rest)
+  end
+
+  @spec parse_peer_dicts(list(map())) :: list(Peer.t())
+  defp parse_peer_dicts(list) do
+    Enum.flat_map(list, fn
+      %{"peer id" => id, "port" => port, "ip" => ip} ->
+        case parse_ip(ip) do
+          {:ok, ip_tuple} -> [%Peer{id: id, port: port, ip: ip_tuple}]
+          :error -> []
+        end
+
+      %{"port" => port, "ip" => ip} ->
+        case parse_ip(ip) do
+          {:ok, ip_tuple} -> [%Peer{port: port, ip: ip_tuple}]
+          :error -> []
+        end
+
+      _ ->
+        []
+    end)
+  end
+
+  @spec parse_ip(binary() | :inet.ip_address()) :: {:ok, :inet.ip_address()} | :error
+  defp parse_ip(ip) when is_tuple(ip), do: {:ok, ip}
+
+  defp parse_ip(ip) when is_binary(ip) do
+    ip
+    |> String.to_charlist()
+    |> :inet.parse_address()
+    |> case do
+      {:ok, addr} -> {:ok, addr}
+      {:error, _} -> :error
     end
   end
 
-  defp to_peers(list) when is_list(list) do
-    Enum.map(
-      list,
-      fn %{"peer id" => id, "port" => port, "ip" => ip} ->
-        %Peer{id: id, port: port, ip: ip}
-      end
-    )
-  end
+  @spec resolve_host(binary()) :: {:ok, :inet.ip_address(), :inet | :inet6}
+  defp resolve_host(host) do
+    char_host = String.to_charlist(host)
 
-  defp do_parse_ipv4(res, <<>>), do: res
+    # Pragmatic choice: prefer IPv4 for UDP trackers (BEP 15), because many trackers
+    # either don't support IPv6 reliably or have broken AAAA records. We still support
+    # IPv6 where it works by falling back to :inet6.
+    case :inet.getaddr(char_host, :inet) do
+      {:ok, ip} ->
+        {:ok, ip, :inet}
 
-  defp do_parse_ipv4(res, <<ip1, ip2, ip3, ip4, port::16, bin::binary>>) do
-    [%Peer{port: port, ip: Enum.join([ip1, ip2, ip3, ip4], ".")} | res]
-    |> do_parse_ipv4(bin)
-  end
-
-  defp do_parse_ipv6(res, <<>>), do: res
-
-  defp do_parse_ipv6(
-         res,
-         <<ip1::16, ip2::16, ip3::16, ip4::16, ip5::16, ip6::16, ip7::16, ip8::16, port::16,
-           bin::binary>>
-       ) do
-    [%Peer{port: port, ip: Enum.join([ip1, ip2, ip3, ip4, ip5, ip6, ip7, ip8], ".")} | res]
-    |> do_parse_ipv6(bin)
+      _ ->
+        {:ok, ip} = :inet.getaddr(char_host, :inet6)
+        {:ok, ip, :inet6}
+    end
   end
 
   defp make_msg_udp_request(connection_id, transaction_id, hash) do

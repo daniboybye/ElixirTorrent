@@ -36,7 +36,7 @@ defmodule Peer do
 
   @type id :: <<_::160>>
   @type reserved :: <<_::64>>
-  @type ip :: binary()
+  @type ip :: :inet.ip_address()
   @type key :: {id(), Torrent.hash()}
   @type status :: nil | :seed | :connecting_to_peers | Torrent.index()
 

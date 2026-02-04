@@ -19,13 +19,20 @@ defmodule Acceptor do
   @spec socket_options() :: list()
   def socket_options(), do: [:binary, active: false, reuseaddr: true]
 
+  @spec socket_options(:inet | :inet6) :: list()
+  def socket_options(:inet), do: socket_options() ++ [:inet]
+  def socket_options(:inet6), do: socket_options() ++ [:inet6, ipv6_v6only: false]
+
   @spec port_range() :: Range.t()
   def port_range(), do: 6881..9999
 
   @spec open_udp() :: {:ok, port()} | :error
-  def open_udp() do
+  def open_udp(), do: open_udp(:inet)
+
+  @spec open_udp(:inet | :inet6) :: {:ok, port()} | :error
+  def open_udp(family) do
     Enum.find_value(port_range(), :error, fn number ->
-      with {:error, _} <- :gen_udp.open(number, socket_options()),
+      with {:error, _} <- :gen_udp.open(number, socket_options(family)),
            do: nil
     end)
   end
@@ -43,17 +50,16 @@ defmodule Acceptor do
     |> elem(0)
   end
 
-  @spec ip_string() :: String.t()
-  def ip_string() do
-    ip()
-    |> Tuple.to_list()
-    |> Enum.join(".")
   end
 
   @spec ip_binary() :: <<_::32>> | <<_::128>>
   def ip_binary() do
-    ip()
-    |> Tuple.to_list()
-    |> :binary.list_to_bin()
+    case ip() do
+      {a, b, c, d} ->
+        <<a, b, c, d>>
+
+      {s1, s2, s3, s4, s5, s6, s7, s8} ->
+        <<s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16>>
+    end
   end
 end

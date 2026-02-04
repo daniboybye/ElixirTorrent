@@ -39,8 +39,8 @@ defmodule Acceptor.Connection.Handshakes do
   @spec do_send(Peer.t(), Torrent.hash()) :: :ok | any()
   defp do_send(%Peer{} = peer, hash) do
     with false <- Peer.exists?(peer, hash),
-         ip = String.to_charlist(peer.ip),
-         opts = Acceptor.socket_options(),
+         ip = peer.ip,
+         opts = Acceptor.socket_options(family_for_ip(ip)),
          {:ok, socket} <- :gen_tcp.connect(ip, peer.port, opts, @timeout),
          :ok <- send_msg(socket, hash),
          {^hash, peer_id, reserved} <- recv_msg(socket),
@@ -48,6 +48,10 @@ defmodule Acceptor.Connection.Handshakes do
          :ok <- add_peer(hash, peer_id, reserved, socket),
          do: :ok
   end
+
+  @spec family_for_ip(:inet.ip_address()) :: :inet | :inet6
+  defp family_for_ip({_, _, _, _}), do: :inet
+  defp family_for_ip({_, _, _, _, _, _, _, _}), do: :inet6
 
   @spec do_recv(port()) :: :ok | any()
   defp do_recv(socket) do

@@ -19,6 +19,12 @@ defmodule AllowedFast do
     new_indexies(new(), bin, torrent_size, set_size)
   end
 
+  def set({s1, s2, s3, _s4, _s5, _s6, _s7, _s8}, hash, torrent_size, set_size) do
+    bin = <<s1::16, s2::16, s3::16, 0::80, hash::binary>>
+
+    new_indexies(new(), bin, torrent_size, set_size)
+  end
+
   def set(_, _, _, _), do: new()
 
   @spec new_indexies(set(), Torrent.hash(), Torrent.index(), non_neg_integer()) :: set()

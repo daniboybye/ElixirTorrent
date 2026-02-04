@@ -36,8 +36,16 @@ defmodule Acceptor.Connection.Handler do
       Acceptor.port_range(),
       default,
       fn number ->
-        with {:error, _} <- :gen_tcp.listen(number, Acceptor.socket_options()),
-             do: nil
+        case :gen_tcp.listen(number, Acceptor.socket_options(:inet6)) do
+          {:ok, _socket} = ok ->
+            ok
+
+          {:error, _} ->
+            case :gen_tcp.listen(number, Acceptor.socket_options(:inet)) do
+              {:ok, _socket} = ok -> ok
+              {:error, _} -> nil
+            end
+        end
       end
     )
   end
