@@ -30,6 +30,7 @@ defmodule Tracker do
     [uploaded, downloaded, left, event] =
       Torrent.get(hash, [:uploaded, :downloaded, :left, :event])
 
+    query =
     %{
       # "sha_ih" => :crypto.hash(:sha, torrent.hash)
       "info_hash" => hash,
@@ -45,29 +46,19 @@ defmodule Tracker do
       "key" => Acceptor.key()
     }
     |> URI.encode_query()
-    |> (&(announce <> "?" <> &1)).()
-    |> HTTPoison.get!([], timeout: @timeout, recv_timeout: @timeout)
-    |> Map.fetch!(:body)
-    |> Bento.decode!()
-    |> case do
-      %{"failure reason" => reason} = map ->
-        %Error{
-          reason: reason,
-          retry_in: Map.get(map, "retry in")
-        }
 
-      map ->
-        peers_v4 = Map.get(map, "peers", []) |> to_peers_v4()
-        peers_v6 = Map.get(map, "peers6", []) |> to_peers_v6()
+    url = announce <> "?" <> query
 
-        %Response{
-          interval: Map.get(map, "interval", default_interval()),
-          complete: Map.get(map, "complete", 0),
-          incomplete: Map.get(map, "incomplete", 0),
-          external_ip: Map.get(map, "external ip", @bento_nil) |> Bento.decode!(),
-          peers: peers_v4 ++ peers_v6
-        }
-    end
+    # Simple BEP 7 multi-homed announce: if we have a usable IPv4 and IPv6 locally,
+    # announce once per address family by binding the source IP for the tracker connection.
+    %{inet: ip4, inet6: ip6} = Acceptor.primary_ips()
+
+    responses =
+      []
+      |> maybe_http_announce(url, :inet, ip4)
+      |> maybe_http_announce(url, :inet6, ip6)
+
+    merge_http_announces(responses)
   end
 
   def request!(<<"udp:", _::binary>> = announce, hash) do
@@ -82,6 +73,88 @@ defmodule Tracker do
 
     with {:ok, id} <- PeerDiscovery.connection_id(socket, ip, port),
          do: udp_announce(socket, ip, port, id, hash)
+  end
+
+  @spec maybe_http_announce(list(Response.t() | Error.t()), binary(), :inet | :inet6, any()) ::
+          list(Response.t() | Error.t())
+  defp maybe_http_announce(acc, _url, _family, nil), do: acc
+
+  defp maybe_http_announce(acc, url, family, ip) do
+    [http_announce(url, family, ip) | acc]
+  end
+
+  @spec http_announce(binary(), :inet | :inet6, :inet.ip_address()) :: Response.t() | Error.t()
+  defp http_announce(url, family, ip) do
+    opts = [
+      timeout: @timeout,
+      recv_timeout: @timeout,
+      hackney: [connect_options: [{:ip, ip}, family]]
+    ]
+
+    case HTTPoison.get(url, [], opts) do
+      {:ok, %HTTPoison.Response{status_code: code, body: body}} when code in 200..299 ->
+        body
+        |> Bento.decode!()
+        |> decode_http_response()
+
+      {:ok, %HTTPoison.Response{status_code: code}} ->
+        %Error{reason: {:http_status, code}}
+
+      {:error, %HTTPoison.Error{reason: reason}} ->
+        %Error{reason: reason}
+    end
+  end
+
+  @spec decode_http_response(map()) :: Response.t() | Error.t()
+  defp decode_http_response(%{"failure reason" => reason} = map) do
+    %Error{
+      reason: reason,
+      retry_in: Map.get(map, "retry in")
+    }
+  end
+
+  defp decode_http_response(map) when is_map(map) do
+    peers_v4 = Map.get(map, "peers", []) |> to_peers_v4()
+    peers_v6 = Map.get(map, "peers6", []) |> to_peers_v6()
+
+    %Response{
+      interval: Map.get(map, "interval", default_interval()),
+      complete: Map.get(map, "complete", 0),
+      incomplete: Map.get(map, "incomplete", 0),
+      external_ip: Map.get(map, "external ip", @bento_nil) |> Bento.decode!(),
+      peers: peers_v4 ++ peers_v6
+    }
+  end
+
+  @spec merge_http_announces(list(Response.t() | Error.t())) :: Response.t() | Error.t()
+  defp merge_http_announces(list) do
+    {oks, errs} = Enum.split_with(list, &match?(%Response{}, &1))
+
+    case oks do
+      [%Response{} | _] ->
+        Enum.reduce(oks, nil, fn resp, acc -> merge_resp(acc, resp) end)
+
+      [] ->
+        # if both failed, return "best" error (first)
+        List.first(errs) || %Error{reason: :unknown}
+    end
+  end
+
+  @spec merge_resp(Response.t() | nil, Response.t()) :: Response.t()
+  defp merge_resp(nil, %Response{} = b), do: b
+
+  defp merge_resp(%Response{} = a, %Response{} = b) do
+    peers =
+      (a.peers ++ b.peers)
+      |> Enum.uniq_by(&{&1.ip, &1.port})
+
+    %Response{
+      interval: min(a.interval, b.interval),
+      complete: max(a.complete, b.complete),
+      incomplete: max(a.incomplete, b.incomplete),
+      external_ip: a.external_ip || b.external_ip,
+      peers: peers
+    }
   end
 
   @spec udp_connect(port(), :inet.ip_address(), :inet.port_number()) ::

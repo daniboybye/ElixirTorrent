@@ -1,6 +1,7 @@
 defmodule Acceptor do
   alias __MODULE__.{BlackList, Connection}
   alias Connection.{Handshakes, Handler}
+  require Logger
 
   def child_spec(_) do
     %{
@@ -50,7 +51,59 @@ defmodule Acceptor do
     |> elem(0)
   end
 
+  @type ip_family :: :inet | :inet6
+
+  @spec primary_ips() :: %{inet: :inet.ip4_address() | nil, inet6: :inet.ip6_address() | nil}
+  def primary_ips() do
+    # Minimal multi-homed support: pick one "best" IPv4 and one "best" IPv6 address.
+    # BEP 7 full support would announce *each* local address we intend to listen on.
+    case :inet.getifaddrs() do
+      {:ok, ifs} ->
+        ips =
+          ifs
+          |> Enum.flat_map(fn {_ifname, props} ->
+            props
+            |> Keyword.get_values(:addr)
+            |> Enum.filter(&is_tuple/1)
+          end)
+
+        %{
+          inet: Enum.find(ips, &global_ipv4?/1),
+          inet6: Enum.find(ips, &global_ipv6?/1)
+        }
+
+      {:error, reason} ->
+        Logger.warning("getifaddrs failed: #{inspect(reason)}")
+        %{inet: nil, inet6: nil}
+    end
   end
+
+  @spec global_ipv4?(:inet.ip_address()) :: boolean()
+  defp global_ipv4?({a, _b, _c, _d} = ip) when is_integer(a) do
+    case ip do
+      {0, 0, 0, 0} -> false
+      {127, _, _, _} -> false
+      {169, 254, _, _} -> false
+      {224, _, _, _} -> false
+      {a, _, _, _} when a >= 240 -> false
+      _ -> true
+    end
+  end
+
+  defp global_ipv4?(_), do: false
+
+  @spec global_ipv6?(:inet.ip_address()) :: boolean()
+  defp global_ipv6?({s1, _s2, _s3, _s4, _s5, _s6, _s7, _s8} = ip) when is_integer(s1) do
+    case ip do
+      {0, 0, 0, 0, 0, 0, 0, 0} -> false
+      {0, 0, 0, 0, 0, 0, 0, 1} -> false
+      _ when s1 in 0xFF00..0xFFFF -> false
+      _ when s1 in 0xFE80..0xFEBF -> false
+      _ -> true
+    end
+  end
+
+  defp global_ipv6?(_), do: false
 
   @spec ip_binary() :: <<_::32>> | <<_::128>>
   def ip_binary() do

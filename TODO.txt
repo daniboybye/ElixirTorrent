@@ -2,3 +2,4 @@
 2. handle suggest piece message
 3. BEP - 14 Local Service Discovery
 4. DHT
+5. BEP7 full multi-homed: announce per local listen address (not just 1 v4 + 1 v6), with proper filtering (exclude link-local/loopback) and source-IP bind for HTTP+UDP

@@ -2,6 +2,7 @@ Currently supported BEPs:
 BEP 03 - The BitTorrent Protocol Specification  
 BEP 04 - Known Number Allocations  
 BEP 06 - Fast Extension  
+BEP 07 - IPv6 Tracker Extension  
 BEP 12 - Multitracker Metadata Extension  
 BEP 15 - UDP Tracker Protocol  
 BEP 20 - Peer ID Conventions  
