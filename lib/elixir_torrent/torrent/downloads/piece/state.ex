@@ -36,7 +36,9 @@ defmodule Torrent.Downloads.Piece.State do
         }
 
   @subpiece_length Piece.max_length()
-  @endgame_mode_pending_block 2
+  # In endgame, request remaining blocks redundantly, but cap the redundancy per block.
+  @endgame_window 32
+  @endgame_redundancy 3
   @timeout_request 60_000
   @timeout_get_request 100_000
 
@@ -90,6 +92,11 @@ defmodule Torrent.Downloads.Piece.State do
     |> Enum.into(MapSet.new(), & &1.subpiece)
   end
 
+  @spec subpiece_request_count(t(), Request.subpiece()) :: non_neg_integer()
+  defp subpiece_request_count(state, subpiece) do
+    Enum.count(state.requests, &(&1.subpiece == subpiece))
+  end
+
   # @spec request(t(), Peer.id(), Piece.callback()) :: t()
   def request(%__MODULE__{waiting: []} = state, _, _), do: state
 
@@ -104,21 +111,25 @@ defmodule Torrent.Downloads.Piece.State do
 
   # @spec do_request(t(), Peer.id(), Piece.callback()) :: t()
   defp do_request(%__MODULE__{mode: :endgame} = state, peer_id, callback) do
+    mine = subpieces(state, peer_id)
+
     state.waiting
-    |> Enum.take(@endgame_mode_pending_block)
-    |> Enum.find_value(
-      state,
-      &(state
-        |> subpieces(peer_id)
-        |> MapSet.member?(&1)
-        |> unless(
-          do:
-            new_request(state, callback, %Request{
-              peer_id: peer_id,
-              subpiece: &1
-            })
-        ))
-    )
+    |> Enum.take(@endgame_window)
+    |> Enum.find_value(state, fn subpiece ->
+      already_requested_by_me? = MapSet.member?(mine, subpiece)
+      redundancy_full? = subpiece_request_count(state, subpiece) >= @endgame_redundancy
+
+      cond do
+        already_requested_by_me? or redundancy_full? ->
+          false
+
+        true ->
+          new_request(state, callback, %Request{
+            peer_id: peer_id,
+            subpiece: subpiece
+          })
+      end
+    end)
   end
 
   defp do_request(%__MODULE__{} = state, peer_id, callback) do
