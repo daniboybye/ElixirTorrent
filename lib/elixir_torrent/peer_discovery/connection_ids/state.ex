@@ -2,9 +2,9 @@ defmodule PeerDiscovery.ConnectionIds.State do
   defstruct ids: %{}, requests: %{}
 
   @type t :: %__MODULE__{
-          # {ip, port} => connection_id | list(GenServer.from)
+          # {tracker_ip, tracker_port, local_udp_port} => connection_id | list(GenServer.from)
           ids: map(),
-          # ref => {ip, port}
+          # ref => {tracker_ip, tracker_port, local_udp_port}
           requests: map()
         }
 end

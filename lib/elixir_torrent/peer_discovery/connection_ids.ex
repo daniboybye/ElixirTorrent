@@ -22,7 +22,10 @@ defmodule PeerDiscovery.ConnectionIds do
   def init(_), do: {:ok, %State{}}
 
   def handle_call([socket, ip, port], from, %State{} = state) do
-    key = {ip, port}
+    # Some UDP trackers appear to bind connection_id validity to the client's source port.
+    # We open new UDP sockets over time, so cache connection_ids per (tracker endpoint, local port).
+    {:ok, local_port} = :inet.port(socket)
+    key = {ip, port, local_port}
 
     case Map.fetch(state.ids, key) do
       {:ok, [_ | _]} ->
