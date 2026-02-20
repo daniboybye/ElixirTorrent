@@ -5,8 +5,11 @@ defmodule ElixirTorrent.MixProject do
     [
       app: :elixir_torrent,
       version: "0.1.0",
-      elixir: "~> 1.19.5 ",
+      elixir: "~> 1.19.5",
       start_permanent: Mix.env() == :prod,
+      description: description(),
+      package: package(),
+      source_url: source_url(),
       deps: deps(),
       escript: escript()
     ]
@@ -37,5 +40,32 @@ defmodule ElixirTorrent.MixProject do
 
   defp escript do
     [main_module: ElixirTorrent]
+  end
+
+  @spec description() :: String.t()
+  defp description do
+    "BitTorrent client engine written in Elixir."
+  end
+
+  @spec source_url() :: String.t()
+  defp source_url do
+    "https://github.com/danielurumov/ElixirTorrent"
+  end
+
+  @spec package() :: keyword()
+  defp package do
+    [
+      licenses: ["MIT"],
+      links: %{"GitHub" => source_url()},
+      files: [
+        "lib",
+        "config",
+        "mix.exs",
+        "mix.lock",
+        "README.md",
+        "LICENSE",
+        ".formatter.exs"
+      ]
+    ]
   end
 end
