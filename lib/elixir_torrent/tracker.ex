@@ -97,10 +97,9 @@ defmodule Tracker do
     ]
 
     case HTTPoison.get(url, [], opts) do
-      {:ok, %HTTPoison.Response{status_code: code, body: body}} when code in 200..299 ->
-        body
-        |> Bento.decode!()
-        |> decode_http_response()
+      {:ok, %HTTPoison.Response{status_code: code, body: body, headers: headers}}
+      when code in 200..299 ->
+        decode_tracker_body(body, url, family, ip, headers, opts, 0)
 
       {:ok, %HTTPoison.Response{status_code: code}} ->
         %Error{reason: {:http_status, code}}
@@ -108,6 +107,87 @@ defmodule Tracker do
       {:error, %HTTPoison.Error{reason: reason}} ->
         %Error{reason: reason}
     end
+  end
+
+  @spec decode_tracker_body(
+          binary(),
+          binary(),
+          :inet | :inet6,
+          :inet.ip_address(),
+          list(),
+          keyword(),
+          0 | 1
+        ) :: Response.t() | Error.t()
+  defp decode_tracker_body(body, url, family, ip, headers, opts, depth) do
+    try do
+      body
+      |> Bento.decode!()
+      |> decode_http_response()
+    rescue
+      _e in [Bento.SyntaxError] ->
+        content_type = header_value(headers, "content-type")
+        ip_str = ip |> :inet.ntoa() |> List.to_string()
+        preview = binary_part(body, 0, min(byte_size(body), 500))
+
+        Logger.warning(
+          "HTTP tracker returned non-bencode body url=#{url} family=#{family} ip=#{ip_str} content_type=#{inspect(content_type)} bytes=#{byte_size(body)} preview=#{inspect(preview)}"
+        )
+
+        # Some tracker endpoints return HTML and JS redirects.
+        # Follow one redirect hop before giving up.
+        case {depth, extract_js_redirect(body)} do
+          {0, {:ok, redirect}} ->
+            next_url = absolute_redirect(url, redirect)
+            Logger.info("HTTP tracker redirect follow url=#{next_url}")
+
+            case HTTPoison.get(next_url, [], opts) do
+              {:ok, %HTTPoison.Response{status_code: code, body: body2, headers: headers2}}
+              when code in 200..299 ->
+                decode_tracker_body(body2, next_url, family, ip, headers2, opts, 1)
+
+              {:ok, %HTTPoison.Response{status_code: code}} ->
+                %Error{reason: {:http_status, code}}
+
+              {:error, %HTTPoison.Error{reason: reason}} ->
+                %Error{reason: reason}
+            end
+
+          _ ->
+            %Error{reason: :non_bencoded_response, retry_in: "never"}
+        end
+    end
+  end
+
+  @spec header_value(list(), binary()) :: binary() | nil
+  defp header_value(headers, key) do
+    down = String.downcase(key)
+
+    Enum.find_value(headers, fn
+      {k, v} when is_binary(k) and is_binary(v) ->
+        if String.downcase(k) == down, do: v
+
+      {k, v} when is_list(k) and is_list(v) ->
+        if String.downcase(List.to_string(k)) == down, do: List.to_string(v)
+
+      _ ->
+        nil
+    end)
+  end
+
+  @spec extract_js_redirect(binary()) :: {:ok, binary()} | :error
+  defp extract_js_redirect(body) do
+    case Regex.run(~r/window\\.location\\.href\\s*=\\s*\"([^\"]+)\"/, body, capture: :all_but_first) do
+      [path] when is_binary(path) and byte_size(path) > 0 -> {:ok, path}
+      _ -> :error
+    end
+  end
+
+  @spec absolute_redirect(binary(), binary()) :: binary()
+  defp absolute_redirect(base_url, redirect) do
+    base_url
+    |> URI.parse()
+    |> URI.merge(redirect)
+    |> URI.to_string()
   end
 
   @spec decode_http_response(map()) :: Response.t() | Error.t()
