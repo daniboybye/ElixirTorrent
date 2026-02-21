@@ -106,7 +106,9 @@ defmodule PeerDiscovery.Announce do
          }},
         state
       ) do
-    {:noreply, Map.update!(state, :requests, &Map.delete(&1, ref))}
+    {announce, state} = pop_in(state, [Access.key!(:requests), ref])
+    Logger.warning("tracker disabled announce=#{announce} reason=\"Not a tracker\"")
+    {:noreply, Map.update!(state, :peers, &Map.delete(&1, announce))}
   end
 
   def handle_info({ref, %Tracker.Error{reason: "Overloaded", retry_in: <<str::binary>>}}, state) do
