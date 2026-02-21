@@ -36,9 +36,6 @@ defmodule Torrent.PiecesStatistic do
       nil ->
         nil
 
-      {index, :allowed_fast} ->
-        index
-
       list ->
         list
         |> Enum.random()
@@ -149,14 +146,11 @@ defmodule Torrent.PiecesStatistic do
     ref
   end
 
-  defp choice_rare(_, {_, :allowed_fast} = acc), do: acc
-
   defp choice_rare({_, _, status}, acc) when status in [:complete, :processing],
     do: acc
 
-  defp choice_rare({index, _, :allowed_fast}, _), do: {index, :allowed_fast}
-
-  defp choice_rare({index, 0, _}, nil), do: [{index, 1_000_000_000}]
+  # Never select a piece with availability counter == 0
+  defp choice_rare({_, 0, _}, nil), do: nil
 
   defp choice_rare({index, n, _}, nil), do: [{index, n}]
 
