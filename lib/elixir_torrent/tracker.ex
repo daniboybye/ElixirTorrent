@@ -67,12 +67,17 @@ defmodule Tracker do
       |> URI.parse()
       |> Map.update!(:port, &if(&1, do: &1, else: 6969))
 
-    {:ok, ip, family} = resolve_host(host)
+    case resolve_host(host) do
+      {:ok, ip, family} ->
+        {:ok, socket} = Acceptor.open_udp(family)
 
-    {:ok, socket} = Acceptor.open_udp(family)
+        with {:ok, id} <- PeerDiscovery.connection_id(socket, ip, port),
+             do: udp_announce(socket, ip, port, id, hash)
 
-    with {:ok, id} <- PeerDiscovery.connection_id(socket, ip, port),
-         do: udp_announce(socket, ip, port, id, hash)
+      {:error, reason} ->
+        Logger.warning("UDP tracker DNS resolution failed host=#{host} reason=#{inspect(reason)}")
+        %Error{reason: {:dns, host, reason}, retry_in: "never"}
+    end
   end
 
   @spec maybe_http_announce(list(Response.t() | Error.t()), binary(), :inet | :inet6, any()) ::
@@ -334,7 +339,7 @@ defmodule Tracker do
     end
   end
 
-  @spec resolve_host(binary()) :: {:ok, :inet.ip_address(), :inet | :inet6}
+  @spec resolve_host(binary()) :: {:ok, :inet.ip_address(), :inet | :inet6} | {:error, term()}
   defp resolve_host(host) do
     char_host = String.to_charlist(host)
 
@@ -345,9 +350,11 @@ defmodule Tracker do
       {:ok, ip} ->
         {:ok, ip, :inet}
 
-      _ ->
-        {:ok, ip} = :inet.getaddr(char_host, :inet6)
-        {:ok, ip, :inet6}
+      {:error, reason_v4} ->
+        case :inet.getaddr(char_host, :inet6) do
+          {:ok, ip} -> {:ok, ip, :inet6}
+          {:error, _reason_v6} -> {:error, reason_v4}
+        end
     end
   end
 
