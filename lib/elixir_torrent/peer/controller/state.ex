@@ -276,7 +276,7 @@ defmodule Peer.Controller.State do
 
   def handle_have_none(%__MODULE__{status: :seed} = state) do
     %__MODULE__{state | bitfield: :none}
-    |> allowed_fast
+    |> send_allowed_fast
   end
 
   def handle_have_none(%__MODULE__{} = state), do: %__MODULE__{state | bitfield: :none}
@@ -315,22 +315,29 @@ defmodule Peer.Controller.State do
     |> make_request
   end
 
-  @spec allowed_fast(t()) :: t()
-  defp allowed_fast(%__MODULE__{fast_extension: %FastExtension{}} = state) do
-    case :inet.peername(state.socket) do
-      {:ok, {peer_addr, _port}} ->
-        set = AllowedFast.set(peer_addr, state.hash, state.pieces_count)
+  @spec send_allowed_fast(t()) :: t()
+  def send_allowed_fast(
+        %__MODULE__{fast_extension: %FastExtension{allowed_fast: set}} = state
+      ) do
+    # Avoid re-sending if we already computed/sent it for this connection.
+    if MapSet.size(set) > 0 do
+      state
+    else
+      case :inet.peername(state.socket) do
+        {:ok, {peer_addr, _port}} ->
+          set = AllowedFast.set(peer_addr, state.hash, state.pieces_count)
 
-        Enum.each(set, &Sender.allowed_fast(key(state), &1))
+          Enum.each(set, &Sender.allowed_fast(key(state), &1))
 
-        put_in(
-          state,
-          [Access.key!(:fast_extension), Access.key!(:allowed_fast)],
-          set
-        )
+          put_in(
+            state,
+            [Access.key!(:fast_extension), Access.key!(:allowed_fast)],
+            set
+          )
 
-      _ ->
-        state
+        _ ->
+          state
+      end
     end
   end
 

@@ -135,6 +135,17 @@ defmodule Peer.Controller do
 
     State.first_message(state, downloaded)
 
+    state =
+      case state do
+        %State{status: :seed, fast_extension: %FastExtension{}} ->
+          # BEP 6: proactively send allowed_fast set to a connected leecher so it can
+          # request those pieces even while choked.
+          State.send_allowed_fast(state)
+
+        _ ->
+          state
+      end
+
     {:ok, state}
   end
 
