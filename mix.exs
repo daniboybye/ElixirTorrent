@@ -32,6 +32,7 @@ defmodule ElixirTorrent.MixProject do
       {:logger_file_backend, "~> 0.0.14"},
       {:logger_backends, "~> 1.0"},
       {:httpoison, "~> 2.3"},
+      {:ex_doc, ">= 0.0.0", only: :dev, runtime: false},
       {:mock, "~> 0.3.9", only: :test}
       # {:dep_from_hexpm, "~> 0.3.0"},
       # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"},
