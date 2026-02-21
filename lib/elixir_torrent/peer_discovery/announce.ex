@@ -113,19 +113,25 @@ defmodule PeerDiscovery.Announce do
 
   def handle_info({ref, %Tracker.Error{reason: "Overloaded", retry_in: <<str::binary>>}}, state) do
     timeout =
-      case String.split(str, ~r"[^0-9]", parts: 2) do
-        [<<>>, _] ->
-          Tracker.default_interval()
-
-        [number, _] ->
-          number
+      case parse_retry_in_seconds(str) do
+        nil -> Tracker.default_interval()
+        n -> n
       end
 
     failure(state, ref, timeout)
   end
 
+  def handle_info({ref, %Tracker.Error{reason: "Overloaded", retry_in: n}}, state)
+      when is_integer(n) and n >= 0 do
+    failure(state, ref, n)
+  end
+
+  def handle_info({ref, %Tracker.Error{reason: "Overloaded"}}, state) do
+    failure(state, ref, Tracker.default_interval())
+  end
+
   def handle_info({ref, %Tracker.Error{reason: reason}}, state) do
-    Logger.warning("request failure reason: #{reason}")
+    Logger.warning("request failure reason: #{inspect(reason)}")
 
     failure(state, ref, Tracker.default_interval())
   end
@@ -143,6 +149,16 @@ defmodule PeerDiscovery.Announce do
   defp failure(state, ref, timeout) do
     {announce, state} = next_request(state, ref, timeout)
     {:noreply, Map.update!(state, :peers, &Map.delete(&1, announce))}
+  end
+
+  @spec parse_retry_in_seconds(binary()) :: non_neg_integer() | nil
+  defp parse_retry_in_seconds(str) do
+    case String.split(str, ~r"[^0-9]", parts: 2) do
+      [<<>>, _] -> nil
+      [number, _] -> String.to_integer(number)
+      [number] -> String.to_integer(number)
+      _ -> nil
+    end
   end
 
   defp extract_announce(%{"announce-list" => x}), do: List.flatten(x)

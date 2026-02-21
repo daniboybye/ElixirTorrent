@@ -4,6 +4,6 @@ defmodule Tracker.Error do
 
   @type t :: %__MODULE__{
           reason: String.t() | binary() | atom(),
-          retry_in: binary() | nil
+          retry_in: non_neg_integer() | binary() | nil
         }
 end
