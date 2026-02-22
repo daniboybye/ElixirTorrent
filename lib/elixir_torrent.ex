@@ -2,8 +2,8 @@ defmodule ElixirTorrent do
   @moduledoc """
   Public API for controlling torrent downloads.
 
-  This module exposes a small surface area intended for embedding the engine
-  in other Elixir applications.
+  This is the entrypoint you should use from other applications.
+  Start a download with `download/1` and poll stats with `stats/2`.
 
   ## Public functions
 
@@ -14,14 +14,10 @@ defmodule ElixirTorrent do
     * `get/2` - low-level raw getter kept for compatibility
   """
 
-  @doc """
-  Starts the CLI loop used by the escript entrypoint.
-  """
+  @doc "Starts the CLI loop used by the escript entrypoint."
   def main(_), do: loop()
 
-  @doc """
-  Returns the peer ID/version string advertised by this client.
-  """
+  @doc "Returns the peer ID/version string advertised by this client."
   def version, do: "ET0-1-0"
 
   defp loop do
@@ -63,6 +59,10 @@ defmodule ElixirTorrent do
 
   Returns the same value as `Torrents.download/1`:
   `{:ok, pid}` on success or `{:error, reason}`.
+
+  Example:
+
+      {:ok, pid} = ElixirTorrent.download("/tmp/file.torrent")
   """
   defdelegate download(path), to: Torrents
 
@@ -75,13 +75,23 @@ defmodule ElixirTorrent do
   You can request custom fields, for example:
 
       ElixirTorrent.stats(pid, [:name, :speed, :downloaded, :bytes_size])
+
+  Result shape:
+
+      {:ok,
+       %{
+         name: "ubuntu.iso",
+         speed: %{download: 1200, upload: 80},
+         downloaded: 1048576,
+         bytes_size: 4294967296
+       }}
   """
   @spec stats(pid(), [atom()]) :: {:ok, map()} | {:error, :torrent_not_found}
   def stats(pid, fields \\ [:name, :speed, :downloaded, :bytes_size]),
     do: Torrents.stats(pid, fields)
 
   @doc """
-  Low-level getter that proxies to `Torrent.get/2` through the torrent pid.
+  Low-level getter that proxies to the internal torrent model getter through the torrent pid.
 
   Prefer `stats/2` when you need runtime statistics as a map.
   """

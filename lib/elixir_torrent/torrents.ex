@@ -1,4 +1,10 @@
 defmodule Torrents do
+  @moduledoc """
+  Internal runtime facade used by `ElixirTorrent`.
+
+  Use `ElixirTorrent` as the preferred public API.
+  """
+
   @default_stats_fields [:name, :speed, :downloaded, :bytes_size]
 
   def child_spec(_) do
@@ -14,6 +20,11 @@ defmodule Torrents do
   end
 
   @spec download(Path.t()) :: DynamicSupervisor.on_start_child()
+  @doc """
+  Starts a new torrent download from a local `.torrent` path.
+
+  Returns `{:ok, pid}` on success.
+  """
   def download(path) do
     DynamicSupervisor.start_child(
       __MODULE__,
@@ -22,13 +33,16 @@ defmodule Torrents do
   end
 
   @doc """
-  Returns common runtime stats for a torrent process.
+  Returns a default set of runtime stats for a torrent process.
+
+  The default fields are:
+  `[:name, :speed, :downloaded, :bytes_size]`.
   """
   @spec stats(pid()) :: {:ok, map()} | {:error, :torrent_not_found}
   def stats(pid), do: stats(pid, @default_stats_fields)
 
   @doc """
-  Returns selected runtime fields for a torrent process as a map.
+  Returns selected runtime fields for a torrent process as a map keyed by field.
 
   Example:
 

@@ -10,6 +10,7 @@ defmodule ElixirTorrent.MixProject do
       description: description(),
       package: package(),
       source_url: source_url(),
+      docs: docs(),
       deps: deps(),
       escript: escript()
     ]
@@ -67,6 +68,17 @@ defmodule ElixirTorrent.MixProject do
         "LICENSE",
         ".formatter.exs"
       ]
+    ]
+  end
+
+  @spec docs() :: keyword()
+  defp docs do
+    [
+      main: "ElixirTorrent",
+      extras: ["README.md"],
+      filter_modules: fn module, _metadata ->
+        module in [ElixirTorrent, Torrents]
+      end
     ]
   end
 end
