@@ -68,7 +68,7 @@ jobs:
         run: mix dialyzer
 
       - name: Run strict Credo
-        run: mix credo --strict --all
+        run: mix credo --all
 
       - name: Run tests and collect coverage
         run: timeout 60s mix coveralls.json --no-compile

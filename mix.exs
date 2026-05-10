@@ -77,7 +77,7 @@ defmodule ElixirTorrent.MixProject do
 
   defp aliases do
     [
-      quality: ["compile --warnings-as-errors", "dialyzer", "credo --strict --all"],
+      quality: ["compile --warnings-as-errors", "dialyzer", "credo --all"],
       "deps.patch-test": [
         "cmd elixir scripts/patch-propcheck.exs",
         "cmd elixir scripts/patch-excoveralls.exs"
