@@ -90,10 +90,12 @@ defmodule Torrent.PathLayout do
 
   @spec sanitize_name(String.t()) :: String.t()
   def sanitize_name(name) when is_binary(name) do
-    name
-    |> String.replace(~r|[/\\]|, "_")
-    |> String.replace(<<0>>, "")
-    |> case do
+    sanitized =
+      name
+      |> String.replace(~r|[/\\]|, "_")
+      |> String.replace(<<0>>, "")
+
+    case sanitized do
       "" -> "download"
       sanitized -> sanitized
     end

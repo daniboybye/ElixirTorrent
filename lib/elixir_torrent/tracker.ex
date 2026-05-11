@@ -246,12 +246,14 @@ defmodule Tracker do
           keyword()
         ) :: %{Torrent.hash() => scrape_stats()} | Error.t()
   defp scrape_hash_chunks(socket, ip, port, connection_id, hashes, opts) do
-    hashes
-    |> Enum.chunk_every(UDP.max_scrape_hashes())
-    |> Enum.reduce_while(%{}, fn chunk, acc ->
-      merge_udp_scrape_chunk(socket, ip, port, connection_id, chunk, opts, acc)
-    end)
-    |> case do
+    result =
+      hashes
+      |> Enum.chunk_every(UDP.max_scrape_hashes())
+      |> Enum.reduce_while(%{}, fn chunk, acc ->
+        merge_udp_scrape_chunk(socket, ip, port, connection_id, chunk, opts, acc)
+      end)
+
+    case result do
       %Error{} = error -> error
       map -> map
     end
@@ -1207,10 +1209,12 @@ defmodule Tracker do
     # Dictionary-model hostnames are deliberately not resolved here. Tracker
     # responses are untrusted and resolving an unbounded list would put
     # synchronous DNS work on the announce decode path.
-    ip
-    |> String.to_charlist()
-    |> :inet.parse_address()
-    |> case do
+    parsed =
+      ip
+      |> String.to_charlist()
+      |> :inet.parse_address()
+
+    case parsed do
       {:ok, addr} -> {:ok, addr}
       {:error, _} -> :error
     end

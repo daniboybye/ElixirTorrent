@@ -106,7 +106,7 @@ defmodule Peer do
   end
 
   @spec exists?(t(), Torrent.hash()) :: boolean()
-  def exists?(%Peer{id: id}, hash), do: !!whereis(hash, id)
+  def exists?(%Peer{id: id}, hash), do: not is_nil(whereis(hash, id))
 
   @spec whereis(Torrent.hash(), id()) :: pid() | {atom(), node()} | nil
   def whereis(hash, id), do: GenServer.whereis(vm(hash, id))

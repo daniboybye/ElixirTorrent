@@ -5,8 +5,7 @@ defmodule Peer.UtPexTest do
   alias Peer.Controller.State
   alias Peer.LTEP
   alias Peer.LTEP.{Extensions, Handshake, Session}
-  alias Peer.UtHolepunch
-  alias Peer.UtPex
+  alias Peer.{UtHolepunch, UtPex}
 
   alias Peer.UtPex.{
     BEP40,

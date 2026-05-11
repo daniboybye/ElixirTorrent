@@ -72,6 +72,7 @@
           {Credo.Check.Consistency.ExceptionNames, []},
           {Credo.Check.Consistency.LineEndings, []},
           {Credo.Check.Consistency.ParameterPatternMatching, []},
+          {Credo.Check.Consistency.MultiAliasImportRequireUse, []},
           {Credo.Check.Consistency.SpaceAroundOperators, []},
           {Credo.Check.Consistency.SpaceInParentheses, []},
           {Credo.Check.Consistency.TabsOrSpaces, []},
@@ -96,12 +97,14 @@
           ## Readability Checks
           #
           {Credo.Check.Readability.AliasOrder, []},
+          {Credo.Check.Readability.BlockPipe, []},
           {Credo.Check.Readability.FunctionNames, []},
           {Credo.Check.Readability.LargeNumbers, []},
           {Credo.Check.Readability.MaxLineLength, [priority: :low, max_length: 120]},
           {Credo.Check.Readability.ModuleAttributeNames, []},
           {Credo.Check.Readability.ModuleDoc, []},
           {Credo.Check.Readability.ModuleNames, []},
+          {Credo.Check.Readability.OneArityFunctionInPipe, []},
           {Credo.Check.Readability.ParenthesesInCondition, []},
           {Credo.Check.Readability.ParenthesesOnZeroArityDefs, []},
           {Credo.Check.Readability.PipeIntoAnonymousFunctions, []},
@@ -110,6 +113,7 @@
           {Credo.Check.Readability.RedundantBlankLines, []},
           {Credo.Check.Readability.SeparateAliasRequire, []},
           {Credo.Check.Readability.Semicolons, []},
+          {Credo.Check.Readability.SingleFunctionToBlockPipe, []},
           {Credo.Check.Readability.SpaceAfterCommas, []},
           {Credo.Check.Readability.StringSigils, []},
           {Credo.Check.Readability.TrailingBlankLine, []},
@@ -125,18 +129,22 @@
           {Credo.Check.Refactor.Apply, []},
           {Credo.Check.Refactor.CondStatements, []},
           {Credo.Check.Refactor.CyclomaticComplexity, []},
+          {Credo.Check.Refactor.DoubleBooleanNegation, []},
           {Credo.Check.Refactor.FilterCount, []},
           {Credo.Check.Refactor.FilterFilter, []},
           {Credo.Check.Refactor.FunctionArity, []},
+          {Credo.Check.Refactor.IoPuts, []},
           {Credo.Check.Refactor.LongQuoteBlocks, []},
           {Credo.Check.Refactor.MapJoin, []},
           {Credo.Check.Refactor.MatchInCondition, []},
           {Credo.Check.Refactor.NegatedConditionsInUnless, []},
           {Credo.Check.Refactor.NegatedConditionsWithElse, []},
           {Credo.Check.Refactor.Nesting, []},
+          {Credo.Check.Refactor.PassAsyncInTestCases, []},
           {Credo.Check.Refactor.RedundantWithClauseResult, []},
           {Credo.Check.Refactor.FilterReject, []},
           {Credo.Check.Refactor.MapMap, []},
+          {Credo.Check.Refactor.RejectFilter, []},
           {Credo.Check.Refactor.RejectReject, []},
           {Credo.Check.Refactor.UnlessWithElse, []},
           {Credo.Check.Refactor.UtcNowTruncate, []},
@@ -184,30 +192,48 @@
           #
           # Controversial and experimental checks (opt-in, just move the check to `:enabled`)
           #
-          {Credo.Check.Consistency.MultiAliasImportRequireUse, []},
           {Credo.Check.Consistency.UnusedVariableNames, []},
+          # 11 findings (6 unique pairs), all test-only. One pair is a genuine
+          # verbatim-duplicate private helper worth extracting on its own; the
+          # rest are test-boilerplate overlap between distinct scenarios (same
+          # setup shape, different assertions) where each test staying
+          # self-contained and readable in isolation outweighs DRY-ing the
+          # shared shape into a helper. Matches Credo's own "controversial and
+          # experimental" classification for this check.
           {Credo.Check.Design.DuplicatedCode, []},
+          # 17 findings surveyed individually. Almost all are either order-critical
+          # (uTP recv_waiters must stay FIFO; DHT k-buckets, tier lists, and their
+          # tests assert a specific order) or tiny fixed-size lists (acceptor.ex
+          # socket option lists, a k=8-capped DHT bucket) where `[head | tail]`
+          # buys nothing. The two genuine O(n^2) accumulators (Merkle.build_stream_layout,
+          # merkle.ex:663/672) sit inside BEP 52 piece-stream-layout construction —
+          # reordering there risks silently corrupting piece hash verification for a
+          # perf win that is negligible at realistic (<few hundred) file counts.
+          {Credo.Check.Refactor.AppendSingleItem, []},
+          # Every current use of `alias X, as: Y` in this codebase disambiguates a
+          # real collision (e.g. Peer.UtHolepunch.Extension vs Peer.UtPex.Extension
+          # both bare-aliasing to `Extension` in the same test module) or names a
+          # generic last segment more specifically (DialQueue, DHTConfig). This
+          # check would force reverting those deliberate, collision-avoiding names.
           {Credo.Check.Readability.AliasAs, []},
-          {Credo.Check.Readability.BlockPipe, []},
           {Credo.Check.Readability.ImplTrue, []},
           {Credo.Check.Readability.MultiAlias, []},
           {Credo.Check.Readability.NestedFunctionCalls, []},
-          {Credo.Check.Readability.OneArityFunctionInPipe, []},
           {Credo.Check.Readability.OnePipePerLine, []},
-          {Credo.Check.Readability.SingleFunctionToBlockPipe, []},
           {Credo.Check.Readability.SinglePipe, []},
           {Credo.Check.Readability.Specs, []},
           {Credo.Check.Readability.StrictModuleLayout, []},
           {Credo.Check.Refactor.ABCSize, []},
-          {Credo.Check.Refactor.AppendSingleItem, []},
           {Credo.Check.Refactor.CondInsteadOfIfElse, []},
-          {Credo.Check.Refactor.DoubleBooleanNegation, []},
-          {Credo.Check.Refactor.IoPuts, []},
           {Credo.Check.Refactor.ModuleDependencies, []},
+          # 23 findings, mostly `when not is_nil(x)` guards on GenServer callbacks
+          # and case/with clauses across the dial/wire hot path (utp/connection.ex,
+          # peer/controller.ex, magnet/connection.ex). Credo's fix is a structural
+          # clause split/reorder, not a text substitution — real risk of a
+          # match-order bug on protocol-handling code for a low-priority style
+          # preference. Revisit as its own reviewed pass, not a bulk sweep.
           {Credo.Check.Refactor.NegatedIsNil, []},
-          {Credo.Check.Refactor.PassAsyncInTestCases, []},
           {Credo.Check.Refactor.PipeChainStart, []},
-          {Credo.Check.Refactor.RejectFilter, []},
           {Credo.Check.Refactor.VariableRebinding, []}
           # {Credo.Check.Warning.UnusedOperation, [{MyMagicModule, [:fun1, :fun2]}]}
 

@@ -41,7 +41,7 @@ defmodule Peer.Controller do
           :ok
   def cancel(hash, id, index, begin, length) do
     make_key(hash, id)
-    |> via
+    |> via()
     |> GenServer.cast({:cancel, [index, begin, length]})
   end
 
@@ -56,14 +56,14 @@ defmodule Peer.Controller do
   @spec choke(Torrent.hash(), Peer.id()) :: :ok
   def choke(hash, id) do
     make_key(hash, id)
-    |> via
+    |> via()
     |> GenServer.cast({:choke, []})
   end
 
   @spec unchoke(Torrent.hash(), Peer.id()) :: :ok
   def unchoke(hash, id) do
     make_key(hash, id)
-    |> via
+    |> via()
     |> GenServer.cast({:unchoke, []})
   end
 

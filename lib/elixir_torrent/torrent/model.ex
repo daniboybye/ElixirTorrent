@@ -31,7 +31,7 @@ defmodule Torrent.Model do
 
   @spec has_hash?(Torrent.hash()) :: boolean()
   def has_hash?(hash),
-    do: !!GenServer.whereis(via(hash))
+    do: not is_nil(GenServer.whereis(via(hash)))
 
   @spec downloaded?(Torrent.hash()) :: boolean()
   def downloaded?(hash),
@@ -87,7 +87,7 @@ defmodule Torrent.Model do
       else
         bitfield =
           torrent
-          |> do_pieces_count
+          |> do_pieces_count()
           |> Bitfield.make()
 
         %{torrent | bitfield: bitfield, added_at: torrent.added_at || DateTime.utc_now()}
@@ -127,7 +127,7 @@ defmodule Torrent.Model do
       torrent =
         torrent
         |> update_downloaded_bytes(index, 1)
-        |> if_downloaded
+        |> if_downloaded()
 
       {:noreply, torrent}
     end

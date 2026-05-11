@@ -1,8 +1,7 @@
 defmodule Torrent.V2StorageTest do
   use ExUnit.Case, async: false
 
-  alias Torrent.FileHandle
-  alias Torrent.Merkle
+  alias Torrent.{FileHandle, Merkle}
 
   @piece_length 16_384
 

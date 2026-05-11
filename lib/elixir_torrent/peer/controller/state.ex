@@ -684,7 +684,7 @@ defmodule Peer.Controller.State do
 
     state
     |> delete_request(index, begin, length)
-    |> make_request
+    |> make_request()
   end
 
   @spec request(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
@@ -700,7 +700,7 @@ defmodule Peer.Controller.State do
     state
     |> decrement_pending()
     |> put_request(index, begin, length)
-    |> make_request
+    |> make_request()
   end
 
   @spec seed(t()) :: t() | {:error, :two_seeders, t()}
@@ -863,7 +863,7 @@ defmodule Peer.Controller.State do
   @spec handle_not_interested(t()) :: t()
   def handle_not_interested(%__MODULE__{} = state) do
     %__MODULE__{state | interested_of_me: false}
-    |> choke
+    |> choke()
   end
 
   @spec handle_have(t(), Torrent.index()) :: t() | {:error, :protocol_error, t()}
@@ -1156,7 +1156,7 @@ defmodule Peer.Controller.State do
       |> Map.update!(:pin_downloaded_bytes, &(&1 + length))
       |> Map.put(:last_block_at, now)
       |> delete_request(index, begin, length)
-      |> make_request
+      |> make_request()
     else
       {:error, :protocol_error, state}
     end
@@ -1250,7 +1250,7 @@ defmodule Peer.Controller.State do
 
   def handle_have_none(%__MODULE__{status: :seed} = state) do
     %__MODULE__{state | bitfield: :none}
-    |> send_allowed_fast
+    |> send_allowed_fast()
   end
 
   def handle_have_none(%__MODULE__{} = state), do: %__MODULE__{state | bitfield: :none}
@@ -1271,7 +1271,7 @@ defmodule Peer.Controller.State do
 
       state
       |> delete_request(index, begin, length)
-      |> make_request
+      |> make_request()
     else
       {:error, :protocol_error, state}
     end
@@ -1321,7 +1321,7 @@ defmodule Peer.Controller.State do
       [Access.key!(:fast_extension), Access.key!(:allowed_fast_me)],
       &MapSet.put(&1, index)
     )
-    |> make_request
+    |> make_request()
   end
 
   @spec handle_hash_request(t(), HashWire.t()) :: t()
@@ -1590,7 +1590,7 @@ defmodule Peer.Controller.State do
     end
 
     %__MODULE__{state | interested: interested}
-    |> make_request
+    |> make_request()
   end
 
   defp check_interested(state), do: state

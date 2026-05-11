@@ -1353,13 +1353,15 @@ defmodule Torrent.Merkle do
   defp parse_file_properties(_properties, _path, _entry_count), do: {:error, :invalid_file_tree}
 
   defp attach_piece_layers(files, piece_layers, piece_length) when is_map(piece_layers) do
-    Enum.reduce_while(files, {:ok, []}, fn file, {:ok, acc} ->
-      case attach_piece_layer(file, piece_layers, piece_length) do
-        {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
-    |> case do
+    result =
+      Enum.reduce_while(files, {:ok, []}, fn file, {:ok, acc} ->
+        case attach_piece_layer(file, piece_layers, piece_length) do
+          {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+      end)
+
+    case result do
       {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
       error -> error
     end

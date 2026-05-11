@@ -621,11 +621,9 @@ defmodule PeerDiscovery.Announce do
     active =
       tier
       |> Enum.with_index()
-      |> Enum.reject(fn {announce, _tracker_index} ->
-        MapSet.member?(state.disabled, announce)
-      end)
       |> Enum.filter(fn {announce, _tracker_index} ->
-        tracker_retry_ready?(state, announce, now)
+        not MapSet.member?(state.disabled, announce) and
+          tracker_retry_ready?(state, announce, now)
       end)
 
     # BEP 48 — also skip trackers with a fresh {0,0} scrape (dead swarm for
@@ -1310,10 +1308,9 @@ defmodule PeerDiscovery.Announce do
   @spec announcable_trackers_in_tier(%__MODULE__{}, [String.t()], non_neg_integer()) ::
           [String.t()]
   defp announcable_trackers_in_tier(%__MODULE__{} = state, tier, now_ms) do
-    tier
-    |> Enum.reject(&MapSet.member?(state.disabled, &1))
-    |> Enum.filter(fn url ->
-      tracker_retry_ready?(state, url, now_ms) and tracker_alive?(state, url, now_ms)
+    Enum.filter(tier, fn url ->
+      not MapSet.member?(state.disabled, url) and
+        tracker_retry_ready?(state, url, now_ms) and tracker_alive?(state, url, now_ms)
     end)
   end
 

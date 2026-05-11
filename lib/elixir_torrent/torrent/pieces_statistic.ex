@@ -35,16 +35,18 @@ defmodule Torrent.PiecesStatistic do
   def choice_piece(hash, :random, opts) do
     exclude = MapSet.new(Keyword.get(opts, :exclude, []))
 
-    table_ref(hash)
-    |> :ets.select([
-      {{:"$0", :"$1", :"$2"},
-       [
-         {:andalso, {:>, :"$1", 0},
-          {:orelse, {:"=:=", :"$2", nil}, {:"=:=", :"$2", :allowed_fast}}}
-       ], [:"$0"]}
-    ])
-    |> Enum.reject(&MapSet.member?(exclude, &1))
-    |> case do
+    indices =
+      table_ref(hash)
+      |> :ets.select([
+        {{:"$0", :"$1", :"$2"},
+         [
+           {:andalso, {:>, :"$1", 0},
+            {:orelse, {:"=:=", :"$2", nil}, {:"=:=", :"$2", :allowed_fast}}}
+         ], [:"$0"]}
+      ])
+      |> Enum.reject(&MapSet.member?(exclude, &1))
+
+    case indices do
       [] -> nil
       indices -> Enum.random(indices)
     end
@@ -58,9 +60,9 @@ defmodule Torrent.PiecesStatistic do
         nil
 
       list ->
-        list
-        |> Enum.reject(fn {index, _} -> MapSet.member?(exclude, index) end)
-        |> case do
+        filtered = Enum.reject(list, fn {index, _} -> MapSet.member?(exclude, index) end)
+
+        case filtered do
           [] -> nil
           filtered -> filtered |> Enum.random() |> elem(0)
         end

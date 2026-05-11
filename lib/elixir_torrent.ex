@@ -89,6 +89,7 @@ defmodule ElixirTorrent do
         "---------------------------------------"
       ]
       |> Enum.intersperse("\r\n")
+      # credo:disable-for-next-line Credo.Check.Refactor.IoPuts
       |> IO.puts()
 
       info(hash)

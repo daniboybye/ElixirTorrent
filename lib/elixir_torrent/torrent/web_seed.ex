@@ -202,15 +202,16 @@ defmodule Torrent.WebSeed do
   defp eligible_url(%__MODULE__{urls: urls, url_state: st, disabled_urls: disabled_urls}) do
     now = System.monotonic_time(:millisecond)
 
-    urls
-    |> Enum.filter(fn url ->
-      not MapSet.member?(disabled_urls, url) and
-        case Map.get(st, url) do
-          nil -> true
-          %{next_ok_at_ms: t} -> t <= now
-        end
-    end)
-    |> case do
+    candidates =
+      Enum.filter(urls, fn url ->
+        not MapSet.member?(disabled_urls, url) and
+          case Map.get(st, url) do
+            nil -> true
+            %{next_ok_at_ms: t} -> t <= now
+          end
+      end)
+
+    case candidates do
       [] -> nil
       list -> Enum.random(list)
     end
@@ -290,8 +291,9 @@ defmodule Torrent.WebSeed do
   defp fetch_range(%__MODULE__{info: info} = state, url, begin_byte, end_byte, expected_len) do
     segments = span_files(info, begin_byte, end_byte)
 
-    do_fetch_segments(state, url, segments, [])
-    |> case do
+    result = do_fetch_segments(state, url, segments, [])
+
+    case result do
       {:ok, iodata} ->
         actual_len = IO.iodata_length(iodata)
 

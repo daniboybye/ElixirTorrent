@@ -23,8 +23,7 @@ defmodule Peer.MSE.Handshake do
 
   import Bitwise, only: [|||: 2]
 
-  alias Peer.MSE
-  alias Peer.Transport
+  alias Peer.{MSE, Transport}
 
   @max_pad 512
   # Bound the pre-sync scan so a hostile or mismatched peer can't make us read forever.

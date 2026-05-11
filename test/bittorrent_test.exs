@@ -1,5 +1,5 @@
 defmodule BittorrentTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
 
   test "allowed fast set" do
     hash = List.duplicate(0xAA, 20) |> :binary.list_to_bin()
