@@ -133,7 +133,6 @@
           {Credo.Check.Refactor.FilterCount, []},
           {Credo.Check.Refactor.FilterFilter, []},
           {Credo.Check.Refactor.FunctionArity, []},
-          {Credo.Check.Refactor.IoPuts, []},
           {Credo.Check.Refactor.LongQuoteBlocks, []},
           {Credo.Check.Refactor.MapJoin, []},
           {Credo.Check.Refactor.MatchInCondition, []},
@@ -193,6 +192,12 @@
           # Controversial and experimental checks (opt-in, just move the check to `:enabled`)
           #
           {Credo.Check.Consistency.UnusedVariableNames, []},
+          # The escript CLI loop's `info/1` progress printer (elixir_torrent.ex)
+          # is the only IO.puts in the codebase, and it is deliberate: it is the
+          # console feedback for `mix escript.build`'s ad-hoc CLI (README "CLI
+          # (escript)" section), not a debug leftover. Disabled globally rather
+          # than inline-suppressed at that one call site.
+          {Credo.Check.Refactor.IoPuts, []},
           # 11 findings (6 unique pairs), all test-only. One pair is a genuine
           # verbatim-duplicate private helper worth extracting on its own; the
           # rest are test-boilerplate overlap between distinct scenarios (same
