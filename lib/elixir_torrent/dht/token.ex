@@ -6,10 +6,6 @@ defmodule DHT.Token do
   minutes; tokens up to ten minutes old remain valid (current + previous secret).
   """
 
-  @rotate_ms 5 * 60 * 1_000
-  @accept_ms 10 * 60 * 1_000
-  @token_size 8
-
   alias DHT.BEP42
 
   @type t :: %__MODULE__{
@@ -19,6 +15,10 @@ defmodule DHT.Token do
         }
 
   defstruct [:current_secret, :previous_secret, :rotated_at_ms]
+
+  @rotate_ms 5 * 60 * 1_000
+  @accept_ms 10 * 60 * 1_000
+  @token_size 8
 
   @doc "Create a token store with a fresh secret."
   @spec new(keyword()) :: t()

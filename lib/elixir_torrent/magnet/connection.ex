@@ -1,10 +1,10 @@
 defmodule Magnet.Connection do
   @moduledoc false
 
-  require Logger
-
   alias Peer.LTEP.{Extensions, Session}
   alias Peer.UtPex.InboundRate
+
+  require Logger
 
   @pstr "BitTorrent protocol"
   @pstrlen <<byte_size(@pstr)>>

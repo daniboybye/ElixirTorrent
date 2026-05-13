@@ -8,9 +8,9 @@ defmodule Torrent.Controller do
 
   import Process, only: [send_after: 3]
 
-  require Logger
-
   alias Torrent.{Downloads, Model, PiecesStatistic, Superseed, Swarm}
+
+  require Logger
 
   @next_piece_timeout 2_500
   # Concurrent in-flight pieces per torrent. Each active piece is what lets a

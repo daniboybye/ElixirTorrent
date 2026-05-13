@@ -1,13 +1,13 @@
 defmodule Acceptor.Connection.Handler do
-  use GenServer, start: {GenServer, :start_link, [__MODULE__, nil, [name: __MODULE__]]}
-
-  alias Acceptor.Connection.Handshakes
-  require Logger
-
   @moduledoc """
   ListenSocket controls a :gen_tcp.listen
   and do not need to be closed manually
   """
+
+  use GenServer, start: {GenServer, :start_link, [__MODULE__, nil, [name: __MODULE__]]}
+
+  alias Acceptor.Connection.Handshakes
+  require Logger
 
   @spec port() :: :inet.port_number()
   def port, do: GenServer.call(__MODULE__, :port)

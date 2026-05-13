@@ -6,11 +6,11 @@ defmodule Peer.ConnectionManager do
 
   import Process, only: [send_after: 3]
 
-  require Logger
-
   alias Acceptor.Connection.Handshakes
   alias Peer.ConnectionManager.Queue, as: DialQueue
   alias Torrent.Swarm
+
+  require Logger
 
   # @target_connected must stay strictly below @swarm_cap. Both `handle_info(:tick)`
   # and `handle_info({:dial_done, ...})` gate peer-refresh/replenish on

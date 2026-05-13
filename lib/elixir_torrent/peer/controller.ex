@@ -6,12 +6,12 @@ defmodule Peer.Controller do
   use GenServer
   use Via
 
+  import Peer, only: [make_key: 2, key_to_id: 1, key_to_hash: 1]
+
   alias __MODULE__.{State, FastExtension}
   alias Peer.LTEP.Session
   alias Peer.Sender
   alias Torrent.{Downloads, Uploader}
-
-  import Peer, only: [make_key: 2, key_to_id: 1, key_to_hash: 1]
 
   # @spec start_link({Peer.id(), Torrent.hash(), port(), Peer.reserved()}) :: GenServer.on_start()
   def start_link([hash, id, socket, reserved]) do

@@ -3,6 +3,9 @@ defmodule Acceptor.Connection.Handshakes do
   Task supervisor and helpers for TCP/uTP dials, MSE, and BEP 3/10 handshakes.
   """
 
+  alias Acceptor.BlackList
+  alias Peer.MSE.Handshake
+
   require Logger
 
   def child_spec(_) do
@@ -48,9 +51,6 @@ defmodule Acceptor.Connection.Handshakes do
   # plaintext → raw socket). Verified against live peers: :invalid_handshake
   # stayed 0 across 100+ dial batches with :prefer active (was 346 before).
   @mse_outbound :prefer
-
-  alias Acceptor.BlackList
-  alias Peer.MSE.Handshake
 
   def recv(socket) do
     case recv_task(socket) do

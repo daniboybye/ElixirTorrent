@@ -1,9 +1,10 @@
 defmodule UTP.Connection do
   @moduledoc false
   use GenServer
-  require Logger
 
   alias UTP.{LEDBAT, Packet}
+
+  require Logger
 
   @st_data Packet.st_data()
   @st_fin Packet.st_fin()

@@ -16,9 +16,9 @@ defmodule PeerDiscovery.LSD do
 
   use GenServer
 
-  require Logger
-
   alias PeerDiscovery.Announce
+
+  require Logger
 
   # BEP 14 § "Discovery" — well-known multicast groups and port. TTL 4 keeps
   # the packet inside the local administrative zone (default was 1, which

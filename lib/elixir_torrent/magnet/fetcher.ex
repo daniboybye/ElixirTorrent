@@ -1,10 +1,10 @@
 defmodule Magnet.Fetcher do
   @moduledoc false
 
-  require Logger
-
   alias __MODULE__.ConnectionLimit
   alias DHT.Config, as: DHTConfig
+
+  require Logger
 
   @max_peers 60
   @max_connections 16

@@ -7,11 +7,8 @@ defmodule Magnet.UtMetadata do
   already hold the torrent metadata, include top-level `metadata_size` (BEP 9 § extension header).
   """
 
-  @block_size 16_384
-  # The bencoded data header is normally under 100 bytes. Keep a small bounded
-  # allowance for key ordering / integer widths while rejecting a declared
-  # ut_metadata frame before Peer.Sender buffers an attacker-sized body.
-  @max_header_size 1_024
+  alias Magnet.UtMetadata.Extension
+  alias Peer.LTEP.Handshake
 
   @type msg_type :: :request | :data | :reject
   @type extension_handshake :: %{
@@ -19,8 +16,11 @@ defmodule Magnet.UtMetadata do
           optional(:metadata_size) => pos_integer() | nil
         }
 
-  alias Magnet.UtMetadata.Extension
-  alias Peer.LTEP.Handshake
+  @block_size 16_384
+  # The bencoded data header is normally under 100 bytes. Keep a small bounded
+  # allowance for key ordering / integer widths while rejecting a declared
+  # ut_metadata frame before Peer.Sender buffers an attacker-sized body.
+  @max_header_size 1_024
 
   @doc """
   Fixed metadata block size from BEP 9 (16384 bytes).

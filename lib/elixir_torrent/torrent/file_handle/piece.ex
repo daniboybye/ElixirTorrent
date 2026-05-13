@@ -3,6 +3,13 @@ defmodule Torrent.FileHandle.Piece do
   GenServer buffering and flushing one piece's bytes across multi-file layouts.
   """
 
+  use GenServer
+  use Via
+
+  alias Torrent.{FileHandle, Merkle, Model, PiecesStatistic}
+
+  require Logger
+
   @enforce_keys [:hash, :offset, :files, :length]
   defstruct [:hash, :offset, :files, :length, pending_writes: %{}]
   # offset: offset from the beginning of the first file
@@ -23,13 +30,6 @@ defmodule Torrent.FileHandle.Piece do
   # that only the opener process may pread/pwrite them — hence why we open in
   # Piece.init and close in terminate, not in Store.
   @file_modes [:binary, :raw, :read, :write]
-
-  use GenServer
-  use Via
-
-  alias Torrent.{FileHandle, Merkle, Model, PiecesStatistic}
-
-  require Logger
 
   # Idle window before the process terminates (was: hibernate forever). Any
   # read/write/check resets it. When it fires the piece process exits and the

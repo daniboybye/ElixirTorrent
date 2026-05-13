@@ -115,6 +115,7 @@
           {Credo.Check.Readability.Semicolons, []},
           {Credo.Check.Readability.SingleFunctionToBlockPipe, []},
           {Credo.Check.Readability.SpaceAfterCommas, []},
+          {Credo.Check.Readability.StrictModuleLayout, []},
           {Credo.Check.Readability.StringSigils, []},
           {Credo.Check.Readability.TrailingBlankLine, []},
           {Credo.Check.Readability.TrailingWhiteSpace, []},
@@ -222,12 +223,17 @@
           # check would force reverting those deliberate, collision-avoiding names.
           {Credo.Check.Readability.AliasAs, []},
           {Credo.Check.Readability.ImplTrue, []},
+          # Directly contradicts the already-enabled
+          # Consistency.MultiAliasImportRequireUse, which flags single-per-line
+          # aliases as inconsistent once a file's dominant style is grouped
+          # `{}` form (the norm throughout this codebase, e.g. `alias
+          # Peer.LTEP.{Extensions, Handshake, Session}`). Enabling both would
+          # make every multi-alias file unfixably wrong one way or the other.
           {Credo.Check.Readability.MultiAlias, []},
           {Credo.Check.Readability.NestedFunctionCalls, []},
           {Credo.Check.Readability.OnePipePerLine, []},
           {Credo.Check.Readability.SinglePipe, []},
           {Credo.Check.Readability.Specs, []},
-          {Credo.Check.Readability.StrictModuleLayout, []},
           {Credo.Check.Refactor.ABCSize, []},
           {Credo.Check.Refactor.CondInsteadOfIfElse, []},
           {Credo.Check.Refactor.ModuleDependencies, []},

@@ -3,9 +3,9 @@ defmodule Magnet.Fetcher.Session do
 
   use GenServer
 
-  require Logger
-
   alias Magnet.Fetcher
+
+  require Logger
 
   @type progress :: %{
           round: pos_integer(),

@@ -3,10 +3,10 @@ defmodule Magnet.Bootstrap do
 
   use Supervisor
 
-  require Logger
-
   alias Peer.LTEP.Session
   alias Torrent.{Model, Swarm}
+
+  require Logger
 
   @spec ensure(Magnet.t()) :: :ok
   def ensure(%Magnet{} = magnet) do

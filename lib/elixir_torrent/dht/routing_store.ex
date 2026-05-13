@@ -13,9 +13,9 @@ defmodule DHT.RoutingStore do
   as a fallback in case every saved node is gone.
   """
 
-  require Logger
-
   alias DHT.{BEP42, RoutingTable, RoutingTables}
+
+  require Logger
 
   @filename "dht_routing_table.bin"
   @format_version 1

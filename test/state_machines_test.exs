@@ -389,9 +389,6 @@ end
 defmodule StateMachinesTest do
   use ExUnit.Case, async: false
 
-  alias Peer.ConnectionManager.QueueStateM
-  alias Peer.DialBackoffStateM
-
   use PropCheck,
     default_opts: [
       :quiet,
@@ -400,6 +397,9 @@ defmodule StateMachinesTest do
     ]
 
   import PropCheck.StateM.ModelDSL, only: [commands: 2, run_commands: 2]
+
+  alias Peer.ConnectionManager.QueueStateM
+  alias Peer.DialBackoffStateM
 
   @moduletag :state_machine
   @moduletag store_counter_example: false

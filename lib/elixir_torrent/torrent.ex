@@ -6,6 +6,20 @@ defmodule Torrent do
   use Supervisor, type: :supervisor, restart: :transient
   use Via
 
+  alias __MODULE__.{
+    Controller,
+    Swarm,
+    # Bitfield,
+    PiecesStatistic,
+    FileHandle,
+    Uploader,
+    Downloads,
+    Files,
+    Model,
+    Resume,
+    Session
+  }
+
   @type hash :: <<_::160>>
   @type hash_v2 :: <<_::256>>
   @type kind :: :v1 | :hybrid | :v2
@@ -85,20 +99,6 @@ defmodule Torrent do
           # v2 fields in same info dict; :v2 = only v2 (pure BEP 52).
           kind: kind()
         }
-
-  alias __MODULE__.{
-    Controller,
-    Swarm,
-    # Bitfield,
-    PiecesStatistic,
-    FileHandle,
-    Uploader,
-    Downloads,
-    Files,
-    Model,
-    Resume,
-    Session
-  }
 
   @spec start_link(Path.t() | {Path.t(), keyword()}) :: Supervisor.on_start() | none()
   def start_link({path, opts}) when is_binary(path) and is_list(opts),

@@ -5,10 +5,10 @@ defmodule Peer.UtHolepunch do
   IPv4 rendezvous/connect: 8 bytes. IPv6 connect: 20 bytes. IPv4 error: 12 bytes.
   """
 
-  require Logger
-
   alias Peer.Controller.State
   alias Peer.LTEP.Session
+
+  require Logger
 
   @extension_name "ut_holepunch"
 

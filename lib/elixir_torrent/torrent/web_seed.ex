@@ -38,9 +38,9 @@ defmodule Torrent.WebSeed do
   use GenServer
   use Via
 
-  require Logger
-
   alias Torrent.{Bitfield, Downloads, FileHandle, Model, Swarm}
+
+  require Logger
 
   # Bound on concurrent piece fetches — webseeds are a background source,
   # not a stampede. Each in-flight piece opens one direct hackney connection

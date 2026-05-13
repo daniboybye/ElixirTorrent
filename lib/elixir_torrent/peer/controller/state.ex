@@ -3,12 +3,12 @@ defmodule Peer.Controller.State do
   Mutable peer-session state and pure transitions for `Peer.Controller`.
   """
 
+  import Peer, only: [make_key: 2]
+
   alias Peer.{Controller.FastExtension, HashTransfer, HashWire, Sender}
   alias Peer.LTEP.{Extensions, Session}
   alias Peer.UtPex.{DisconnectReason, Entry, InboundRate, Outbound, RecentCache}
   alias Torrent.{Bitfield, Downloads, HashServe, Model, PiecesStatistic, Superseed, Uploader}
-
-  import Peer, only: [make_key: 2]
 
   require Logger
 

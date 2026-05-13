@@ -3,9 +3,9 @@ defmodule Peer.Endpoints do
 
   use GenServer
 
-  require Logger
-
   alias Torrent.Swarm
+
+  require Logger
 
   @table :elixir_torrent_peer_endpoints
   @peer_id_table :elixir_torrent_peer_ids

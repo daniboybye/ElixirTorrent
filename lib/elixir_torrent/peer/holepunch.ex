@@ -3,11 +3,11 @@ defmodule Peer.Holepunch do
   BEP 55 outbound hole-punch coordination — rendezvous via connected relays on dial failure.
   """
 
-  require Logger
-
   alias Acceptor.Connection.Handshakes
   alias Peer.LTEP.Session
   alias Peer.UtHolepunch
+
+  require Logger
 
   @table :elixir_torrent_holepunch_pending
   @dedup_seconds 30

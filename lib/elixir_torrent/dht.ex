@@ -14,7 +14,6 @@ defmodule DHT do
   """
 
   use GenServer
-  require Logger
 
   alias DHT.{
     BEP42,
@@ -29,6 +28,8 @@ defmodule DHT do
     RoutingTables,
     Token
   }
+
+  require Logger
 
   @version Config.version_string()
   @token_rotate_ms 5 * 60 * 1_000

@@ -3,6 +3,18 @@ defmodule PeerDiscovery.Announce do
   GenServer scheduling HTTP/UDP tracker announces, scrapes, and DHT peer merges per torrent.
   """
 
+  use GenServer
+  use Via
+
+  import Process, only: [send_after: 3]
+
+  alias Acceptor.Connection.Handshakes
+  alias Peer.UtPex.Outbound
+  alias PeerDiscovery.{Requests, StartedAnnounces}
+  alias Torrent.{Model, Swarm}
+
+  require Logger
+
   @enforce_keys [:torrent_pid, :hash]
   defstruct torrent_pid: nil,
             hash: nil,
@@ -46,17 +58,6 @@ defmodule PeerDiscovery.Announce do
             # %{url => %{seeders: n, leechers: n, completed: n, ts_ms: mono_ms}}
             scrape_stats: %{},
             last_scrape_ms: nil
-
-  use GenServer
-  use Via
-
-  import Process, only: [send_after: 3]
-
-  alias Acceptor.Connection.Handshakes
-  alias Peer.UtPex.Outbound
-  alias PeerDiscovery.{Requests, StartedAnnounces}
-  alias Torrent.{Model, Swarm}
-  require Logger
 
   @pex_interval_ms 60_000
   @swarm_target_peers 80

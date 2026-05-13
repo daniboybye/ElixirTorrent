@@ -1,6 +1,4 @@
 defmodule PeerDiscovery.ConnectionIds do
-  use GenServer, start: {GenServer, :start_link, [__MODULE__, nil, [name: __MODULE__]]}
-
   @moduledoc """
   Caches BEP 15 UDP tracker `connection_id` values per tracker endpoint and local UDP port.
 
@@ -11,6 +9,8 @@ defmodule PeerDiscovery.ConnectionIds do
   `@request_timeout_ms` so parallel announces do not block on dead trackers until the
   90-minute GenServer.call timeout and crash their Tasks.
   """
+
+  use GenServer, start: {GenServer, :start_link, [__MODULE__, nil, [name: __MODULE__]]}
 
   alias __MODULE__.State
   alias Tracker.Error

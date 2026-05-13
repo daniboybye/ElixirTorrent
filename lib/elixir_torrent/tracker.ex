@@ -3,9 +3,9 @@ defmodule Tracker do
   HTTP and UDP (BEP 15) tracker announce/scrape client with multi-homed source IP selection.
   """
 
-  require Logger
-
   alias __MODULE__.{Error, Response, UDP}
+
+  require Logger
 
   @type connection_id :: <<_::64>>
   @type announce :: binary()

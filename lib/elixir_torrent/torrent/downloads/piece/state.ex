@@ -3,6 +3,17 @@ defmodule Torrent.Downloads.Piece.State do
   Pure state and transitions for a single-piece download worker.
   """
 
+  alias Torrent.{
+    Downloads.Piece,
+    Downloads.Piece.Request,
+    FileHandle,
+    Model,
+    PiecesStatistic,
+    Swarm
+  }
+
+  require Logger
+
   @enforce_keys [:index, :hash, :waiting]
   defstruct [
     :index,
@@ -15,17 +26,6 @@ defmodule Torrent.Downloads.Piece.State do
     monitoring: %{},
     requests: []
   ]
-
-  alias Torrent.{
-    Downloads.Piece,
-    Downloads.Piece.Request,
-    FileHandle,
-    Model,
-    PiecesStatistic,
-    Swarm
-  }
-
-  require Logger
 
   @type timer :: reference() | nil
   @type waiting() :: list(Request.subpiece())
