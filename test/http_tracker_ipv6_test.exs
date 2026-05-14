@@ -47,7 +47,12 @@ defmodule HTTPTrackerIPv6Test do
       assert %Tracker.Response{} = result
       assert_receive {:http_announce_source, @loopback_v6, target}, 5_000
 
-      query = target |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      query =
+        target
+        |> URI.parse()
+        |> Map.fetch!(:query)
+        |> URI.decode_query()
+
       refute Map.has_key?(query, "ip")
       refute Map.has_key?(query, "ipv6")
 

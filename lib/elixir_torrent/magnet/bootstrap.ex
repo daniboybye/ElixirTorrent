@@ -131,7 +131,7 @@ defmodule Magnet.Bootstrap do
     Supervisor.start_link(__MODULE__, magnet, name: via_name(magnet.hash))
   end
 
-  @impl true
+  @impl Supervisor
   def init(%Magnet{} = magnet) do
     hash = magnet.hash
     hash_hex = Torrent.hex_encoded_hash(hash)

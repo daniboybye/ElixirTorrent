@@ -42,7 +42,7 @@ defmodule PeerDiscovery.LSD do
     GenServer.start_link(__MODULE__, [], name: __MODULE__)
   end
 
-  @impl true
+  @impl GenServer
   def init(_) do
     # Random cookie lets us drop the multicast loopback of our own messages
     # without a race-prone source-address check (the wire header claims what
@@ -68,7 +68,7 @@ defmodule PeerDiscovery.LSD do
     {:ok, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:announce, state) do
     state = refresh_interfaces(state)
 
@@ -93,7 +93,7 @@ defmodule PeerDiscovery.LSD do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
-  @impl true
+  @impl GenServer
   def terminate(_reason, %{sockets: sockets}) do
     close_sockets(sockets)
     :ok

@@ -198,7 +198,9 @@ defmodule DHT.RoutingTable do
   @doc "Total node count across all buckets."
   @spec node_count(t()) :: non_neg_integer()
   def node_count(%__MODULE__{} = table) do
-    table.buckets |> Enum.map(&length(&1.nodes)) |> Enum.sum()
+    table.buckets
+    |> Enum.map(&length(&1.nodes))
+    |> Enum.sum()
   end
 
   @doc "Convert routing entries to compact contacts."

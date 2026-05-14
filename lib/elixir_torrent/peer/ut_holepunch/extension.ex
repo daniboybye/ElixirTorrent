@@ -3,12 +3,12 @@ defmodule Peer.UtHolepunch.Extension do
 
   @behaviour Peer.LTEP.Extension
 
-  @impl true
+  @impl Peer.LTEP.Extension
   def name, do: "ut_holepunch"
 
-  @impl true
+  @impl Peer.LTEP.Extension
   def local_id, do: 3
 
-  @impl true
+  @impl Peer.LTEP.Extension
   def outbound_fields, do: %{}
 end

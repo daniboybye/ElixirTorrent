@@ -4,12 +4,12 @@ defmodule Peer.UtPex.Extension do
   @behaviour Peer.LTEP.Extension
 
   # BEP 11 extension name in the BEP 10 `m` dictionary.
-  @impl true
+  @impl Peer.LTEP.Extension
   def name, do: "ut_pex"
 
-  @impl true
+  @impl Peer.LTEP.Extension
   def local_id, do: 2
 
-  @impl true
+  @impl Peer.LTEP.Extension
   def outbound_fields, do: %{}
 end

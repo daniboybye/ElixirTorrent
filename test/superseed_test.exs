@@ -273,10 +273,10 @@ defmodule SuperseedTest.SenderStub do
     )
   end
 
-  @impl true
+  @impl GenServer
   def init(test_pid), do: {:ok, test_pid}
 
-  @impl true
+  @impl GenServer
   def handle_cast(message, test_pid) do
     send(test_pid, {:sent, message})
     {:noreply, test_pid}

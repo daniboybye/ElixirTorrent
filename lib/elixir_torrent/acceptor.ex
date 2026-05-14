@@ -299,6 +299,8 @@ defmodule Acceptor do
   @doc false
   @spec format_ip(:inet.ip_address()) :: String.t()
   def format_ip(ip) do
-    ip |> :inet.ntoa() |> List.to_string()
+    ip
+    |> :inet.ntoa()
+    |> List.to_string()
   end
 end

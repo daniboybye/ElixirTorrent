@@ -547,6 +547,6 @@ defmodule PeerControllerStateTest.DummyPeer do
 
   def start_link(name), do: GenServer.start_link(__MODULE__, nil, name: name)
 
-  @impl true
+  @impl GenServer
   def init(_), do: {:ok, nil}
 end

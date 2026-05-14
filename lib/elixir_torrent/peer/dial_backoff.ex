@@ -199,7 +199,7 @@ defmodule Peer.DialBackoff do
     end
   end
 
-  @impl true
+  @impl GenServer
   def init(_) do
     :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
     :ets.new(@productive_table, [:named_table, :public, :set, read_concurrency: true])
@@ -207,7 +207,7 @@ defmodule Peer.DialBackoff do
     {:ok, %{max_rows: max_rows()}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_cast({:mark_productive, hash, ip, port}, state) do
     now = System.monotonic_time(:millisecond)
     key = key(hash, ip, port)
@@ -248,7 +248,7 @@ defmodule Peer.DialBackoff do
     {:noreply, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:sweep, state) do
     now = System.monotonic_time(:millisecond)
 

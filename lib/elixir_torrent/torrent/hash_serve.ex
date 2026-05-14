@@ -204,7 +204,10 @@ defmodule Torrent.HashServe do
 
   @spec file_path(map(), Merkle.file_context()) :: {:ok, Path.t()} | {:error, term()}
   defp file_path(ctx, %{path: path, length: length}) do
-    relative = path |> Path.join() |> String.replace("\\", "/")
+    relative =
+      path
+      |> Path.join()
+      |> String.replace("\\", "/")
 
     case Enum.find(ctx.all_files, fn
            {_end, {:gap, _}} ->

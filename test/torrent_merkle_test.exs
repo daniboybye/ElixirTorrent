@@ -124,7 +124,11 @@ defmodule Torrent.MerkleTest do
       # Upstream golden file:
       # github.com/arvidn/libtorrent/RC_2_0/test/test_torrents/v2_multipiece_file.torrent
       path = Path.join([__DIR__, "fixtures", "libtorrent_v2_multipiece_file.torrent"])
-      metadata = path |> File.read!() |> Bento.decode!()
+
+      metadata =
+        path
+        |> File.read!()
+        |> Bento.decode!()
 
       expected_root = hex("515ea9181744b817744ded9d2e8e9dc6a8450c0b0c52e24b5077f302ffbd9008")
       expected_piece = hex("60aae9c7b428f87e0713e88229e18f0adf12cd7b22a0dd8a92bb2485eb7af242")
@@ -138,7 +142,12 @@ defmodule Torrent.MerkleTest do
 
     test "rejects a piece layer whose hashes do not reconstruct the claimed root" do
       path = Path.join([__DIR__, "fixtures", "libtorrent_v2_multipiece_file.torrent"])
-      metadata = path |> File.read!() |> Bento.decode!()
+
+      metadata =
+        path
+        |> File.read!()
+        |> Bento.decode!()
+
       [{root, layer}] = Map.to_list(metadata["piece layers"])
       <<first, rest::binary>> = layer
 
@@ -150,7 +159,11 @@ defmodule Torrent.MerkleTest do
 
     test "requires the top-level piece layers dictionary and rejects orphan roots" do
       path = Path.join([__DIR__, "fixtures", "libtorrent_v2_multipiece_file.torrent"])
-      metadata = path |> File.read!() |> Bento.decode!()
+
+      metadata =
+        path
+        |> File.read!()
+        |> Bento.decode!()
 
       assert metadata
              |> Map.delete("piece layers")

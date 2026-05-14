@@ -42,7 +42,11 @@ defmodule DHTRoutingTableTest do
         |> RoutingTable.insert(contact(51), now_ms: @now)
         |> RoutingTable.insert(contact(200), now_ms: @now)
 
-      ids = table |> RoutingTable.closest(target, 3) |> Enum.map(& &1.id)
+      ids =
+        table
+        |> RoutingTable.closest(target, 3)
+        |> Enum.map(& &1.id)
+
       assert ids == Enum.sort_by(ids, &RoutingTable.distance(&1, target))
     end
   end

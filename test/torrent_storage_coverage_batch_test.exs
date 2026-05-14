@@ -649,7 +649,12 @@ defmodule TorrentStorageCoverageBatchTest do
     test "sort_peers_seeders_first ranks seeders ahead of leechers" do
       hash = :crypto.strong_rand_bytes(20)
       torrent = endgame_torrent(hash)
-      seeder_bf = Bitfield.make(4) |> Bitfield.set(0, 1) |> Bitfield.set(1, 1)
+
+      seeder_bf =
+        Bitfield.make(4)
+        |> Bitfield.set(0, 1)
+        |> Bitfield.set(1, 1)
+
       leech_bf = Bitfield.make(4) |> Bitfield.set(0, 1)
 
       with_model(torrent, fn _ ->
@@ -696,7 +701,10 @@ defmodule TorrentStorageCoverageBatchTest do
         downloaded: 2 * 16_384,
         last_index: 1,
         last_piece_length: 16_384,
-        bitfield: Bitfield.make(2) |> Bitfield.set(0, 1) |> Bitfield.set(1, 1),
+        bitfield:
+          Bitfield.make(2)
+          |> Bitfield.set(0, 1)
+          |> Bitfield.set(1, 1),
         peer_status: nil
       }
 

@@ -225,7 +225,11 @@ defmodule Torrent.V2StorageTest do
         "elixir_torrent_v2_libtorrent_#{System.unique_integer([:positive])}"
       )
 
-    torrent = fixture |> Torrent.parse_file!() |> Map.put(:download_dir, dir)
+    torrent =
+      fixture
+      |> Torrent.parse_file!()
+      |> Map.put(:download_dir, dir)
+
     on_exit(fn -> File.rm_rf!(dir) end)
     start_store!(torrent)
 

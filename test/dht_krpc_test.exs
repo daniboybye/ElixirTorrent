@@ -81,7 +81,11 @@ defmodule DHTKRPCTest do
         target: @target_id
       }
 
-      assert {:ok, {:query, decoded}} = query |> KRPC.encode_query() |> KRPC.decode()
+      assert {:ok, {:query, decoded}} =
+               query
+               |> KRPC.encode_query()
+               |> KRPC.decode()
+
       assert decoded.method == :find_node
       assert decoded.target == @target_id
     end
@@ -94,7 +98,11 @@ defmodule DHTKRPCTest do
         info_hash: @info_hash
       }
 
-      assert {:ok, {:query, decoded}} = query |> KRPC.encode_query() |> KRPC.decode()
+      assert {:ok, {:query, decoded}} =
+               query
+               |> KRPC.encode_query()
+               |> KRPC.decode()
+
       assert decoded.method == :get_peers
       assert decoded.info_hash == @info_hash
     end
@@ -117,7 +125,11 @@ defmodule DHTKRPCTest do
               want: want
             }
           ] do
-        assert {:ok, {:query, decoded}} = query |> KRPC.encode_query() |> KRPC.decode()
+        assert {:ok, {:query, decoded}} =
+                 query
+                 |> KRPC.encode_query()
+                 |> KRPC.decode()
+
         assert decoded.method == query.method
         assert decoded.want == want
       end
@@ -152,7 +164,11 @@ defmodule DHTKRPCTest do
         implied_port: 1
       }
 
-      assert {:ok, {:query, decoded}} = query |> KRPC.encode_query() |> KRPC.decode()
+      assert {:ok, {:query, decoded}} =
+               query
+               |> KRPC.encode_query()
+               |> KRPC.decode()
+
       assert decoded.method == :announce_peer
       assert decoded.implied_port == 1
       assert decoded.token == @token
@@ -162,7 +178,12 @@ defmodule DHTKRPCTest do
   describe "KRPC responses" do
     test "ping response round-trip" do
       response = %{transaction_id: @tid, node_id: @response_id}
-      assert {:ok, {:response, decoded}} = response |> KRPC.encode_response() |> KRPC.decode()
+
+      assert {:ok, {:response, decoded}} =
+               response
+               |> KRPC.encode_response()
+               |> KRPC.decode()
+
       assert decoded.node_id == @response_id
     end
 
@@ -186,7 +207,11 @@ defmodule DHTKRPCTest do
         values: [peer_blob]
       }
 
-      assert {:ok, {:response, decoded}} = response |> KRPC.encode_response() |> KRPC.decode()
+      assert {:ok, {:response, decoded}} =
+               response
+               |> KRPC.encode_response()
+               |> KRPC.decode()
+
       assert decoded.token == @token
       assert KRPC.response_peers(decoded) == [%Peer{ip: {127, 0, 0, 1}, port: 6881}]
     end
@@ -201,7 +226,10 @@ defmodule DHTKRPCTest do
         nodes: nodes
       }
 
-      assert {:ok, {:response, decoded}} = response |> KRPC.encode_response() |> KRPC.decode()
+      assert {:ok, {:response, decoded}} =
+               response
+               |> KRPC.encode_response()
+               |> KRPC.decode()
 
       assert KRPC.response_nodes(decoded) == [
                %{id: @target_id, ip: {10, 0, 0, 1}, port: 6881}
@@ -213,7 +241,12 @@ defmodule DHTKRPCTest do
     test "error packet round-trip" do
       observed = Compact.encode_ipv6_peer({0x2001, 0xDB8, 0, 0, 0, 0, 0, 1}, 6_881)
       error = %{transaction_id: @tid, code: 203, message: "Protocol Error", ip: observed}
-      assert {:ok, {:error, decoded}} = error |> KRPC.encode_error() |> KRPC.decode()
+
+      assert {:ok, {:error, decoded}} =
+               error
+               |> KRPC.encode_error()
+               |> KRPC.decode()
+
       assert decoded.code == 203
       assert decoded.message == "Protocol Error"
       assert decoded.ip == observed

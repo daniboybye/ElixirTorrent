@@ -65,7 +65,9 @@ defmodule Peer.LTEP.Session do
       |> Map.merge(address_fields())
       |> Map.merge(extra_fields)
 
-    base |> Handshake.from_map() |> Handshake.encode()
+    base
+    |> Handshake.from_map()
+    |> Handshake.encode()
   end
 
   @doc """

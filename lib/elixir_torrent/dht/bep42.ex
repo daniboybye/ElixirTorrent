@@ -20,7 +20,12 @@ defmodule DHT.BEP42 do
   def generate(ip, rand_byte, middle \\ :crypto.strong_rand_bytes(16))
       when is_binary(middle) and byte_size(middle) == 16 do
     r = Bitwise.band(rand_byte, 0x07)
-    crc = ip |> mask_ip(r) |> crc32c()
+
+    crc =
+      ip
+      |> mask_ip(r)
+      |> crc32c()
+
     low3 = Bitwise.band(:crypto.strong_rand_bytes(1) |> :binary.at(0), 0x07)
     b2 = Bitwise.bor(Bitwise.band(Bitwise.bsr(crc, 8), 0xF8), low3)
 
@@ -31,7 +36,11 @@ defmodule DHT.BEP42 do
   @spec valid?(<<_::160>>, ip()) :: boolean()
   def valid?(<<id::binary-size(20)>>, ip) do
     r = Bitwise.band(:binary.at(id, 19), 0x07)
-    crc = ip |> mask_ip(r) |> crc32c()
+
+    crc =
+      ip
+      |> mask_ip(r)
+      |> crc32c()
 
     byte0(crc) == :binary.at(id, 0) and byte1(crc) == :binary.at(id, 1) and
       Bitwise.band(Bitwise.bsr(crc, 8), 0xF8) == Bitwise.band(:binary.at(id, 2), 0xF8)

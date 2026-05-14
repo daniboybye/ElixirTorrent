@@ -180,7 +180,11 @@ defmodule ProtocolPropertiesTest do
               indices <- list_of(integer(0..255), min_length: 0, max_length: 12),
               max_runs: @property_max_runs
             ) do
-        valid_indices = indices |> Enum.filter(&(&1 < pieces_count)) |> Enum.uniq()
+        valid_indices =
+          indices
+          |> Enum.filter(&(&1 < pieces_count))
+          |> Enum.uniq()
+
         bitfield = Torrent.Bitfield.make(pieces_count)
 
         bitfield =

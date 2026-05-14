@@ -8,25 +8,25 @@ defmodule PeerWireTest.SentCollector do
     )
   end
 
-  @impl true
+  @impl GenServer
   def init({key, test_pid}), do: {:ok, {key, test_pid}}
 
-  @impl true
+  @impl GenServer
   def handle_cast(msg, {key, test_pid}) do
     send(test_pid, {:sent, msg})
     {:noreply, {key, test_pid}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call({:socket_send_raw, _data}, _from, state), do: {:reply, :ok, state}
 
-  @impl true
+  @impl GenServer
   def handle_call(:activate, _from, state), do: {:reply, :ok, state}
 
-  @impl true
+  @impl GenServer
   def handle_call(:deactivate, _from, state), do: {:reply, :ok, state}
 
-  @impl true
+  @impl GenServer
   def handle_call({:send_operations, ops}, _from, {key, test_pid}) do
     send(test_pid, {:send_operations, ops})
     {:reply, :ok, {key, test_pid}}

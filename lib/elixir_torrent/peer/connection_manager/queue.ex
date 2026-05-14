@@ -130,7 +130,9 @@ defmodule Peer.ConnectionManager.Queue do
       queue
       |> Map.values()
       |> Enum.flat_map(fn %__MODULE__{sources: sources} ->
-        sources |> MapSet.to_list() |> Enum.filter(&match?({:pex, _}, &1))
+        sources
+        |> MapSet.to_list()
+        |> Enum.filter(&match?({:pex, _}, &1))
       end)
       |> Enum.uniq()
       |> Enum.sort()

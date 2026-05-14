@@ -19,7 +19,7 @@ defmodule Magnet.Fetcher.Session do
     GenServer.start_link(__MODULE__, {magnet, caller, ref})
   end
 
-  @impl true
+  @impl GenServer
   def init({%Magnet{} = magnet, caller, ref}) do
     Process.flag(:trap_exit, true)
     hash_hex = Torrent.hex_encoded_hash(magnet.hash)
@@ -62,7 +62,7 @@ defmodule Magnet.Fetcher.Session do
     end
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:run_round, state) do
     if fetch_expired?(state) do
       hash_hex = Torrent.hex_encoded_hash(state.magnet.hash)
@@ -132,7 +132,7 @@ defmodule Magnet.Fetcher.Session do
     {:noreply, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info({:upgrade_magnet, %Magnet{} = incoming}, state) do
     merged = Magnet.merge_trackers(state.magnet, incoming)
     before = length(state.magnet.trackers)
@@ -153,7 +153,7 @@ defmodule Magnet.Fetcher.Session do
     end
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:cancel, state) do
     cancel_round_timer(state)
     kill_round_worker(state)
@@ -164,7 +164,7 @@ defmodule Magnet.Fetcher.Session do
     {:stop, :normal, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info({:DOWN, _, :process, pid, _}, %{caller: pid} = state) do
     hash_hex = Torrent.hex_encoded_hash(state.magnet.hash)
 
@@ -175,10 +175,10 @@ defmodule Magnet.Fetcher.Session do
     {:noreply, %{state | caller: nil}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(_message, state), do: {:noreply, state}
 
-  @impl true
+  @impl GenServer
   def terminate(_reason, state) do
     cancel_round_timer(state)
     kill_round_worker(state)

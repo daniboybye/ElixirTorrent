@@ -171,7 +171,7 @@ defmodule Peer.DialStats do
     end
   end
 
-  @impl true
+  @impl GenServer
   def init(_) do
     :ets.new(@table, [
       :named_table,
@@ -185,7 +185,7 @@ defmodule Peer.DialStats do
     {:ok, %{}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:decay, state) do
     # Gently age every counter; drop rows that have fully aged out so the table
     # stays bounded to torrents with genuinely recent dial activity.

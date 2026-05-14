@@ -69,14 +69,14 @@ defmodule Peer.Endpoints do
     :exit, _ -> []
   end
 
-  @impl true
+  @impl GenServer
   def init(_) do
     table = :ets.new(@table, [:set, :protected, read_concurrency: true])
     peer_ids = :ets.new(@peer_id_table, [:set, :protected, read_concurrency: true])
     {:ok, %{table: table, peer_ids: peer_ids, monitors: %{}}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call(
         {:claim_peer_id, hash, peer_id, ip, port, pid},
         _,
@@ -178,7 +178,7 @@ defmodule Peer.Endpoints do
     {:reply, endpoints, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     case Map.pop(state.monitors, ref) do
       {nil, _} ->

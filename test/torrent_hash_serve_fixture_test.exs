@@ -17,7 +17,11 @@ defmodule Torrent.HashServeFixtureTest do
         "elixir_torrent_hash_fixture_#{System.unique_integer([:positive])}"
       )
 
-    torrent = fixture |> Torrent.parse_file!() |> Map.put(:download_dir, dir)
+    torrent =
+      fixture
+      |> Torrent.parse_file!()
+      |> Map.put(:download_dir, dir)
+
     :ok = Torrent.PiecesStatistic.init(torrent)
     {:ok, model} = Model.start_link(torrent)
     {:ok, store} = FileHandle.Store.start_link(torrent.hash)

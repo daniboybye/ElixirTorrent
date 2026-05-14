@@ -467,8 +467,15 @@ defmodule Torrent do
   defp bencode_value(<<c, _::binary>> = str) when c in ?0..?9, do: bencode_string(str)
   defp bencode_value(_), do: throw(:invalid)
 
-  defp bencode_int(<<"e", rest::binary>>, [_ | _] = acc),
-    do: {acc |> Enum.reverse() |> IO.iodata_to_binary() |> String.to_integer(), rest}
+  defp bencode_int(<<"e", rest::binary>>, [_ | _] = acc) do
+    value =
+      acc
+      |> Enum.reverse()
+      |> IO.iodata_to_binary()
+      |> String.to_integer()
+
+    {value, rest}
+  end
 
   defp bencode_int(<<c, rest::binary>>, acc) when c in ?0..?9 or (acc == [] and c == ?-),
     do: bencode_int(rest, [c | acc])
@@ -478,7 +485,11 @@ defmodule Torrent do
   defp bencode_string(bytes), do: bencode_string_len(bytes, [])
 
   defp bencode_string_len(<<":", rest::binary>>, [_ | _] = acc) do
-    len = acc |> Enum.reverse() |> IO.iodata_to_binary() |> String.to_integer()
+    len =
+      acc
+      |> Enum.reverse()
+      |> IO.iodata_to_binary()
+      |> String.to_integer()
 
     if len > byte_size(rest) do
       throw(:invalid)

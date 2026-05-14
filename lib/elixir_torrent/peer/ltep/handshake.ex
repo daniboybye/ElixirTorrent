@@ -50,7 +50,9 @@ defmodule Peer.LTEP.Handshake do
   """
   @spec encode(t()) :: binary()
   def encode(%__MODULE__{} = handshake) do
-    handshake |> to_map() |> Bento.encode!()
+    handshake
+    |> to_map()
+    |> Bento.encode!()
   end
 
   @doc false

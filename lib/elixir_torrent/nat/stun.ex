@@ -108,7 +108,10 @@ defmodule NAT.Stun do
   """
   @spec classify([reflexive()]) :: mapping()
   def classify(reflexives) do
-    ports = reflexives |> Enum.map(fn {_ip, port} -> port end) |> Enum.uniq()
+    ports =
+      reflexives
+      |> Enum.map(fn {_ip, port} -> port end)
+      |> Enum.uniq()
 
     cond do
       length(reflexives) < 2 -> :unknown

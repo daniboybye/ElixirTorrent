@@ -687,10 +687,10 @@ defmodule PeerWireTest.ControllerCapture do
 
   def whereis(key), do: GenServer.whereis({:via, Registry, {Registry, {key, Peer.Controller}}})
 
-  @impl true
+  @impl GenServer
   def init({key, test_pid}), do: {:ok, {key, test_pid}}
 
-  @impl true
+  @impl GenServer
   def handle_cast({fun, args}, {key, test_pid}) when is_atom(fun) and is_list(args) do
     send(test_pid, {:controller, fun, args})
     {:noreply, {key, test_pid}}

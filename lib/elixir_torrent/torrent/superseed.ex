@@ -72,11 +72,13 @@ defmodule Torrent.Superseed do
         nil
 
       choices ->
-        choices |> Enum.min_by(fn {index, availability} -> {availability, index} end) |> elem(0)
+        choices
+        |> Enum.min_by(fn {index, availability} -> {availability, index} end)
+        |> elem(0)
     end
   end
 
-  @impl true
+  @impl GenServer
   def init(hash) do
     # A restored complete torrent deliberately falls back to ordinary seeding.
     # Peer assignments belong to dead connections and cannot be resumed safely;
@@ -95,7 +97,7 @@ defmodule Torrent.Superseed do
      }}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call(:active?, _from, state), do: {:reply, state.phase == :active, state}
 
   def handle_call(:arm, _from, %{phase: :inactive} = state) do
@@ -175,7 +177,7 @@ defmodule Torrent.Superseed do
 
   def handle_call({:confirm_seed, _peer_id}, _from, state), do: {:reply, :inactive, state}
 
-  @impl true
+  @impl GenServer
   def handle_cast({:release, peer_id}, state) do
     {:noreply,
      state
@@ -185,7 +187,11 @@ defmodule Torrent.Superseed do
   end
 
   defp assign_peer(state, peer_id) do
-    assigned = state.assignments |> Map.values() |> MapSet.new()
+    assigned =
+      state.assignments
+      |> Map.values()
+      |> MapSet.new()
+
     peer_has = Map.get(state.peer_pieces, peer_id, MapSet.new())
     index = pick_piece(availabilities(state.hash), peer_has, assigned, state.advertised)
 

@@ -159,7 +159,7 @@ defmodule DHT do
 
   # --- GenServer ---
 
-  @impl true
+  @impl GenServer
   def init(_opts) do
     # Trap exits so the supervisor's shutdown signal runs terminate/2 (which
     # persists the routing table). A plain GenServer would be killed outright by
@@ -212,7 +212,7 @@ defmodule DHT do
     end
   end
 
-  @impl true
+  @impl GenServer
   def terminate(_reason, %__MODULE__{routing_tables: tables}) when is_map(tables) do
     # Persist on clean shutdown so a quit-then-relaunch keeps the routing table.
     RoutingStore.save(tables)
@@ -221,7 +221,7 @@ defmodule DHT do
 
   def terminate(_reason, _state), do: :ok
 
-  @impl true
+  @impl GenServer
   def handle_call(:port, _from, %__MODULE__{port: port} = state), do: {:reply, port, state}
 
   def handle_call({:udp_socket, family}, _from, state),
@@ -240,7 +240,7 @@ defmodule DHT do
     {:noreply, start_lookup(state, hash, ref, from, timeout)}
   end
 
-  @impl true
+  @impl GenServer
   def handle_cast({:announce, hash, port}, state) do
     # Peer discovery casts this on every tracker/DHT round; BEP 5 wants one
     # announce per ~15 min. A live reannounce timer or in-flight announce
@@ -263,7 +263,7 @@ defmodule DHT do
     {:noreply, ping_node(state, contact)}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:bootstrap, state) do
     {:noreply, bootstrap(state)}
   end
@@ -635,7 +635,11 @@ defmodule DHT do
     tables = RoutingTables.mark_good(state.routing_tables, contact, from_query: true)
     state = %{state | routing_tables: tables}
     peers = KRPC.response_peers(response)
-    nodes = response |> KRPC.response_nodes() |> compliant_contacts()
+
+    nodes =
+      response
+      |> KRPC.response_nodes()
+      |> compliant_contacts()
 
     maybe_log_ipv6_peers(peers)
 
@@ -654,8 +658,16 @@ defmodule DHT do
 
   @spec reject_untrusted_response(t(), map(), :inet.ip_address(), KRPC.response()) :: t()
   defp reject_untrusted_response(state, pending, ip, response) do
-    nodes = response |> KRPC.response_nodes() |> compliant_contacts()
-    state = state |> mark_pending_bad(pending, ip) |> merge_discovered_nodes(nodes)
+    nodes =
+      response
+      |> KRPC.response_nodes()
+      |> compliant_contacts()
+
+    state =
+      state
+      |> mark_pending_bad(pending, ip)
+      |> merge_discovered_nodes(nodes)
+
     maybe_lookup_step(state, pending)
   end
 
@@ -1095,7 +1107,11 @@ defmodule DHT do
           |> Enum.uniq_by(&{&1.ip, &1.port})
           |> cap_lookup_peers(Config.max_lookup_peers())
 
-        updated = lookup |> Map.put(:shortlist, merged) |> Map.put(:peers, peers)
+        updated =
+          lookup
+          |> Map.put(:shortlist, merged)
+          |> Map.put(:peers, peers)
+
         state = %{state | lookups: Map.put(state.lookups, ref, updated)}
         Process.send(self(), {:lookup_step, ref}, [])
         state
@@ -1636,6 +1652,8 @@ defmodule DHT do
   defp trim_map(map, max) when map_size(map) <= max, do: map
 
   defp trim_map(map, max) do
-    map |> Enum.take(max) |> Map.new()
+    map
+    |> Enum.take(max)
+    |> Map.new()
   end
 end

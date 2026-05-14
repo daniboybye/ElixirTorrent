@@ -92,7 +92,11 @@ defmodule UTP.LEDBAT do
     else
       target = if peer_wnd_size > 0, do: peer_wnd_size, else: @max_window_ceiling
       grown = state.max_window + @max_cwnd_increase
-      max_window = grown |> min(target) |> min(@max_window_ceiling)
+
+      max_window =
+        grown
+        |> min(target)
+        |> min(@max_window_ceiling)
 
       state = %{state | max_window: max_window}
       if max_window >= target, do: %{state | slow_start: false}, else: state

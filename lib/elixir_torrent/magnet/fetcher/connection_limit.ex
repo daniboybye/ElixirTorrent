@@ -21,10 +21,10 @@ defmodule Magnet.Fetcher.ConnectionLimit do
     :ok
   end
 
-  @impl true
+  @impl GenServer
   def init(_opts), do: {:ok, %{in_use: 0, waiters: :queue.new()}}
 
-  @impl true
+  @impl GenServer
   def handle_call({:acquire, count}, from, %{in_use: in_use, waiters: waiters} = state) do
     if in_use + count <= @max_total do
       {:reply, :ok, %{state | in_use: in_use + count}}
@@ -33,7 +33,7 @@ defmodule Magnet.Fetcher.ConnectionLimit do
     end
   end
 
-  @impl true
+  @impl GenServer
   def handle_cast({:release, count}, %{in_use: in_use, waiters: waiters} = state) do
     in_use = max(in_use - count, 0)
     {waiters, in_use} = grant_waiters(waiters, in_use)

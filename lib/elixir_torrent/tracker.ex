@@ -396,8 +396,13 @@ defmodule Tracker do
     case URI.parse(announce).host do
       host when is_binary(host) ->
         case resolve_hosts(host) do
-          {:ok, hosts} -> hosts |> Enum.map(&elem(&1, 1)) |> MapSet.new()
-          {:error, _reason} -> MapSet.new([:inet, :inet6])
+          {:ok, hosts} ->
+            hosts
+            |> Enum.map(&elem(&1, 1))
+            |> MapSet.new()
+
+          {:error, _reason} ->
+            MapSet.new([:inet, :inet6])
         end
 
       nil ->
@@ -625,7 +630,12 @@ defmodule Tracker do
   rescue
     _e in [Bento.SyntaxError] ->
       content_type = header_value(headers, "content-type")
-      ip_str = ip |> :inet.ntoa() |> List.to_string()
+
+      ip_str =
+        ip
+        |> :inet.ntoa()
+        |> List.to_string()
+
       preview = binary_part(body, 0, min(byte_size(body), 500))
 
       Logger.debug(
@@ -737,7 +747,12 @@ defmodule Tracker do
 
   @spec decode_http_error_response(binary(), non_neg_integer()) :: Error.t()
   defp decode_http_error_response(body, status_code) do
-    case body |> Bento.decode!() |> decode_http_response() do
+    result =
+      body
+      |> Bento.decode!()
+      |> decode_http_response()
+
+    case result do
       %Error{} = error -> error
       _response -> %Error{reason: {:http_status, status_code}}
     end

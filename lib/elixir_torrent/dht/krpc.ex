@@ -214,7 +214,9 @@ defmodule DHT.KRPC do
   @spec merge_query_args(query(), method(), map()) :: query()
   defp merge_query_args(query, :find_node, %{"target" => target, "want" => want})
        when is_binary(target) and is_list(want) and want != [] do
-    query |> Map.put(:target, target) |> Map.put(:want, want)
+    query
+    |> Map.put(:target, target)
+    |> Map.put(:want, want)
   end
 
   defp merge_query_args(query, :find_node, %{"target" => target}) when is_binary(target) do
@@ -223,7 +225,9 @@ defmodule DHT.KRPC do
 
   defp merge_query_args(query, :get_peers, %{"info_hash" => hash, "want" => want})
        when byte_size(hash) == 20 and is_list(want) and want != [] do
-    query |> Map.put(:info_hash, hash) |> Map.put(:want, want)
+    query
+    |> Map.put(:info_hash, hash)
+    |> Map.put(:want, want)
   end
 
   defp merge_query_args(query, :get_peers, %{"info_hash" => hash}) when byte_size(hash) == 20 do

@@ -31,7 +31,7 @@ defmodule Torrent.FileHandle.Store do
   def start_link(hash),
     do: GenServer.start_link(__MODULE__, hash, name: via(hash))
 
-  @impl true
+  @impl GenServer
   def init(hash) do
     # trap_exit so a supervisor shutdown runs terminate/2 and erases the
     # persistent_term entry — Store no longer owns io_devices, so this is
@@ -70,7 +70,7 @@ defmodule Torrent.FileHandle.Store do
     {:ok, hash}
   end
 
-  @impl true
+  @impl GenServer
   def terminate(_reason, hash) do
     :persistent_term.erase(FileHandle.context_key(hash))
     :ok

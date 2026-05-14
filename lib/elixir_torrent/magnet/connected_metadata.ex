@@ -91,7 +91,10 @@ defmodule Magnet.ConnectedMetadata do
 
         {:error, _} ->
           normalized_failures =
-            failures |> Enum.reverse() |> Enum.map(&normalize_failure/1) |> Enum.uniq()
+            failures
+            |> Enum.reverse()
+            |> Enum.map(&normalize_failure/1)
+            |> Enum.uniq()
 
           log_metadata_round_exhausted(hash_hex, peer_count, normalized_failures)
 

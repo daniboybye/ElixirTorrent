@@ -82,7 +82,7 @@ defmodule Torrent.WebSeed do
     GenServer.start_link(__MODULE__, hash, name: via(hash))
   end
 
-  @impl true
+  @impl GenServer
   def init(hash) do
     case load_config(hash) do
       {:ok, state} ->
@@ -101,7 +101,7 @@ defmodule Torrent.WebSeed do
     end
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:tick, %__MODULE__{} = state) do
     state = maybe_pick(state)
     Process.send_after(self(), :tick, @tick_ms)
@@ -222,7 +222,11 @@ defmodule Torrent.WebSeed do
   # peer swarm already handles rarest-first; webseeds fill in.
   defp pick_index(%__MODULE__{hash: hash, last_index: last_index, tasks: tasks}) do
     bitfield = Model.get(hash, :bitfield)
-    in_flight = tasks |> Map.values() |> MapSet.new(fn {_ref, index, _url} -> index end)
+
+    in_flight =
+      tasks
+      |> Map.values()
+      |> MapSet.new(fn {_ref, index, _url} -> index end)
 
     Enum.find(0..last_index, fn index ->
       not Bitfield.have?(bitfield, index) and

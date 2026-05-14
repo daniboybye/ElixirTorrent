@@ -63,8 +63,13 @@ defmodule Torrent.PiecesStatistic do
         filtered = Enum.reject(list, fn {index, _} -> MapSet.member?(exclude, index) end)
 
         case filtered do
-          [] -> nil
-          filtered -> filtered |> Enum.random() |> elem(0)
+          [] ->
+            nil
+
+          filtered ->
+            filtered
+            |> Enum.random()
+            |> elem(0)
         end
     end
   end

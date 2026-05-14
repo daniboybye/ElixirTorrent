@@ -284,10 +284,10 @@ defmodule Bep9MetadataHardeningTest.SenderCapture do
     )
   end
 
-  @impl true
+  @impl GenServer
   def init(test_pid), do: {:ok, test_pid}
 
-  @impl true
+  @impl GenServer
   def handle_call({:socket_send_raw, wire}, _from, test_pid) do
     send(test_pid, {:metadata_wire, wire})
     {:reply, :ok, test_pid}

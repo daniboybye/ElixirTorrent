@@ -257,7 +257,11 @@ defmodule NAT.UPnP do
   end
 
   defp parse_control_url(body, location) do
-    base = location |> URI.parse() |> Map.get(:path, "/") |> Path.dirname()
+    base =
+      location
+      |> URI.parse()
+      |> Map.get(:path, "/")
+      |> Path.dirname()
 
     services =
       @service_block_pattern

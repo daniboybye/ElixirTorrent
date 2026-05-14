@@ -180,10 +180,10 @@ defmodule UTP.Connection do
     end
   end
 
-  @impl true
+  @impl GenServer
   def init(state), do: {:ok, state}
 
-  @impl true
+  @impl GenServer
   def handle_cast({:boot, state}, _old) do
     state = schedule_tick(state)
 
@@ -212,7 +212,7 @@ defmodule UTP.Connection do
     {:noreply, %{state | active_recv_bytes: max(state.active_recv_bytes - bytes, 0)}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call(:activate, _from, %{active: false} = state) do
     {:reply, :ok, %{state | active: true}}
   end
@@ -271,7 +271,7 @@ defmodule UTP.Connection do
     {:reply, {:ok, {ip, port}}, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info({:utp_packet, header, payload, extensions}, state) do
     state =
       state
@@ -283,7 +283,13 @@ defmodule UTP.Connection do
   end
 
   def handle_info(:tick, state) do
-    {:noreply, state |> check_timeouts() |> flush_send() |> schedule_tick()}
+    state =
+      state
+      |> check_timeouts()
+      |> flush_send()
+      |> schedule_tick()
+
+    {:noreply, state}
   end
 
   def handle_info({:recv_timeout, from}, state) do
@@ -1067,7 +1073,7 @@ defmodule UTP.Connection do
     end
   end
 
-  @impl true
+  @impl GenServer
   def terminate(_reason, state) do
     unless state.closed do
       _ = shutdown(state, :terminate)

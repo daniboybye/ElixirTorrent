@@ -23,13 +23,13 @@ defmodule Torrent.Resume do
     GenServer.start_link(__MODULE__, {hash, mode})
   end
 
-  @impl true
+  @impl GenServer
   def init({hash, mode}) do
     send(self(), :verify)
     {:ok, {hash, mode}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:verify, {hash, :skip}) do
     hash_hex = Torrent.hex_encoded_hash(hash)
 

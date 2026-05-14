@@ -5,7 +5,11 @@ defmodule Peer.LTEP.SessionAddressTest do
 
   test "outbound handshake includes listen port and global addresses when available" do
     session = Session.new([Peer.UtPex.Extension])
-    {:ok, hs} = session |> Session.outbound_handshake() |> Handshake.decode()
+
+    {:ok, hs} =
+      session
+      |> Session.outbound_handshake()
+      |> Handshake.decode()
 
     assert hs.m == %{"ut_pex" => 2}
     assert is_integer(hs.p) and hs.p > 0

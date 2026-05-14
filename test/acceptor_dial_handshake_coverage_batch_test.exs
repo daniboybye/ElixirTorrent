@@ -1706,25 +1706,25 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.SentCollector do
     )
   end
 
-  @impl true
+  @impl GenServer
   def init({key, test_pid}), do: {:ok, {key, test_pid}}
 
-  @impl true
+  @impl GenServer
   def handle_cast(msg, {key, test_pid}) do
     send(test_pid, {:sent, key, msg})
     {:noreply, {key, test_pid}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call({:socket_send_raw, data}, _from, {key, test_pid}) do
     send(test_pid, {:sent, key, {:socket_send_raw, data}})
     {:reply, :ok, {key, test_pid}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call(:activate, _from, state), do: {:reply, :ok, state}
 
-  @impl true
+  @impl GenServer
   def handle_call(:deactivate, _from, state), do: {:reply, :ok, state}
 end
 

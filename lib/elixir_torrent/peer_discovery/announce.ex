@@ -233,7 +233,9 @@ defmodule PeerDiscovery.Announce do
   @doc false
   @spec tracker_peers_empty?(%__MODULE__{}) :: boolean()
   def tracker_peers_empty?(%__MODULE__{peers: peers}) do
-    peers |> Map.values() |> List.flatten() == []
+    peers
+    |> Map.values()
+    |> List.flatten() == []
   end
 
   @doc false
@@ -277,7 +279,11 @@ defmodule PeerDiscovery.Announce do
     # BEP 12 chooses the initial tracker order once per torrent session. Keep
     # that order in state thereafter; successful trackers may still move to
     # the front, but ordinary re-announces must not reshuffle the tier.
-    tiers = torrent.metadata |> extract_tiers() |> Enum.map(&Enum.shuffle/1)
+    tiers =
+      torrent.metadata
+      |> extract_tiers()
+      |> Enum.map(&Enum.shuffle/1)
+
     bootstrap_torrent_nodes(torrent.metadata)
     seed_peers = PeerDiscovery.SeedPeers.take(torrent.hash)
 
@@ -374,7 +380,13 @@ defmodule PeerDiscovery.Announce do
 
   def handle_cast(:connecting_to_peers, state) do
     peer_list = merged_peers(state)
-    tracker_count = state.peers |> Map.values() |> List.flatten() |> length()
+
+    tracker_count =
+      state.peers
+      |> Map.values()
+      |> List.flatten()
+      |> length()
+
     dht_count = length(state.dht_peers)
 
     Logger.debug(
@@ -733,7 +745,11 @@ defmodule PeerDiscovery.Announce do
           {:noreply, maybe_schedule_exhausted_fanout(state, start_tier)}
 
         started ->
-          high_tier = started |> Enum.map(&elem(&1, 0)) |> Enum.max()
+          high_tier =
+            started
+            |> Enum.map(&elem(&1, 0))
+            |> Enum.max()
+
           state = apply_fanout_tier_starts(state, started, high_tier)
           {:noreply, state}
       end

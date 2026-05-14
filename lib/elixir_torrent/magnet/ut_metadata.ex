@@ -275,8 +275,15 @@ defmodule Magnet.UtMetadata do
 
   defp integer_start(_), do: throw(:invalid)
 
-  defp integer_continue("e" <> rest, acc),
-    do: {acc |> Enum.reverse() |> IO.iodata_to_binary() |> String.to_integer(), rest}
+  defp integer_continue("e" <> rest, acc) do
+    value =
+      acc
+      |> Enum.reverse()
+      |> IO.iodata_to_binary()
+      |> String.to_integer()
+
+    {value, rest}
+  end
 
   defp integer_continue(<<digit>> <> rest, acc) when digit in ~c"0123456789",
     do: integer_continue(rest, [digit | acc])
@@ -294,7 +301,12 @@ defmodule Magnet.UtMetadata do
     do: string_length(rest, [digit | acc])
 
   defp string_length(":" <> rest, acc) do
-    len = acc |> Enum.reverse() |> IO.iodata_to_binary() |> String.to_integer()
+    len =
+      acc
+      |> Enum.reverse()
+      |> IO.iodata_to_binary()
+      |> String.to_integer()
+
     string_contents(len, rest)
   end
 

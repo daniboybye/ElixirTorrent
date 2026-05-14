@@ -274,8 +274,15 @@ defmodule Peer.UtPex do
   def encode_delta(added, dropped, opts \\ []) do
     initial? = Keyword.get(opts, :initial?, false)
 
-    added_entries = added |> Enum.map(&Entry.normalize/1) |> dedupe_entries()
-    dropped_endpoints = dropped |> Enum.map(&Entry.normalize/1) |> dedupe_endpoints()
+    added_entries =
+      added
+      |> Enum.map(&Entry.normalize/1)
+      |> dedupe_entries()
+
+    dropped_endpoints =
+      dropped
+      |> Enum.map(&Entry.normalize/1)
+      |> dedupe_endpoints()
 
     added_cap = if initial?, do: @max_initial_added, else: @max_non_initial_added
     dropped_cap = if initial?, do: @max_initial_added, else: @max_non_initial_dropped

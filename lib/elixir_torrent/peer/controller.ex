@@ -385,7 +385,10 @@ defmodule Peer.Controller do
 
         require Logger
 
-        ip_str = ip |> :inet.ntoa() |> to_string()
+        ip_str =
+          ip
+          |> :inet.ntoa()
+          |> to_string()
 
         Logger.debug(
           "[peer_dial] warm_redial endpoint=#{ip_str}:#{port} hash=#{Torrent.hex_encoded_hash(state.hash)} downloaded=#{n}"

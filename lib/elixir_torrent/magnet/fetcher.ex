@@ -726,7 +726,12 @@ defmodule Magnet.Fetcher do
           {:ok, Path.t(), [String.t()], boolean()} | {:error, term()}
   defp fetch_metadata(%Magnet{} = magnet, peers, announced_trackers) do
     hash_hex = Torrent.hex_encoded_hash(magnet.hash)
-    peer_batch = peers |> shuffle() |> Enum.take(@max_peers)
+
+    peer_batch =
+      peers
+      |> shuffle()
+      |> Enum.take(@max_peers)
+
     slots = min(length(peer_batch), @max_connections)
 
     :ok = ConnectionLimit.acquire(slots)

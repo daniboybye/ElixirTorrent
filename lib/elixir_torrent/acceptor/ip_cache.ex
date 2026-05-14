@@ -22,14 +22,14 @@ defmodule Acceptor.IpCache do
   @spec start_link(term()) :: GenServer.on_start()
   def start_link(_arg), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
-  @impl true
+  @impl GenServer
   def init(_) do
     refresh()
     schedule_refresh()
     {:ok, nil}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:refresh, state) do
     refresh()
     schedule_refresh()

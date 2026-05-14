@@ -73,7 +73,11 @@ defmodule Torrent.Merkle do
 
   @doc "Returns the 32-byte pieces root of a built tree."
   @spec root(t()) :: hash()
-  def root(%__MODULE__{levels: levels}), do: levels |> List.last() |> hd()
+  def root(%__MODULE__{levels: levels}) do
+    levels
+    |> List.last()
+    |> hd()
+  end
 
   @doc """
   Returns the concatenated BEP 52 piece-layer hashes for a file.
@@ -91,7 +95,11 @@ defmodule Torrent.Merkle do
       if piece_count <= 1 do
         {:ok, <<>>}
       else
-        hashes = tree.levels |> Enum.at(layer) |> Enum.take(piece_count)
+        hashes =
+          tree.levels
+          |> Enum.at(layer)
+          |> Enum.take(piece_count)
+
         {:ok, IO.iodata_to_binary(hashes)}
       end
     end
@@ -285,7 +293,12 @@ defmodule Torrent.Merkle do
          blocks_per_piece = div(piece_length, @block_size),
          piece_count = ceil_div(tree.block_count, blocks_per_piece),
          true <- piece_index >= 0 and piece_index < piece_count do
-      {:ok, tree.levels |> Enum.at(layer) |> Enum.at(piece_index)}
+      value =
+        tree.levels
+        |> Enum.at(layer)
+        |> Enum.at(piece_index)
+
+      {:ok, value}
     else
       false -> {:error, :invalid_index}
       {:error, _} = err -> err
@@ -1373,7 +1386,10 @@ defmodule Torrent.Merkle do
       |> Enum.filter(&(&1.length > piece_length))
       |> MapSet.new(& &1.pieces_root)
 
-    actual = piece_layers |> Map.keys() |> MapSet.new()
+    actual =
+      piece_layers
+      |> Map.keys()
+      |> MapSet.new()
 
     if actual == expected, do: :ok, else: {:error, :invalid_piece_layer_keys}
   end

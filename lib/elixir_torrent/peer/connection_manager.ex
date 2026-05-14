@@ -113,14 +113,14 @@ defmodule Peer.ConnectionManager do
     :exit, _ -> :ok
   end
 
-  @impl true
+  @impl GenServer
   def init(hash) do
     send_after(self(), :tick, @normal_interval_ms)
     # nil = never snubbed; monotonic ms can be negative so 0 is not a safe sentinel.
     {:ok, %{hash: hash, queue: %{}, dialing?: false, dial_task: nil, last_snub_ms: nil}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_cast({:offer, peers, source}, state) when is_list(peers) do
     queue = DialQueue.offer(state.queue, peers, source, offer_opts(state))
     maybe_continue_dial(state, queue, peers != [])
@@ -151,7 +151,7 @@ defmodule Peer.ConnectionManager do
     {:noreply, state, {:continue, :dial}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_continue(:dial, %{dialing?: true} = state), do: {:noreply, state}
 
   def handle_continue(:dial, %{hash: hash} = state) do
@@ -162,14 +162,14 @@ defmodule Peer.ConnectionManager do
     maybe_dial(state, connected)
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:tick, %{hash: hash} = state) do
     connected = Swarm.count(hash)
     send_after(self(), :tick, tick_interval(hash, connected))
     handle_tick(state, hash, connected)
   end
 
-  @impl true
+  @impl GenServer
   def handle_info({:dial_done, selected_keys, results}, %{hash: hash} = state) do
     {_ok, _failures, failed_peers} = results
     failed_keys = MapSet.new(Enum.map(failed_peers, fn {p, _} -> {p.ip, p.port} end))
@@ -185,7 +185,7 @@ defmodule Peer.ConnectionManager do
     maybe_dial(state, connected)
   end
 
-  @impl true
+  @impl GenServer
   def terminate(_reason, %{dial_task: pid}) when is_pid(pid) do
     if Process.alive?(pid), do: Process.exit(pid, :shutdown)
     :ok

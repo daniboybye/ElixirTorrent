@@ -49,14 +49,14 @@ defmodule Peer.UtPex.RecentCache do
     :exit, _ -> {current, []}
   end
 
-  @impl true
+  @impl GenServer
   def init(_) do
     table = :ets.new(@table, [:set, :protected, read_concurrency: true])
     schedule_sweep()
     {:ok, %{table: table}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_cast({:record, hash, entry, now_ms}, %{table: table} = state) do
     family = family_for(entry)
     key = {hash, family}
@@ -79,7 +79,7 @@ defmodule Peer.UtPex.RecentCache do
     {:noreply, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call({:supplement, hash, current, opts}, _, %{table: table} = state) do
     clients = Keyword.get(opts, :clients, %{inet: nil, inet6: nil})
 
@@ -142,7 +142,7 @@ defmodule Peer.UtPex.RecentCache do
     end
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:sweep, %{table: table} = state) do
     now = System.monotonic_time(:millisecond)
     sweep_table(table, now)

@@ -88,7 +88,10 @@ defmodule TorrentV2DetectionTest do
 
     root =
       root ||
-        content |> Merkle.build() |> elem(1) |> Merkle.root()
+        content
+        |> Merkle.build()
+        |> elem(1)
+        |> Merkle.root()
 
     file_tree_leaf =
       IO.iodata_to_binary([

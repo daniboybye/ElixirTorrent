@@ -99,12 +99,14 @@
           {Credo.Check.Readability.AliasOrder, []},
           {Credo.Check.Readability.BlockPipe, []},
           {Credo.Check.Readability.FunctionNames, []},
+          {Credo.Check.Readability.ImplTrue, []},
           {Credo.Check.Readability.LargeNumbers, []},
           {Credo.Check.Readability.MaxLineLength, [priority: :low, max_length: 120]},
           {Credo.Check.Readability.ModuleAttributeNames, []},
           {Credo.Check.Readability.ModuleDoc, []},
           {Credo.Check.Readability.ModuleNames, []},
           {Credo.Check.Readability.OneArityFunctionInPipe, []},
+          {Credo.Check.Readability.OnePipePerLine, []},
           {Credo.Check.Readability.ParenthesesInCondition, []},
           {Credo.Check.Readability.ParenthesesOnZeroArityDefs, []},
           {Credo.Check.Readability.PipeIntoAnonymousFunctions, []},
@@ -222,7 +224,6 @@
           # generic last segment more specifically (DialQueue, DHTConfig). This
           # check would force reverting those deliberate, collision-avoiding names.
           {Credo.Check.Readability.AliasAs, []},
-          {Credo.Check.Readability.ImplTrue, []},
           # Directly contradicts the already-enabled
           # Consistency.MultiAliasImportRequireUse, which flags single-per-line
           # aliases as inconsistent once a file's dominant style is grouped
@@ -231,11 +232,27 @@
           # make every multi-alias file unfixably wrong one way or the other.
           {Credo.Check.Readability.MultiAlias, []},
           {Credo.Check.Readability.NestedFunctionCalls, []},
-          {Credo.Check.Readability.OnePipePerLine, []},
           {Credo.Check.Readability.SinglePipe, []},
           {Credo.Check.Readability.Specs, []},
+          # 77 findings scattered across nearly every subsystem, many on the
+          # dial/wire hot path (handshakes.ex up to 43, magnet/connection.ex 50,
+          # tracker.ex up to 56, utp/connection.ex up to 42,
+          # peer/controller/state.ex up to 45). A real fix means decomposing
+          # each function's actual logic, not a mechanical edit — genuine
+          # refactor work belonging in its own deliberate, function-by-function
+          # pass with test coverage in hand, not a bulk lint sweep across
+          # protocol-critical code.
           {Credo.Check.Refactor.ABCSize, []},
           {Credo.Check.Refactor.CondInsteadOfIfElse, []},
+          # 39 findings (17% of source files), all at 2-4x the default max of 10,
+          # and the worst offenders (peer/controller/state.ex: 46, torrent.ex: 36,
+          # magnet/fetcher.ex: 35, tracker.ex: 28) are exactly this codebase's
+          # architectural hub modules. A hub module in a from-scratch binary
+          # protocol implementation legitimately touches many small, single-
+          # purpose BEP structs and sub-handlers by design — that is the
+          # decomposition CLAUDE.md/ARCHITECTURE.md describes, not accidental
+          # coupling. Fixing this means splitting hub modules, a real
+          # architecture decision to make deliberately, not a bulk lint pass.
           {Credo.Check.Refactor.ModuleDependencies, []},
           # 23 findings, mostly `when not is_nil(x)` guards on GenServer callbacks
           # and case/with clauses across the dial/wire hot path (utp/connection.ex,
@@ -245,6 +262,12 @@
           # preference. Revisit as its own reviewed pass, not a bulk sweep.
           {Credo.Check.Refactor.NegatedIsNil, []},
           {Credo.Check.Refactor.PipeChainStart, []},
+          # 55 findings, almost all the standard GenServer callback idiom
+          # `state = f(state); state = g(state); {:noreply, state}` (dht.ex,
+          # utp/connection.ex, torrent/controller.ex). Forcing unique names or
+          # nesting the calls would read worse, not better, for this exact
+          # pattern — it is one of the most common, deliberate idioms in OTP
+          # code, which is presumably why Credo files this under controversial.
           {Credo.Check.Refactor.VariableRebinding, []}
           # {Credo.Check.Warning.UnusedOperation, [{MyMagicModule, [:fun1, :fun2]}]}
 

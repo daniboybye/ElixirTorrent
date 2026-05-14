@@ -30,7 +30,7 @@ defmodule NAT.PortMapper do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @impl true
+  @impl GenServer
   def init(_opts) do
     Process.send_after(self(), :map_ports, @startup_delay_ms)
     # NAT-type detection is one-shot: mapping behaviour is a stable property of
@@ -45,7 +45,7 @@ defmodule NAT.PortMapper do
      }}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:detect_nat_type, state) do
     # STUN queries block up to a few seconds each; keep them off the GenServer.
     Task.start(&log_nat_type/0)

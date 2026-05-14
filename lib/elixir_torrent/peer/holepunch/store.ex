@@ -14,7 +14,7 @@ defmodule Peer.Holepunch.Store do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @impl true
+  @impl GenServer
   def init(_opts) do
     if :ets.info(@table) == :undefined do
       :ets.new(@table, [:set, :public, :named_table])
