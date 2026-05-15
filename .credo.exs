@@ -194,6 +194,13 @@
           #
           # Controversial and experimental checks (opt-in, just move the check to `:enabled`)
           #
+          # 1021 findings — by far the largest single check. It wants ONE style
+          # per file for naming discarded values, but this codebase's mix is
+          # deliberate: `{_ok, _failures, failed_peers} = results` names the
+          # discarded elements to document the tuple's shape, while plain `_`
+          # is used where the discarded value's identity is obvious from
+          # context (e.g. `fn {p, _} -> ...`). That per-site judgment call is
+          # better than a blanket rule, not sloppy inconsistency.
           {Credo.Check.Consistency.UnusedVariableNames, []},
           # The escript CLI loop's `info/1` progress printer (elixir_torrent.ex)
           # is the only IO.puts in the codebase, and it is deliberate: it is the
@@ -231,8 +238,29 @@
           # Peer.LTEP.{Extensions, Handshake, Session}`). Enabling both would
           # make every multi-alias file unfixably wrong one way or the other.
           {Credo.Check.Readability.MultiAlias, []},
+          # 316 findings, fires at just 2 levels of nesting — the first
+          # example was `GenServer.whereis(via(hash))`, a totally benign,
+          # idiomatic wrap. Forcing this into a pipe for every 2-deep call in
+          # the codebase would not read better; only genuinely deep nesting
+          # (3+ levels) is a real readability problem, and this check does not
+          # distinguish that from the common case.
           {Credo.Check.Readability.NestedFunctionCalls, []},
+          # 164 findings. Sampled several: some are neutral either way, but a
+          # meaningful fraction pipe a multi-line literal into the next call
+          # (e.g. `torrent(...) |> Map.put(:metadata, %{...})` with a large
+          # nested map) — un-piping those would bury the multi-line argument
+          # mid-call instead of trailing it, which is worse, not better. The
+          # check's fix is the same regardless of call shape, so it cannot
+          # tell the improving cases from the hurting ones.
           {Credo.Check.Readability.SinglePipe, []},
+          # Unlike the other checks in this section, this one is NOT a case of
+          # fighting a better existing pattern — @spec is genuinely valuable
+          # here (Dialyzer already runs in mix quality) and this codebase uses
+          # @spec pervasively already. 311 findings across 65 files is real
+          # work though: a wrong @spec is worse than a missing one (misleading
+          # documentation, and it can hide the exact Dialyzer warnings it
+          # should surface). Needs a deliberate pass reading each function to
+          # infer correct types, not a bulk fill-in.
           {Credo.Check.Readability.Specs, []},
           # 77 findings scattered across nearly every subsystem, many on the
           # dial/wire hot path (handshakes.ex up to 43, magnet/connection.ex 50,
@@ -243,6 +271,13 @@
           # pass with test coverage in hand, not a bulk lint sweep across
           # protocol-critical code.
           {Credo.Check.Refactor.ABCSize, []},
+          # 443 findings — the single largest volume of anything surveyed. The
+          # check wants every `if/else` rewritten as `cond`, which is the
+          # opposite of the mainstream Elixir convention (if/else for binary
+          # branching, cond/case for 3+ branches). Converting all 443 sites
+          # would make the code more verbose for no readability gain and go
+          # against how Elixir style guides and this codebase already write
+          # binary conditionals.
           {Credo.Check.Refactor.CondInsteadOfIfElse, []},
           # 39 findings (17% of source files), all at 2-4x the default max of 10,
           # and the worst offenders (peer/controller/state.ex: 46, torrent.ex: 36,
@@ -261,6 +296,14 @@
           # match-order bug on protocol-handling code for a low-priority style
           # preference. Revisit as its own reviewed pass, not a bulk sweep.
           {Credo.Check.Refactor.NegatedIsNil, []},
+          # 138 findings, same root complaint as Readability.SinglePipe (many
+          # sites are shared): wants every pipe chain to start from a bare
+          # variable, not a function call — e.g. `base_peer_state(hash, id)
+          # |> Map.put(...) |> Map.put(...)` would need a throwaway
+          # intermediate binding just to satisfy the rule. The
+          # constructor-then-transform-chain shape is a common, deliberate
+          # idiom here; forcing an extra variable name adds a line for no
+          # readability gain.
           {Credo.Check.Refactor.PipeChainStart, []},
           # 55 findings, almost all the standard GenServer callback idiom
           # `state = f(state); state = g(state); {:noreply, state}` (dht.ex,
