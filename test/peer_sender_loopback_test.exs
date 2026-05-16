@@ -3,6 +3,8 @@ defmodule PeerSenderLoopbackTest do
   use ExUnit.Case, async: false
 
   alias Magnet.UtMetadata.Extension, as: UtMetadataExtension
+  alias Peer.LTEP
+  alias Peer.LTEP.Session
   alias PeerWireTest.ControllerCapture
 
   @piece_len Torrent.Downloads.piece_max_length()
@@ -12,6 +14,76 @@ defmodule PeerSenderLoopbackTest do
     {:ok, _} = Application.ensure_all_started(:elixir_torrent)
     Process.flag(:trap_exit, true)
     :ok
+  end
+
+  describe "Peer.LTEP recv_extended via Sender key" do
+    test "returns message id 20, extended id, and payload when Sender is inactive" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = Peer.Sender.deactivate(key)
+      payload = "d2:id1i1ee"
+      wire = LTEP.extended_message_wire(7, payload)
+      assert :ok = :gen_tcp.send(server, wire)
+
+      assert {:ok, 20, 7, ^payload} = LTEP.recv_extended(key, @timeout)
+    end
+
+    test "rejects length prefix below 2 without reading a body" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = Peer.Sender.deactivate(key)
+      assert :ok = :gen_tcp.send(server, <<1::32>>)
+      assert {:error, :invalid_message} = LTEP.recv_extended(key, @timeout)
+    end
+
+    test "rejects length prefix above max_message_size without reading a body" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = Peer.Sender.deactivate(key)
+      oversized = LTEP.max_message_size() + 1
+      assert :ok = :gen_tcp.send(server, <<oversized::32>>)
+      assert {:error, :invalid_message} = LTEP.recv_extended(key, @timeout)
+    end
+  end
+
+  describe "Peer.LTEP handshake_exchange via Sender key" do
+    test "merges peer handshake after optional preamble wire messages" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = Peer.Sender.deactivate(key)
+
+      exchange =
+        Task.async(fn ->
+          LTEP.handshake_exchange(key, Session.new([UtMetadataExtension]), timeout: @timeout)
+        end)
+
+      assert {:ok, <<len::32>>} = :gen_tcp.recv(server, 4, @timeout)
+      assert {:ok, our_hs_msg} = :gen_tcp.recv(server, len, @timeout)
+      assert <<20, 0, _our_hs::binary>> = our_hs_msg
+
+      assert :ok = :gen_tcp.send(server, frame_payload(<<0>>))
+
+      peer_hs =
+        Bento.encode!(%{
+          "m" => %{"ut_metadata" => 4},
+          "metadata_size" => 1024,
+          "v" => "loopback"
+        })
+
+      assert :ok = :gen_tcp.send(server, LTEP.extended_message_wire(0, peer_hs))
+
+      assert {:ok, session} = Task.await(exchange, @timeout)
+      assert Session.peer_extension_id(session, "ut_metadata") == 4
+      assert Session.peer_handshake(session).metadata_size == 1024
+    end
   end
 
   describe "inbound wire framing and dispatch (active TCP)" do
@@ -400,8 +472,10 @@ defmodule PeerSenderLoopbackTest do
 
       # Declares a 10-byte piece body but only 2 bytes ever arrive -- the frame never
       # completes, mirroring a peer trickling a near-ceiling frame in one byte at a time.
-      assert :ok = :gen_tcp.send(server, <<0, 0, 0, 10, 7, 0>>)
-      state = await_state(sender_pid, &is_reference(&1.frame_stall_ref))
+      state =
+        send_tcp_and_sync_sender(server, client, sender_pid, <<0, 0, 0, 10, 7, 0>>)
+
+      assert is_reference(state.frame_stall_ref)
 
       down_ref = Process.monitor(sender_pid)
       send(sender_pid, {:frame_stall, state.frame_stall_ref})
@@ -415,14 +489,15 @@ defmodule PeerSenderLoopbackTest do
 
       on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
 
-      assert :ok = :gen_tcp.send(server, <<0, 0, 0, 10, 7, 0>>)
-      state = await_state(sender_pid, &is_reference(&1.frame_stall_ref))
+      state =
+        send_tcp_and_sync_sender(server, client, sender_pid, <<0, 0, 0, 10, 7, 0>>)
+
+      assert is_reference(state.frame_stall_ref)
       ref = state.frame_stall_ref
 
       # More dribble for the SAME frame -- still incomplete afterwards.
-      assert :ok = :gen_tcp.send(server, <<0, 0>>)
-
-      state2 = await_state(sender_pid, &(byte_size(&1.buffer) == byte_size(state.buffer) + 2))
+      state2 = send_tcp_and_sync_sender(server, client, sender_pid, <<0, 0>>)
+      assert byte_size(state2.buffer) == byte_size(state.buffer) + 2
       assert state2.frame_stall_ref == ref
 
       # The watchdog scheduled on the FIRST delivery still fires and disconnects the
@@ -443,14 +518,17 @@ defmodule PeerSenderLoopbackTest do
       # at first. (Not a `piece` frame here: completing one calls into
       # Peer.Controller.valid_piece_block?/4, which needs a live Torrent.Model this
       # loopback harness never starts.)
-      assert :ok = :gen_tcp.send(server, <<0, 0, 0, 5, 4, 0>>)
-      await_state(sender_pid, &is_reference(&1.frame_stall_ref))
+      state =
+        send_tcp_and_sync_sender(server, client, sender_pid, <<0, 0, 0, 5, 4, 0>>)
+
+      assert is_reference(state.frame_stall_ref)
 
       assert :ok = :gen_tcp.send(server, <<0, 0, 0>>)
       assert_receive {:controller, :handle_have, [0]}, @timeout
 
-      state = await_state(sender_pid, &is_nil(&1.frame_stall_ref))
-      assert state.buffer == <<>>
+      completed_state = :sys.get_state(sender_pid)
+      assert completed_state.frame_stall_ref == nil
+      assert completed_state.buffer == <<>>
       assert Process.alive?(sender_pid)
     end
 
@@ -612,22 +690,12 @@ defmodule PeerSenderLoopbackTest do
     <<byte_size(body)::32, body::binary>>
   end
 
-  # TCP delivery into the Sender's mailbox is async, so a bare :sys.get_state right
-  # after :gen_tcp.send can race ahead of it. Poll instead of asserting on one read.
-  defp await_state(pid, pred, deadline \\ System.monotonic_time(:millisecond) + 2_000) do
-    state = :sys.get_state(pid)
-
-    cond do
-      pred.(state) ->
-        state
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        flunk("condition not met before timeout, last state: #{inspect(state)}")
-
-      true ->
-        Process.sleep(5)
-        await_state(pid, pred, deadline)
-    end
+  defp send_tcp_and_sync_sender(server, client, sender_pid, data) do
+    1 = :erlang.trace(sender_pid, true, [:receive])
+    assert :ok = :gen_tcp.send(server, data)
+    assert_receive {:trace, ^sender_pid, :receive, {:tcp, ^client, ^data}}, @timeout
+    _ = :erlang.trace(sender_pid, false, [:receive])
+    :sys.get_state(sender_pid)
   end
 
   defp wire_message(server) do

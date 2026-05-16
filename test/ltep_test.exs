@@ -19,6 +19,10 @@ defmodule Peer.LTEPTest do
     def local_id, do: 42
   end
 
+  test "Extension.outbound_fields defaults to empty map without optional callback" do
+    assert Peer.LTEP.Extension.outbound_fields(DuplicateIdA) == %{}
+  end
+
   describe "extension_protocol?/1 (BEP 10 reserved bit 20)" do
     test "true when byte index 5 has 0x10 (libtorrent layout)" do
       # libtorrent: reserved[5] = 0x10, reserved[7] = 0x01 (DHT)
@@ -35,6 +39,13 @@ defmodule Peer.LTEPTest do
       refute Peer.LTEP.extension_protocol?(<<0, 0, 0, 0, 0, 0, 0, 5>>)
       # 0x10 at wrong byte (index 4) must not match
       refute Peer.LTEP.extension_protocol?(<<0, 0, 0, 0, 0x10, 0, 0, 0>>)
+    end
+
+    test "catch-all is false for non-eight-byte reserved values" do
+      refute Peer.LTEP.extension_protocol?(<<>>)
+      refute Peer.LTEP.extension_protocol?(<<0, 0, 0, 0, 0, 0x10>>)
+      refute Peer.LTEP.extension_protocol?(<<0, 0, 0, 0, 0, 0x10, 0, 0, 0>>)
+      refute Peer.LTEP.extension_protocol?(42)
     end
 
     test "Peer.reserved/0 and Magnet.Peer.reserved/0 advertise LTEP at byte index 5" do
@@ -234,6 +245,50 @@ defmodule Peer.LTEPTest do
     end
   end
 
+  describe "recv_extended/2 socket path (BEP 10 inbound framing)" do
+    @recv_timeout 5_000
+
+    test "returns message id 20, extended id, and payload for a valid frame" do
+      {client, server, listen} = loopback_client_server()
+
+      on_exit(fn -> close_loopback(client, server, listen) end)
+
+      payload = "d2:id1i1ee"
+      wire = Peer.LTEP.extended_message_wire(3, payload)
+      assert :ok = :gen_tcp.send(server, wire)
+
+      assert {:ok, 20, 3, ^payload} = LTEP.recv_extended(client, @recv_timeout)
+    end
+
+    test "rejects length prefix below 2 without reading a body" do
+      {client, server, listen} = loopback_client_server()
+
+      on_exit(fn -> close_loopback(client, server, listen) end)
+
+      assert :ok = :gen_tcp.send(server, <<1::32>>)
+      assert {:error, :invalid_message} = LTEP.recv_extended(client, @recv_timeout)
+    end
+
+    test "rejects length prefix above max_message_size without reading a body" do
+      {client, server, listen} = loopback_client_server()
+
+      on_exit(fn -> close_loopback(client, server, listen) end)
+
+      oversized = Peer.LTEP.max_message_size() + 1
+      assert :ok = :gen_tcp.send(server, <<oversized::32>>)
+      assert {:error, :invalid_message} = LTEP.recv_extended(client, @recv_timeout)
+    end
+
+    test "accepts a valid extended frame with empty payload" do
+      {client, server, listen} = loopback_client_server()
+
+      on_exit(fn -> close_loopback(client, server, listen) end)
+
+      assert :ok = :gen_tcp.send(server, <<2::32, 20, 9>>)
+      assert {:ok, 20, 9, <<>>} = LTEP.recv_extended(client, @recv_timeout)
+    end
+  end
+
   describe "handshake_exchange/3" do
     test "reads past choke/bitfield before peer extension handshake" do
       {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, packet: :raw])
@@ -292,6 +347,60 @@ defmodule Peer.LTEPTest do
       assert Session.peer_handshake(session).metadata_size == 512
       :gen_tcp.close(client)
       assert :ok = Task.await(accept, 5_000)
+    end
+  end
+
+  defp loopback_client_server do
+    parent = self()
+
+    {:ok, listen} =
+      :gen_tcp.listen(0, [
+        :binary,
+        active: false,
+        packet: :raw,
+        reuseaddr: true,
+        ip: {127, 0, 0, 1}
+      ])
+
+    {:ok, port} = :inet.port(listen)
+
+    spawn(fn ->
+      case :gen_tcp.accept(listen, 5_000) do
+        {:ok, server} ->
+          :ok = :gen_tcp.controlling_process(server, parent)
+          send(parent, {:loopback_server, server})
+
+        error ->
+          send(parent, {:loopback_accept_error, error})
+      end
+    end)
+
+    {:ok, client} =
+      :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, packet: :raw], 5_000)
+
+    receive do
+      {:loopback_server, server} ->
+        {client, server, listen}
+
+      {:loopback_accept_error, error} ->
+        :gen_tcp.close(client)
+        :gen_tcp.close(listen)
+        flunk("accept failed: #{inspect(error)}")
+    after
+      5_000 ->
+        :gen_tcp.close(client)
+        :gen_tcp.close(listen)
+        flunk("accept timed out")
+    end
+  end
+
+  defp close_loopback(client, server, listen) do
+    for sock <- [client, server, listen] do
+      try do
+        if is_port(sock), do: :gen_tcp.close(sock)
+      catch
+        :error, _ -> :ok
+      end
     end
   end
 

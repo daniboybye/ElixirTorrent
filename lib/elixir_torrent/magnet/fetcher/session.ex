@@ -145,9 +145,10 @@ defmodule Magnet.Fetcher.Session do
         "[magnet_fetch] upgrade_trackers hash=#{hash_hex} before=#{before} after=#{after_count}"
       )
 
-      state = cancel_round_timer(%{state | magnet: merged, round_timer: nil})
+      cancel_round_timer(state)
+      updated = %{state | magnet: merged, round_timer: nil}
       send(self(), :run_round)
-      {:noreply, state}
+      {:noreply, updated}
     else
       {:noreply, state}
     end

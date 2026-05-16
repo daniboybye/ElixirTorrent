@@ -102,6 +102,45 @@ defmodule TrackerHTTPDecodeTest do
       assert %Response{external_ip: nil} =
                Tracker.decode_http_response_for_test(%{"external ip" => <<1, 2, 3, 4, 5>>})
     end
+
+    test "parses dictionary peers carrying peer id and tuple ip without DNS" do
+      peer_id = :binary.copy(<<0xAB>>, 20)
+
+      assert %Response{peers: [%Peer{id: ^peer_id, ip: {203, 0, 113, 2}, port: 6882}]} =
+               Tracker.decode_http_response_for_test(%{
+                 "peers" => [
+                   %{"ip" => {203, 0, 113, 2}, "port" => 6882, "peer id" => peer_id}
+                 ]
+               })
+    end
+
+    test "merges dictionary peers6 entries with compact IPv4" do
+      peer_id = :binary.copy(<<3>>, 20)
+
+      v6_dict = [
+        %{"ip" => "2001:db8::1", "port" => 7777, "peer id" => peer_id}
+      ]
+
+      assert %Response{peers: peers} =
+               Tracker.decode_http_response_for_test(%{
+                 "interval" => 60,
+                 "peers" => <<127, 0, 0, 1, 6881::16>>,
+                 "peers6" => v6_dict
+               })
+
+      assert length(peers) == 2
+
+      assert Enum.find(peers, &match?(%Peer{ip: {127, 0, 0, 1}, port: 6881}, &1))
+
+      assert Enum.find(peers, &match?(%Peer{port: 7777, id: ^peer_id}, &1))
+    end
+
+    test "skips dictionary peers missing a port field" do
+      assert %Response{peers: []} =
+               Tracker.decode_http_response_for_test(%{
+                 "peers" => [%{"ip" => "203.0.113.1"}]
+               })
+    end
   end
 
   describe "merge_http_announces_for_test/1 (multi-endpoint announce merge)" do
@@ -331,6 +370,161 @@ defmodule TrackerHTTPDecodeTest do
              ) == "http://127.0.0.1:6969/scrape.php"
     end
 
+    test "request! follows one HTML/JS redirect hop to a bencoded announce body" do
+      hash = :crypto.strong_rand_bytes(20)
+      peers_bin = <<10, 0, 0, 1, 9001::16>>
+
+      bencode =
+        Bento.encode!(%{
+          "interval" => 300,
+          "complete" => 4,
+          "incomplete" => 6,
+          "peers" => peers_bin
+        })
+
+      redirect_html =
+        ~s(<html><body><script>window.location.href="/real-announce";</script></body></html>)
+
+      {port, _pid} =
+        start_step_http_tracker([
+          {200, redirect_html, [{"Content-Type", "text/html; charset=utf-8"}]},
+          {200, bencode}
+        ])
+
+      stats = [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()]
+
+      assert %Response{interval: 300, complete: 4, incomplete: 6, peers: [%Peer{} = peer]} =
+               Tracker.request!(
+                 "http://127.0.0.1:#{port}/gate",
+                 hash,
+                 stats,
+                 http_timeout_ms: 5_000
+               )
+
+      assert peer.ip == {10, 0, 0, 1}
+      assert peer.port == 9001
+    end
+
+    test "request! returns non_bencoded_response when redirect target is still HTML" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      redirect_html =
+        ~s(<html><script>window.location.href="/still-html";</script></html>)
+
+      still_html = ~s(<html><p>no peers here</p></html>)
+
+      {port, _pid} =
+        start_step_http_tracker([
+          {200, redirect_html},
+          {200, still_html, [{"Content-Type", "text/html"}]}
+        ])
+
+      stats = [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()]
+
+      assert %Error{reason: :non_bencoded_response, retry_in: "never"} =
+               Tracker.request!(
+                 "http://127.0.0.1:#{port}/gate",
+                 hash,
+                 stats,
+                 http_timeout_ms: 5_000
+               )
+    end
+
+    test "request! does not follow a second JS redirect (one hop max)" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      hop1 = ~s(<html><script>window.location.href="/hop2";</script></html>)
+      hop2 = ~s(<html><script>window.location.href="/hop3";</script></html>)
+
+      {port, _pid} =
+        start_step_http_tracker([
+          {200, hop1},
+          {200, hop2}
+        ])
+
+      stats = [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()]
+
+      assert %Error{reason: :non_bencoded_response, retry_in: "never"} =
+               Tracker.request!(
+                 "http://127.0.0.1:#{port}/gate",
+                 hash,
+                 stats,
+                 http_timeout_ms: 5_000
+               )
+    end
+
+    test "request! maps redirect target HTTP errors through decode_http_error_response" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      redirect_html =
+        ~s(<html><script>window.location.href="/overload";</script></html>)
+
+      failure =
+        Bento.encode!(%{
+          "failure reason" => "Overloaded",
+          "retry in" => 3
+        })
+
+      {port, _pid} =
+        start_step_http_tracker([
+          {200, redirect_html},
+          {503, failure}
+        ])
+
+      stats = [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()]
+
+      assert %Error{reason: "Overloaded", retry_in: 180} =
+               Tracker.request!(
+                 "http://127.0.0.1:#{port}/gate",
+                 hash,
+                 stats,
+                 http_timeout_ms: 5_000
+               )
+    end
+
+    test "request! returns non_bencoded_response for HTML without a JS redirect" do
+      hash = :crypto.strong_rand_bytes(20)
+      {port, _pid} = start_http_tracker(fn _req -> {200, "<html>login required</html>"} end)
+      stats = [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()]
+
+      assert %Error{reason: :non_bencoded_response, retry_in: "never"} =
+               Tracker.request!(
+                 "http://127.0.0.1:#{port}/announce",
+                 hash,
+                 stats,
+                 http_timeout_ms: 5_000
+               )
+    end
+
+    test "request! returns http_status when a non-2xx body is not bencoded" do
+      hash = :crypto.strong_rand_bytes(20)
+      {port, _pid} = start_http_tracker(fn _req -> {502, "bad gateway"} end)
+      stats = [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()]
+
+      assert %Error{reason: {:http_status, 502}} =
+               Tracker.request!(
+                 "http://127.0.0.1:#{port}/announce",
+                 hash,
+                 stats,
+                 http_timeout_ms: 5_000
+               )
+    end
+
+    test "request! returns http_status when non-2xx carries a success-shaped bencode map" do
+      hash = :crypto.strong_rand_bytes(20)
+      body = Bento.encode!(%{"interval" => 60, "peers" => <<>>})
+      {port, _pid} = start_http_tracker(fn _req -> {418, body} end)
+      stats = [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()]
+
+      assert %Error{reason: {:http_status, 418}} =
+               Tracker.request!(
+                 "http://127.0.0.1:#{port}/announce",
+                 hash,
+                 stats,
+                 http_timeout_ms: 5_000
+               )
+    end
+
     test "scrape/2 decodes loopback HTTP scrape response" do
       hash = :crypto.strong_rand_bytes(20)
 
@@ -410,6 +604,27 @@ defmodule TrackerHTTPDecodeTest do
     {port, pid}
   end
 
+  defp start_step_http_tracker(steps) when is_list(steps) do
+    {:ok, agent} = Agent.start_link(fn -> 0 end)
+
+    responder = fn request ->
+      idx = Agent.get_and_update(agent, fn n -> {n, n + 1} end)
+      step = Enum.at(steps, idx) || List.last(steps)
+      normalize_http_step(step, request)
+    end
+
+    {port, pid} = start_http_tracker(responder)
+
+    on_exit(fn ->
+      if Process.alive?(agent), do: Agent.stop(agent, :normal, 1_000)
+    end)
+
+    {port, pid}
+  end
+
+  defp normalize_http_step({code, body}, _request), do: {code, body, []}
+  defp normalize_http_step({code, body, headers}, _request), do: {code, body, headers}
+
   defp serve_http(listen, responder) do
     case :gen_tcp.accept(listen) do
       {:ok, socket} ->
@@ -424,11 +639,27 @@ defmodule TrackerHTTPDecodeTest do
   defp handle_http_client(socket, responder) do
     case :gen_tcp.recv(socket, 0, 5_000) do
       {:ok, request} ->
-        {code, body} = responder.(request)
+        {code, body, headers} =
+          case responder.(request) do
+            {c, b} -> {c, b, []}
+            {c, b, h} -> {c, b, h}
+          end
+
         status = if code == 200, do: "200 OK", else: "#{code} Error"
 
+        header_lines =
+          for {name, value} <- headers do
+            "#{name}: #{value}\r\n"
+          end
+
         response =
-          "HTTP/1.1 #{status}\r\nContent-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n#{body}"
+          [
+            "HTTP/1.1 #{status}\r\n",
+            header_lines,
+            "Content-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n",
+            body
+          ]
+          |> IO.iodata_to_binary()
 
         :gen_tcp.send(socket, response)
 

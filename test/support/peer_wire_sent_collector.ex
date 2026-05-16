@@ -18,7 +18,10 @@ defmodule PeerWireTest.SentCollector do
   end
 
   @impl GenServer
-  def handle_call({:socket_send_raw, _data}, _from, state), do: {:reply, :ok, state}
+  def handle_call({:socket_send_raw, data}, _from, {key, test_pid}) do
+    send(test_pid, {:sent, {:socket_raw, data}})
+    {:reply, :ok, {key, test_pid}}
+  end
 
   @impl GenServer
   def handle_call(:activate, _from, state), do: {:reply, :ok, state}

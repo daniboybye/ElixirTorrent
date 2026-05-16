@@ -191,5 +191,377 @@ defmodule Torrent.MerkleTest do
                 ]
               }} = Merkle.parse_metadata(metadata)
     end
+
+    test "rejects non-v2 metadata and malformed file tree nodes" do
+      assert Merkle.parse_metadata(%{}) == {:error, :missing_v2_metadata}
+
+      assert Merkle.parse_metadata(%{"info" => %{"meta version" => 1}}) ==
+               {:error, :missing_v2_metadata}
+
+      root = hash("valid-root")
+
+      assert Merkle.parse_metadata(
+               v2_metadata(%{
+                 "file tree" => %{
+                   "bad-root" => %{"" => %{"length" => @block_size, "pieces root" => <<0::120>>}}
+                 },
+                 "piece layers" => %{}
+               })
+             ) == {:error, :invalid_pieces_root}
+
+      assert Merkle.parse_metadata(
+               v2_metadata(%{
+                 "file tree" => %{
+                   "" => %{"length" => @block_size, "pieces root" => root}
+                 },
+                 "piece layers" => %{}
+               })
+             ) == {:error, :invalid_file_tree}
+
+      assert Merkle.parse_metadata(
+               v2_metadata(%{
+                 "file tree" => %{
+                   "ok" => %{
+                     "leaf" => %{"" => %{"length" => @block_size, "pieces root" => root}}
+                   },
+                   "broken" => "not-a-map"
+                 },
+                 "piece layers" => %{}
+               })
+             ) == {:error, :invalid_file_tree}
+    end
+  end
+
+  describe "validate_hash_request/5 and range_response/5 bounds" do
+    setup do
+      blocks = for byte <- [?a, ?b, ?c, ?d], do: :binary.copy(<<byte>>, @block_size)
+      {:ok, tree} = Merkle.build(IO.iodata_to_binary(blocks))
+      %{tree: tree}
+    end
+
+    test "rejects invalid BEP 52 request shape atoms", %{tree: tree} do
+      assert Merkle.validate_hash_request(tree, 0, 1, 2, 1) == {:error, :invalid_index}
+      assert Merkle.validate_hash_request(tree, 0, 0, 3, 1) == {:error, :invalid_length}
+      assert Merkle.validate_hash_request(tree, 0, 0, 2, 9) == {:error, :invalid_proof_layers}
+      assert Merkle.validate_hash_request(tree, 3, 0, 2, 1) == {:error, :invalid_base_layer}
+      assert Merkle.validate_hash_request(tree, 0, 4, 2, 1) == {:error, :invalid_index}
+
+      assert Merkle.range_response(tree, 0, 1, 2, 1) == {:error, :invalid_index}
+      assert Merkle.range_response(tree, 0, 0, 3, 1) == {:error, :invalid_length}
+    end
+  end
+
+  describe "range_response_from_layer/6 metadata bounds" do
+    test "rejects out-of-range indices, proof depth, and root mismatch" do
+      blocks = for byte <- [?a, ?b, ?c, ?d], do: :binary.copy(<<byte>>, @block_size)
+      {:ok, tree} = Merkle.build(IO.iodata_to_binary(blocks))
+      root = Merkle.root(tree)
+      piece_length = 2 * @block_size
+      {:ok, layer} = Merkle.piece_layer_level(piece_length)
+      nodes = Enum.at(tree.levels, layer)
+
+      assert Merkle.range_response_from_layer(nodes, layer, root, 0, 4, 2) ==
+               {:error, :invalid_index}
+
+      assert Merkle.range_response_from_layer(nodes, layer, root, 0, 2, 9) ==
+               {:error, :invalid_proof_layers}
+
+      assert Merkle.range_response_from_layer(nodes, layer, <<0::256>>, 0, 2, 0) ==
+               {:error, :root_mismatch}
+
+      assert Merkle.range_response(tree, layer + 1, 0, 2, 1) == {:error, :invalid_base_layer}
+    end
+  end
+
+  describe "proof/3, verify/4, verify_hashes/7 guards" do
+    setup do
+      {:ok, tree} = Merkle.build("leaf-bytes")
+      %{tree: tree, root: Merkle.root(tree)}
+    end
+
+    test "proof falls back on negative layer or index", %{tree: tree} do
+      assert Merkle.proof(tree, -1) == {:error, :invalid_index}
+      assert Merkle.proof(tree, 0, -1) == {:error, :invalid_index}
+    end
+
+    test "verify and verify_hashes reject malformed wire inputs", %{tree: _tree} do
+      blocks = for byte <- [?a, ?b, ?c, ?d], do: :binary.copy(<<byte>>, @block_size)
+      {:ok, tree} = Merkle.build(IO.iodata_to_binary(blocks))
+      root = Merkle.root(tree)
+      leaf = Merkle.leaf_hashes("leaf-bytes") |> hd()
+
+      refute Merkle.verify(<<0::248>>, 0, leaf, [])
+      refute Merkle.verify(root, 0, leaf, "not-a-list")
+
+      {:ok, hashes} = Merkle.range_response(tree, 0, 0, 2, 1)
+
+      refute Merkle.verify_hashes(<<0::248>>, 0, 0, 2, 1, hashes, 4)
+      refute Merkle.verify_hashes(root, 0, 0, 2, 1, hashes, 0)
+      refute Merkle.verify_hashes(root, 0, 0, 2, 1, tl(hashes), 4)
+    end
+
+    test "verify_hashes rejects conflicting sibling proofs during flat insertion" do
+      blocks =
+        for byte <- [?a, ?b, ?c, ?d, ?e, ?f, ?g, ?h], do: :binary.copy(<<byte>>, @block_size)
+
+      content = IO.iodata_to_binary(blocks)
+      {:ok, tree} = Merkle.build(content)
+      root = Merkle.root(tree)
+
+      assert {:ok, hashes} = Merkle.range_response(tree, 0, 0, 2, 2)
+      base_len = 2
+      {base, proofs} = Enum.split(hashes, base_len)
+      [p0, p1 | rest] = proofs
+      flipped = <<Bitwise.bxor(:binary.at(p0, 0), 1)::8, binary_part(p0, 1, 31)::binary>>
+      conflict = base ++ [p0, flipped, p1 | rest]
+
+      refute Merkle.verify_hashes(root, 0, 0, 2, 2, conflict, 8)
+    end
+  end
+
+  describe "piece_node/3 and leaf_read_indices/5" do
+    test "piece_node enforces piece length and piece index bounds" do
+      blocks = for byte <- [?a, ?b, ?c, ?d], do: :binary.copy(<<byte>>, @block_size)
+      {:ok, tree} = Merkle.build(IO.iodata_to_binary(blocks))
+
+      assert Merkle.piece_node(tree, 32_000, 0) == {:error, :invalid_piece_length}
+      assert Merkle.piece_node(tree, 2 * @block_size, 99) == {:error, :invalid_index}
+
+      {:ok, node} = Merkle.piece_node(tree, 2 * @block_size, 0)
+      assert byte_size(node) == 32
+    end
+
+    test "leaf_read_indices returns empty set for invalid piece length" do
+      assert Merkle.leaf_read_indices(64, 9999, 0, 2, 2) == []
+    end
+  end
+
+  describe "piece stream layout and per-piece hashing" do
+    test "expected_file_piece_hash selects indexed piece digests and rejects unknown indices" do
+      file = %{length: 0, piece_hashes: []}
+      assert Merkle.expected_file_piece_hash(file, @block_size, 0) == nil
+
+      roots = for n <- 1..3, do: hash("piece-#{n}")
+
+      multi = %{
+        length: 3 * @block_size,
+        piece_hashes: roots
+      }
+
+      assert Merkle.expected_file_piece_hash(multi, @block_size, 0) == hd(roots)
+      assert Merkle.expected_file_piece_hash(multi, @block_size, 1) == Enum.at(roots, 1)
+      assert Merkle.expected_file_piece_hash(multi, @block_size, 9) == nil
+    end
+
+    test "hash_file_piece_bytes uses zero-hash leaves for unfilled blocks in a piece" do
+      piece_length = 2 * @block_size
+      file_data = :binary.copy(<<?a>>, @block_size)
+      leaf0 = hash(file_data)
+      expected_piece = hash(leaf0 <> @zero_hash)
+      file = %{length: @block_size, piece_hashes: [expected_piece]}
+
+      piece_bytes = file_data <> :binary.copy(<<0>>, @block_size)
+      computed = Merkle.hash_file_piece_bytes(file, piece_length, 0, piece_bytes)
+
+      assert computed == expected_piece
+      assert Merkle.verify_file_piece(file, piece_length, 0, piece_bytes)
+    end
+
+    test "piece_stream_layout inserts alignment gaps between files" do
+      root_a = hash("file-a")
+      root_b = hash("file-b")
+
+      {:ok, layout} =
+        Merkle.piece_stream_layout(%{
+          piece_length: @block_size,
+          files: [
+            %{path: ["a"], length: 100, pieces_root: root_a, piece_hashes: [root_a]},
+            %{path: ["b"], length: @block_size, pieces_root: root_b, piece_hashes: [root_b]}
+          ]
+        })
+
+      assert layout.piece_count == 2
+      assert layout.content_length == @block_size + 100
+      assert layout.address_space_length > layout.content_length
+      assert Enum.any?(layout.all_files, fn {_offset, entry} -> match?({:gap, _}, entry) end)
+      assert length(layout.piece_lengths) == 2
+    end
+
+    test "piece_stream_layout retains empty files without piece slots" do
+      root = hash("data")
+
+      {:ok, layout} =
+        Merkle.piece_stream_layout(%{
+          piece_length: @block_size,
+          files: [
+            %{path: ["empty"], length: 0, pieces_root: nil, piece_hashes: []},
+            %{path: ["data"], length: @block_size, pieces_root: root, piece_hashes: [root]}
+          ]
+        })
+
+      assert layout.piece_count == 1
+      assert Enum.count(layout.all_files, fn {_o, {:file, f, _}} -> f.length == 0 end) == 1
+    end
+
+    test "parse_metadata normalizes single-piece files from their pieces root only" do
+      root = hash("small-file")
+
+      assert {:ok, %{files: [file]}} =
+               Merkle.parse_metadata(
+                 v2_metadata(%{
+                   "file tree" => %{
+                     "tiny" => %{"" => %{"length" => 100, "pieces root" => root}}
+                   },
+                   "piece layers" => %{}
+                 })
+               )
+
+      assert file.piece_hashes == [root]
+      assert file.length == 100
+    end
+  end
+
+  describe "leaf_range_response_from_disk/7 proof paths" do
+    test "serves proof siblings from disk with metadata-backed upper layers" do
+      blocks =
+        for byte <- [?a, ?b, ?c, ?d, ?e, ?f, ?g, ?h], do: :binary.copy(<<byte>>, @block_size)
+
+      content = IO.iodata_to_binary(blocks)
+      {:ok, tree} = Merkle.build(content)
+      root = Merkle.root(tree)
+      piece_length = 4 * @block_size
+      {:ok, layer_bin} = Merkle.piece_layer(tree, piece_length)
+
+      piece_hashes =
+        for <<digest::binary-size(32) <- layer_bin>> do
+          digest
+        end
+
+      dir = Path.join(System.tmp_dir!(), "merkle_proof_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      path = Path.join(dir, "wide.bin")
+      File.write!(path, content)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      assert {:ok, from_tree} = Merkle.range_response(tree, 0, 0, 2, 2)
+
+      assert {:ok, from_disk} =
+               Merkle.leaf_range_response_from_disk(
+                 path,
+                 byte_size(content),
+                 piece_hashes,
+                 piece_length,
+                 0,
+                 2,
+                 2
+               )
+
+      assert from_disk == from_tree
+      assert Merkle.verify_hashes(root, 0, 0, 2, 2, from_disk, 8)
+    end
+
+    test "hashes beyond file end and padded leaf slots as zero leaves" do
+      content = :binary.copy(<<?x>>, @block_size) <> :binary.copy(<<?y>>, @block_size) <> "tail"
+      {:ok, tree} = Merkle.build(content)
+      root = Merkle.root(tree)
+      piece_hashes = hd(tree.levels)
+
+      dir = Path.join(System.tmp_dir!(), "merkle_tail_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      path = Path.join(dir, "tail.bin")
+      File.write!(path, content)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      assert {:ok, from_tree} = Merkle.range_response(tree, 0, 0, 2, 1)
+
+      assert {:ok, from_disk} =
+               Merkle.leaf_range_response_from_disk(
+                 path,
+                 byte_size(content),
+                 piece_hashes,
+                 @block_size,
+                 0,
+                 2,
+                 1
+               )
+
+      assert from_disk == from_tree
+      assert Merkle.verify_hashes(root, 0, 0, 2, 1, from_disk, 3)
+    end
+
+    test "disk proof path rebuilds internal cache subtrees below the piece layer" do
+      blocks =
+        for byte <- [?a, ?b, ?c, ?d, ?e, ?f, ?g, ?h], do: :binary.copy(<<byte>>, @block_size)
+
+      content = IO.iodata_to_binary(blocks)
+      {:ok, tree} = Merkle.build(content)
+      root = Merkle.root(tree)
+      piece_length = 4 * @block_size
+      {:ok, layer_bin} = Merkle.piece_layer(tree, piece_length)
+      piece_hashes = for <<digest::binary-size(32) <- layer_bin>>, do: digest
+
+      dir = Path.join(System.tmp_dir!(), "merkle_internal_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      path = Path.join(dir, "wide.bin")
+      File.write!(path, content)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      assert {:ok, from_tree} = Merkle.range_response(tree, 0, 2, 2, 2)
+
+      assert {:ok, from_disk} =
+               Merkle.leaf_range_response_from_disk(
+                 path,
+                 byte_size(content),
+                 piece_hashes,
+                 piece_length,
+                 2,
+                 2,
+                 2
+               )
+
+      assert from_disk == from_tree
+      assert Merkle.verify_hashes(root, 0, 2, 2, 2, from_disk, 8)
+    end
+
+    test "rejects invalid hash request shape before opening disk" do
+      dir = Path.join(System.tmp_dir!(), "merkle_badreq_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      path = Path.join(dir, "tiny.bin")
+      File.write!(path, "x")
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      assert Merkle.leaf_range_response_from_disk(path, 1, [hash("x")], @block_size, 1, 2, 0) ==
+               {:error, :invalid_index}
+    end
+  end
+
+  describe "libtorrent flat proof helpers" do
+    test "collect_proof_flat_siblings walks parents including root-adjacent slots" do
+      siblings = Merkle.collect_proof_flat_siblings(8, 0, 2, 0, 4)
+      assert is_list(siblings)
+      assert siblings != []
+      assert Enum.all?(siblings, &is_integer/1)
+    end
+
+    test "range_response uses padding siblings for out-of-band flat indices" do
+      blocks = for byte <- [?a, ?b, ?c], do: :binary.copy(<<byte>>, @block_size)
+      {:ok, tree} = Merkle.build(IO.iodata_to_binary(blocks))
+
+      assert {:ok, hashes} = Merkle.range_response(tree, 0, 0, 2, 1)
+      assert length(hashes) == 2 + Merkle.proof_append_count(2, 1)
+      assert Merkle.verify_hashes(Merkle.root(tree), 0, 0, 2, 1, hashes, 3)
+    end
+  end
+
+  defp v2_metadata(overrides) do
+    {piece_layers, info_overrides} = Map.pop(overrides, "piece layers", %{})
+
+    info =
+      Map.merge(
+        %{"meta version" => 2, "piece length" => @block_size, "file tree" => %{}},
+        info_overrides
+      )
+
+    %{"info" => info, "piece layers" => piece_layers}
   end
 end

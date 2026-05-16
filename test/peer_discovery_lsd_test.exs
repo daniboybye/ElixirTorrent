@@ -124,4 +124,195 @@ defmodule PeerDiscoveryLSDTest do
 
     assert :error = LSD.parse_message(packet)
   end
+
+  test "parse_message rejects out-of-range Port values" do
+    for bad <- ["0", "65536", "-1"] do
+      packet =
+        "BT-SEARCH * HTTP/1.1\r\nPort: #{bad}\r\nInfohash: #{Torrent.hex_encoded_hash(@hash1)}\r\n\r\n\r\n"
+
+      assert :error = LSD.parse_message(packet)
+    end
+  end
+
+  test "parse_message ignores header lines without a colon separator" do
+    packet =
+      "BT-SEARCH * HTTP/1.1\r\n" <>
+        "Port: 6881\r\n" <>
+        "garbage line\r\n" <>
+        "Infohash: #{Torrent.hex_encoded_hash(@hash1)}\r\n" <>
+        "cookie: x\r\n\r\n\r\n"
+
+    assert {:ok, %{port: 6881, hashes: [@hash1], cookie: "x"}} = LSD.parse_message(packet)
+  end
+
+  test "parse_message rejects non-binary payloads" do
+    assert :error = LSD.parse_message(123)
+    assert :error = LSD.parse_message(nil)
+  end
+
+  test "decode_packet drops packets whose cookie matches ours" do
+    source = {192, 168, 50, 1}
+    packet = IO.iodata_to_binary(LSD.build_message([@hash1], 6881, "same-cookie"))
+
+    assert LSD.decode_packet(packet, source, "same-cookie") == []
+  end
+
+  describe "handle_info/2 UDP routing without multicast" do
+    setup do
+      {:ok, _} = Application.ensure_all_started(:elixir_torrent)
+      :ok
+    end
+
+    defp lsd_udp_state(cookie \\ "unit-cookie") do
+      {:ok, socket} =
+        :gen_udp.open(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+
+      on_exit(fn -> :gen_udp.close(socket) end)
+
+      %{
+        cookie: cookie,
+        sockets: %{inet: socket, inet6: nil},
+        interfaces: %{inet: [], inet6: []},
+        announce_queue: []
+      }
+    end
+
+    test "ignores UDP on sockets that are not registered in state" do
+      hash = :crypto.strong_rand_bytes(20)
+      _manager = start_connection_manager!(hash)
+      _announce = start_public_announce!(hash)
+
+      state = lsd_udp_state()
+      {:ok, foreign} = :gen_udp.open(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+      on_exit(fn -> :gen_udp.close(foreign) end)
+
+      packet =
+        IO.iodata_to_binary(LSD.build_message([hash], 7777, "remote-cookie"))
+
+      source = {10, 20, 30, 40}
+
+      assert {:noreply, ^state} =
+               LSD.handle_info({:udp, foreign, source, 6771, packet}, state)
+
+      refute queued_peer?(hash, source, 7777)
+    end
+
+    test "offers parsed peers to ConnectionManager for tracked public torrents" do
+      hash = :crypto.strong_rand_bytes(20)
+      _manager = start_connection_manager!(hash)
+      _announce = start_public_announce!(hash)
+
+      state = lsd_udp_state("our-cookie")
+      socket = state.sockets.inet
+      source = {172, 16, 0, 9}
+      port = 8123
+
+      packet = IO.iodata_to_binary(LSD.build_message([hash], port, "remote-cookie"))
+
+      assert {:noreply, ^state} =
+               LSD.handle_info({:udp, socket, source, 6771, packet}, state)
+
+      assert queued_peer?(hash, source, port)
+    end
+
+    test "does not offer peers for private torrents (BEP 27)" do
+      hash = :crypto.strong_rand_bytes(20)
+      _manager = start_connection_manager!(hash)
+      _announce = start_private_announce!(hash)
+
+      state = lsd_udp_state("our-cookie")
+      socket = state.sockets.inet
+      source = {172, 16, 0, 10}
+      port = 8124
+
+      packet = IO.iodata_to_binary(LSD.build_message([hash], port, "remote-cookie"))
+
+      assert {:noreply, ^state} =
+               LSD.handle_info({:udp, socket, source, 6771, packet}, state)
+
+      refute queued_peer?(hash, source, port)
+    end
+
+    test "drops our own multicast loopback via cookie match" do
+      hash = :crypto.strong_rand_bytes(20)
+      _manager = start_connection_manager!(hash)
+      _announce = start_public_announce!(hash)
+
+      state = lsd_udp_state("loop-cookie")
+      socket = state.sockets.inet
+      source = {127, 0, 0, 1}
+      port = 6881
+
+      packet = IO.iodata_to_binary(LSD.build_message([hash], port, "loop-cookie"))
+
+      assert {:noreply, ^state} =
+               LSD.handle_info({:udp, socket, source, 6771, packet}, state)
+
+      refute queued_peer?(hash, source, port)
+    end
+
+    test "catch-all handle_info leaves state unchanged" do
+      state = lsd_udp_state()
+
+      assert {:noreply, ^state} = LSD.handle_info(:unexpected_coverage_probe, state)
+    end
+  end
+
+  defp start_connection_manager!(hash) do
+    name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
+
+    {:ok, pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: name)
+
+    on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
+    pid
+  end
+
+  defp start_public_announce!(hash) do
+    torrent = %Torrent{
+      hash: hash,
+      metadata: %{"info" => %{"name" => "lsd-public"}},
+      left: 1000,
+      last_index: 0,
+      last_piece_length: 1000
+    }
+
+    start_announce!(torrent)
+  end
+
+  defp start_private_announce!(hash) do
+    torrent = %Torrent{
+      hash: hash,
+      metadata: %{"info" => %{"name" => "lsd-private", "private" => 1}},
+      left: 1000,
+      last_index: 0,
+      last_piece_length: 1000
+    }
+
+    start_announce!(torrent)
+  end
+
+  defp start_announce!(torrent) do
+    {:ok, model_pid} = Torrent.Model.start_link(torrent)
+
+    on_exit(fn -> TestSupport.Sync.safe_stop(model_pid, 5_000) end)
+
+    name = {:via, Registry, {Registry, {torrent.hash, PeerDiscovery.Announce}}}
+    {:ok, pid} = GenServer.start_link(PeerDiscovery.Announce, [self(), torrent], name: name)
+
+    on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
+    pid
+  end
+
+  defp queued_peer?(hash, ip, port) do
+    name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
+
+    case GenServer.whereis(name) do
+      nil ->
+        false
+
+      pid ->
+        state = :sys.get_state(pid)
+        Map.has_key?(state.queue, {ip, port})
+    end
+  end
 end

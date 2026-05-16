@@ -1,6 +1,8 @@
 defmodule PeerControllerCallbacksTest do
   use ExUnit.Case, async: false
 
+  alias Magnet.UtMetadata.Extension, as: UtMetadataExtension
+  alias Peer.LTEP.{Handshake, Session}
   alias PeerWireTest.SentCollector
 
   @piece_len 16_384
@@ -89,6 +91,163 @@ defmodule PeerControllerCallbacksTest do
         with_controller(hash, fn key ->
           assert Peer.Controller.metadata_session(key) == :error
           assert Peer.Controller.ltep_session(key) == :error
+          assert Peer.Controller.metadata_capable(key) == :error
+        end)
+      end)
+    end
+
+    test "ltep_session returns injected LTEP session" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        with_controller(hash, fn key ->
+          ltep = ltep_with_ut_metadata(metadata_size: 4096)
+          replace_controller_state(key, &Map.put(&1, :ltep, ltep))
+
+          assert {:ok, ^ltep} = Peer.Controller.ltep_session(key)
+        end)
+      end)
+    end
+
+    test "metadata_session returns session map when peer advertises metadata_size" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        with_controller(hash, fn key ->
+          ltep = ltep_with_ut_metadata(metadata_size: 8192)
+
+          replace_controller_state(key, fn state ->
+            %{state | ltep: ltep, choke_me: false}
+          end)
+
+          assert {:ok, info} = Peer.Controller.metadata_session(key)
+          assert info.metadata_size == 8192
+          assert info.seeder?
+          assert info.unchoked?
+          assert info.ltep == ltep
+        end)
+      end)
+    end
+
+    test "metadata_session returns :error when ut_metadata is not negotiated" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        with_controller(hash, fn key ->
+          ltep = Session.new([UtMetadataExtension])
+          replace_controller_state(key, &Map.put(&1, :ltep, ltep))
+
+          assert Peer.Controller.metadata_session(key) == :error
+        end)
+      end)
+    end
+
+    test "metadata_session returns :error when peer lacks metadata and is not a seeder" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        with_controller(hash, fn key ->
+          ltep =
+            Session.new([UtMetadataExtension])
+            |> Session.apply_peer_handshake(Handshake.from_map(%{"m" => %{"ut_metadata" => 2}}))
+
+          replace_controller_state(key, &Map.put(&1, :ltep, ltep))
+
+          assert Peer.Controller.metadata_session(key) == :error
+        end)
+      end)
+    end
+
+    test "metadata_session succeeds for complete bitfield without metadata_size" do
+      hash = :crypto.strong_rand_bytes(20)
+      pieces = 4
+      bf = full_bitfield(pieces)
+
+      with_model(sample_torrent(hash, pieces), fn _ ->
+        with_controller(hash, fn key ->
+          ltep =
+            Session.new([UtMetadataExtension])
+            |> Session.apply_peer_handshake(Handshake.from_map(%{"m" => %{"ut_metadata" => 3}}))
+
+          replace_controller_state(key, fn state ->
+            %{state | ltep: ltep, bitfield: bf, choke_me: true}
+          end)
+
+          assert {:ok, info} = Peer.Controller.metadata_session(key)
+          assert info.seeder?
+          refute info.unchoked?
+          assert info.metadata_size == nil
+        end)
+      end)
+    end
+
+    test "metadata_session succeeds when bitfield is :all" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        with_controller(hash, fn key ->
+          ltep =
+            Session.new([UtMetadataExtension])
+            |> Session.apply_peer_handshake(Handshake.from_map(%{"m" => %{"ut_metadata" => 2}}))
+
+          replace_controller_state(key, fn state ->
+            %{state | ltep: ltep, bitfield: :all}
+          end)
+
+          assert {:ok, info} = Peer.Controller.metadata_session(key)
+          assert info.seeder?
+        end)
+      end)
+    end
+
+    test "metadata_capable returns map even when peer is not a seeder" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        with_controller(hash, fn key ->
+          ltep =
+            Session.new([UtMetadataExtension])
+            |> Session.apply_peer_handshake(Handshake.from_map(%{"m" => %{"ut_metadata" => 2}}))
+
+          replace_controller_state(key, fn state ->
+            %{state | ltep: ltep, bitfield: nil, choke_me: false}
+          end)
+
+          assert {:ok, info} = Peer.Controller.metadata_capable(key)
+          refute info.seeder?
+          assert info.unchoked?
+          assert info.metadata_size == nil
+        end)
+      end)
+    end
+
+    test "metadata_capable reports seeder? from metadata_size and unchoked? from choke_me" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        with_controller(hash, fn key ->
+          ltep = ltep_with_ut_metadata(metadata_size: 12_345)
+
+          replace_controller_state(key, fn state ->
+            %{state | ltep: ltep, choke_me: true}
+          end)
+
+          assert {:ok, info} = Peer.Controller.metadata_capable(key)
+          assert info.seeder?
+          refute info.unchoked?
+          assert info.metadata_size == 12_345
+        end)
+      end)
+    end
+
+    test "metadata_capable returns :error when ut_metadata is not negotiated" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        with_controller(hash, fn key ->
+          ltep = Session.new([UtMetadataExtension])
+          replace_controller_state(key, &Map.put(&1, :ltep, ltep))
+
           assert Peer.Controller.metadata_capable(key) == :error
         end)
       end)
@@ -250,6 +409,28 @@ defmodule PeerControllerCallbacksTest do
 
   defp controller_state(key) do
     :sys.get_state({:via, Registry, {Registry, {key, Peer.Controller}}})
+  end
+
+  defp replace_controller_state(key, fun) when is_function(fun, 1) do
+    :sys.replace_state({:via, Registry, {Registry, {key, Peer.Controller}}}, fun)
+  end
+
+  defp ltep_with_ut_metadata(opts) do
+    metadata_size = Keyword.get(opts, :metadata_size, 4096)
+
+    peer_map = %{
+      "m" => %{"ut_metadata" => 2},
+      "metadata_size" => metadata_size
+    }
+
+    Session.new([UtMetadataExtension])
+    |> Session.apply_peer_handshake(Handshake.from_map(peer_map))
+  end
+
+  defp full_bitfield(pieces_count) do
+    Enum.reduce(0..(pieces_count - 1), Torrent.Bitfield.make(pieces_count), fn index, bf ->
+      Torrent.Bitfield.set(bf, index, 1)
+    end)
   end
 
   defp drain_cast do
