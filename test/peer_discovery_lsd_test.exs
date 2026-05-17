@@ -258,6 +258,98 @@ defmodule PeerDiscoveryLSDTest do
     end
   end
 
+  describe "announce/announce_next/refresh without multicast" do
+    setup do
+      {:ok, _} = Application.ensure_all_started(:elixir_torrent)
+      :ok
+    end
+
+    defp lsd_loopback_state(opts \\ []) do
+      {:ok, socket} =
+        :gen_udp.open(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+
+      on_exit(fn -> :gen_udp.close(socket) end)
+
+      %{
+        cookie: Keyword.get(opts, :cookie, "lsd-loop-cookie"),
+        sockets: %{inet: socket, inet6: nil},
+        interfaces: %{inet: [{127, 0, 0, 1}], inet6: []},
+        announce_queue: Keyword.get(opts, :announce_queue, [])
+      }
+    end
+
+    test "handle_info :announce walks active public torrents" do
+      hash = :crypto.strong_rand_bytes(20)
+      _manager = start_connection_manager!(hash)
+      _announce = start_public_announce!(hash)
+
+      state = lsd_loopback_state()
+
+      assert {:noreply, _after_announce} = LSD.handle_info(:announce, state)
+    end
+
+    test "handle_info :announce_next drains the queue and schedules the next slice" do
+      hash = :crypto.strong_rand_bytes(20)
+      _manager = start_connection_manager!(hash)
+      _announce = start_public_announce!(hash)
+
+      state =
+        lsd_loopback_state(announce_queue: [{0, [hash]}, {60_000, [hash]}])
+
+      assert {:noreply, after_first} = LSD.handle_info(:announce_next, state)
+      assert after_first.announce_queue == [{60_000, [hash]}]
+    end
+
+    test "handle_info :announce_next with an empty queue schedules the next cycle" do
+      state = lsd_loopback_state(announce_queue: [])
+
+      assert {:noreply, ^state} = LSD.handle_info(:announce_next, state)
+    end
+
+    test "handle_info :refresh_interfaces reschedules itself and refreshes sockets" do
+      state = lsd_loopback_state()
+
+      assert {:noreply, refreshed} = LSD.handle_info(:refresh_interfaces, state)
+      assert is_map(refreshed.sockets)
+    end
+
+    test "handle_packet survives malformed binary payloads" do
+      hash = :crypto.strong_rand_bytes(20)
+      _manager = start_connection_manager!(hash)
+      _announce = start_public_announce!(hash)
+
+      state = lsd_loopback_state(cookie: "cookie")
+      socket = state.sockets.inet
+
+      assert {:noreply, ^state} =
+               LSD.handle_info({:udp, socket, {10, 0, 0, 1}, 6771, <<0, 1, 2>>}, state)
+    end
+
+    test "terminate closes open sockets" do
+      state = lsd_loopback_state()
+      socket = state.sockets.inet
+      assert :ok = LSD.terminate(:shutdown, state)
+      assert {:error, _} = :gen_udp.send(socket, {127, 0, 0, 1}, 6771, "closed")
+    end
+
+    test "offer_peer ignores hashes without a live Announce worker" do
+      hash = :crypto.strong_rand_bytes(20)
+      _manager = start_connection_manager!(hash)
+
+      packet =
+        IO.iodata_to_binary(LSD.build_message([hash], 7777, "remote-cookie"))
+
+      state = lsd_loopback_state(cookie: "our-cookie")
+      socket = state.sockets.inet
+      source = {10, 0, 0, 50}
+
+      assert {:noreply, ^state} =
+               LSD.handle_info({:udp, socket, source, 6771, packet}, state)
+
+      refute queued_peer?(hash, source, 7777)
+    end
+  end
+
   defp start_connection_manager!(hash) do
     name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
 

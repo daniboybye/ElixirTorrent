@@ -265,6 +265,37 @@ defmodule Magnet.FetcherDirectSessionTest do
       assert Process.read_timer(timer) == false
       assert Registry.lookup(Registry, {:magnet_fetch, hash}) == []
     end
+
+    test "caller DOWN clears caller pid without stopping session" do
+      hash = <<27::160>>
+      caller = self()
+
+      state =
+        base_state(hash: hash, caller: caller, ref: make_ref())
+
+      assert {:noreply, new_state} =
+               Session.handle_info({:DOWN, make_ref(), :process, caller, :normal}, state)
+
+      assert new_state.caller == nil
+    end
+
+    test "ignores unrelated messages" do
+      state = base_state(hash: <<28::160>>)
+      assert {:noreply, ^state} = Session.handle_info(:unknown_cycle2_msg, state)
+    end
+  end
+
+  describe "Fetcher.fetch_metadata_from_peer_for_test pool ordering" do
+    test "falls back to later peer when primary open fails" do
+      {_, info_blob, hash} = build_multi_piece_info_blob!(pad_bytes: 100)
+      magnet = %Magnet{hash: hash, trackers: [], display_name: "pool-order"}
+      {port, _} = start_tcp_metadata_server!(info_blob, hash, mode: :serve)
+      good = %Peer{ip: {127, 0, 0, 1}, port: port}
+      bad = %Peer{ip: {127, 0, 0, 1}, port: 2}
+
+      assert {:ok, _path, _} =
+               Magnet.Fetcher.fetch_metadata_from_peer_for_test(magnet, bad, [bad, good])
+    end
   end
 
   ## direct TCP metadata server ----------------------------------------------

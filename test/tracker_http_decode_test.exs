@@ -242,6 +242,16 @@ defmodule TrackerHTTPDecodeTest do
       assert %Error{reason: :scrape_no_data} =
                Tracker.decode_http_scrape_body_for_test(body, hash)
     end
+
+    test "returns :scrape_invalid_response for non-dictionary bodies and invalid bencode" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      assert %Error{reason: :scrape_invalid_response} =
+               Tracker.decode_http_scrape_body_for_test(Bento.encode!(["not-a-map"]), hash)
+
+      assert %Error{reason: :scrape_invalid_response} =
+               Tracker.decode_http_scrape_body_for_test("not bencode at all", hash)
+    end
   end
 
   describe "loopback HTTP tracker integration" do
@@ -569,6 +579,39 @@ defmodule TrackerHTTPDecodeTest do
 
       assert_receive {:scrape_request, request}
       assert request =~ "GET /scrape?#{expected_query} HTTP/1.1"
+    end
+
+    test "scrape/2 maps non-2xx HTTP scrape bodies through decode_http_error_response" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      body =
+        Bento.encode!(%{
+          "failure reason" => "scrape disabled",
+          "retry in" => 2
+        })
+
+      {port, _pid} = start_http_tracker(fn _req -> {403, body} end)
+
+      assert %Error{reason: "scrape disabled", retry_in: 120} =
+               Tracker.scrape("http://127.0.0.1:#{port}/announce", hash)
+    end
+
+    test "scrape/2 returns scrape_invalid_response for malformed 2xx scrape bodies" do
+      hash = :crypto.strong_rand_bytes(20)
+      {port, _pid} = start_http_tracker(fn _req -> {200, "plain text"} end)
+
+      assert %Error{reason: :scrape_invalid_response} =
+               Tracker.scrape("http://127.0.0.1:#{port}/announce", hash)
+    end
+
+    test "scrape/2 returns HTTP client error quickly on unreachable loopback port" do
+      hash = :crypto.strong_rand_bytes(20)
+      started = System.monotonic_time(:millisecond)
+
+      assert %Error{} = Tracker.scrape("http://127.0.0.1:1/announce", hash)
+
+      elapsed = System.monotonic_time(:millisecond) - started
+      assert elapsed < 20_000
     end
   end
 

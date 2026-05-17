@@ -12,9 +12,12 @@ defmodule UTP.CoverageBatchTest do
       {:ok, _} = Dispatcher.start_link([])
     end
 
+    :ok = TestSupport.Sync.safe_resume(Dispatcher)
+
     previous_dht = Application.get_env(:elixir_torrent, :dht, [])
 
     on_exit(fn ->
+      :ok = TestSupport.Sync.safe_resume(Dispatcher)
       Application.put_env(:elixir_torrent, :dht, previous_dht)
     end)
 
@@ -762,7 +765,467 @@ defmodule UTP.CoverageBatchTest do
     end
   end
 
+  describe "Connection BEP 29 SACK, flow control, and recv waiter edges" do
+    test "selective ACK and cumulative ACK clear unacked and shrink cur_window" do
+      {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+      recv_id = 1801
+      sent_ms = System.monotonic_time(:millisecond) - 50
+
+      state =
+        base_state(
+          phase: :connected,
+          udp_socket: udp,
+          peer_port: peer_port,
+          recv_conn_id: recv_id,
+          send_conn_id: recv_id + 1,
+          seq_nr: 6,
+          ack_nr: 1,
+          last_peer_ack: 1,
+          cur_window: 300,
+          led: LEDBAT.new(),
+          unacked: %{
+            4 => {Packet.st_data(), <<"b">>, sent_ms, 1, 100},
+            5 => {Packet.st_data(), <<"c">>, sent_ms, 1, 100}
+          }
+        )
+
+      sack = selective_ack_bitmask(2, [4, 5])
+      ack_hdr = header(Packet.st_state(), recv_id, 10, 2) |> Map.put(:extension, 1)
+
+      assert {:noreply, acked} =
+               Connection.handle_info(
+                 {:utp_packet, ack_hdr, <<>>, [{:selective_ack, sack}]},
+                 state
+               )
+
+      assert map_size(acked.unacked) == 0
+
+      :gen_udp.close(peer_udp)
+      :gen_udp.close(udp)
+    end
+
+    test "SACK loss detection retransmits a hole left of three later SACK bits" do
+      {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+      recv_id = 1802
+      sent_ms = System.monotonic_time(:millisecond)
+
+      state =
+        base_state(
+          phase: :connected,
+          udp_socket: udp,
+          peer_port: peer_port,
+          recv_conn_id: recv_id,
+          send_conn_id: recv_id + 1,
+          seq_nr: 3,
+          ack_nr: 1,
+          last_peer_ack: 1,
+          led: LEDBAT.new(),
+          unacked: %{2 => {Packet.st_data(), <<"hole">>, sent_ms, 1, 5}}
+        )
+
+      sack = selective_ack_bitmask(1, [5, 6, 7])
+      ack_hdr = header(Packet.st_state(), recv_id, 20, 1) |> Map.put(:extension, 1)
+
+      assert {:noreply, retried} =
+               Connection.handle_info(
+                 {:utp_packet, ack_hdr, <<>>, [{:selective_ack, sack}]},
+                 state
+               )
+
+      {_, _, _, tx_count, _} = Map.fetch!(retried.unacked, 2)
+      assert tx_count >= 2
+      assert {:ok, {_ip, _port, wire}} = :gen_udp.recv(peer_udp, 0, 1_000)
+      assert {:ok, %{type: type, seq_nr: 2}, <<"hole">>, _} = Packet.decode(wire)
+      assert type == Packet.st_data()
+
+      :gen_udp.close(peer_udp)
+      :gen_udp.close(udp)
+    end
+
+    test "dup-ack fast retransmit is suppressed when the hole is already in SACK losses" do
+      {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+      recv_id = 1803
+      sent_ms = System.monotonic_time(:millisecond)
+
+      state =
+        base_state(
+          phase: :connected,
+          udp_socket: udp,
+          recv_conn_id: recv_id,
+          send_conn_id: recv_id + 1,
+          seq_nr: 4,
+          ack_nr: 1,
+          last_peer_ack: 1,
+          dup_acks: 3,
+          led: LEDBAT.new(),
+          unacked: %{2 => {Packet.st_data(), <<"x">>, sent_ms, 1, 1}}
+        )
+
+      sack = selective_ack_bitmask(1, [5, 6, 7])
+      dup_hdr = header(Packet.st_state(), recv_id, 30, 1) |> Map.put(:extension, 1)
+
+      assert {:noreply, retried} =
+               Connection.handle_info(
+                 {:utp_packet, dup_hdr, <<>>, [{:selective_ack, sack}]},
+                 state
+               )
+
+      assert map_has?(retried.unacked, 2)
+      {_, _, _, tx_count, _} = Map.fetch!(retried.unacked, 2)
+      assert tx_count >= 2
+
+      :gen_udp.close(udp)
+    end
+
+    test "LEDBAT window caps flush_send and uses minimum payload size on tiny windows" do
+      {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+      recv_id = 1804
+      tiny_led = %{LEDBAT.new() | max_window: 150, slow_start: false}
+
+      state =
+        base_state(
+          phase: :connected,
+          udp_socket: udp,
+          peer_port: peer_port,
+          recv_conn_id: recv_id,
+          send_conn_id: recv_id + 1,
+          seq_nr: 10,
+          ack_nr: 1,
+          peer_wnd: 65_536,
+          cur_window: 0,
+          led: tiny_led,
+          pending_send: :binary.copy(<<?z>>, 400)
+        )
+
+      assert {:reply, :ok, flushed} =
+               Connection.handle_call({:send, <<>>}, from(), state)
+
+      assert byte_size(flushed.pending_send) == 250
+      assert map_size(flushed.unacked) == 1
+      {_, payload, _, _, bytes} = Map.fetch!(flushed.unacked, 10)
+      assert byte_size(payload) == 150
+      assert bytes == 150
+
+      :gen_udp.close(peer_udp)
+      :gen_udp.close(udp)
+    end
+
+    test "recv waiter receives partial buffer fill across two DATA packets" do
+      {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+      recv_id = 1805
+      caller = from()
+      peer_seq = 900
+
+      waiting =
+        base_state(
+          phase: :connected,
+          udp_socket: udp,
+          recv_conn_id: recv_id,
+          send_conn_id: recv_id + 1,
+          seq_nr: 2,
+          ack_nr: Packet.seq_add(peer_seq, -1),
+          recv_next: peer_seq,
+          led: LEDBAT.new()
+        )
+
+      assert {:noreply, queued} =
+               Connection.handle_call({:recv, 5, 1_000}, caller, waiting)
+
+      assert [{^caller, 5, _timer}] = queued.recv_waiters
+
+      part1 = header(Packet.st_data(), recv_id, peer_seq, queued.ack_nr)
+
+      assert {:noreply, mid} =
+               Connection.handle_info({:utp_packet, part1, <<"ab">>, []}, queued)
+
+      assert mid.recv_waiters != []
+
+      part2 =
+        header(Packet.st_data(), recv_id, Packet.seq_add(peer_seq, 1), mid.ack_nr)
+
+      assert {:noreply, done} =
+               Connection.handle_info({:utp_packet, part2, <<"cde">>, []}, mid)
+
+      assert done.recv_waiters == []
+      assert_receive {ref, {:ok, "abcde"}} when is_reference(ref)
+
+      :gen_udp.close(udp)
+    end
+
+    test "connected waiters and accept notify fire once on server promotion" do
+      {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+      recv_id = 1806
+      conn_caller = from()
+
+      server =
+        base_state(
+          role: :server,
+          phase: :syn_recv,
+          udp_socket: udp,
+          peer_port: peer_port,
+          recv_conn_id: recv_id,
+          send_conn_id: recv_id - 1,
+          seq_nr: 400,
+          recv_next: 400,
+          socket_ref: {:utp, self()},
+          accept_notified: false,
+          recv_waiters: [{conn_caller, :connected}]
+        )
+
+      state_hdr = header(Packet.st_state(), recv_id, 800, 400)
+
+      assert {:noreply, connected} =
+               Connection.handle_info({:utp_packet, state_hdr, <<>>, []}, server)
+
+      assert connected.accept_notified
+      assert connected.recv_waiters == []
+      assert_receive {ref, :ok} when is_reference(ref)
+
+      assert {:noreply, again} =
+               Connection.handle_info({:utp_packet, state_hdr, <<>>, []}, connected)
+
+      assert again.accept_notified
+
+      :gen_udp.close(peer_udp)
+      :gen_udp.close(udp)
+    end
+
+    test "OOB FIN is drained in-order and half-close sends our FIN when peer eof is complete" do
+      {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+      recv_id = 1807
+      peer_seq = 1000
+      fin_seq = Packet.seq_add(peer_seq, 1)
+
+      state =
+        base_state(
+          phase: :connected,
+          udp_socket: udp,
+          peer_port: peer_port,
+          recv_conn_id: recv_id,
+          send_conn_id: recv_id + 1,
+          seq_nr: 5,
+          ack_nr: Packet.seq_add(peer_seq, -1),
+          recv_next: peer_seq,
+          led: LEDBAT.new(),
+          unacked: %{}
+        )
+
+      future_fin = header(Packet.st_fin(), recv_id, fin_seq, state.ack_nr)
+
+      assert {:noreply, oob_fin} =
+               Connection.handle_info({:utp_packet, future_fin, <<>>, []}, state)
+
+      assert map_has?(oob_fin.recv_oob, fin_seq)
+
+      in_order = header(Packet.st_data(), recv_id, peer_seq, oob_fin.ack_nr)
+
+      assert {:noreply, drained} =
+               Connection.handle_info({:utp_packet, in_order, <<"z">>, []}, oob_fin)
+
+      assert drained.recv_buffer == <<"z">>
+      assert drained.eof_seq == fin_seq
+      assert drained.fin_sent
+      assert {:ok, {_ip, _port, _wire}} = :gen_udp.recv(peer_udp, 0, 1_000)
+
+      :gen_udp.close(peer_udp)
+      :gen_udp.close(udp)
+    end
+
+    test "bidirectional FIN with drained unacked shuts connection down" do
+      {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+      recv_id = 1808
+      peer_seq = 2000
+      fin_seq = peer_seq
+
+      state =
+        base_state(
+          phase: :connected,
+          udp_socket: udp,
+          recv_conn_id: recv_id,
+          send_conn_id: recv_id + 1,
+          seq_nr: 6,
+          ack_nr: fin_seq,
+          fin_sent: true,
+          eof_seq: fin_seq,
+          recv_next: Packet.seq_add(fin_seq, 1),
+          led: LEDBAT.new(),
+          unacked: %{},
+          closed: false
+        )
+
+      assert {:noreply, closed} =
+               Connection.handle_info(
+                 {:utp_packet, header(Packet.st_state(), recv_id, 50, fin_seq), <<>>, []},
+                 state
+               )
+
+      assert closed.closed
+      assert closed.phase == :closed
+
+      :gen_udp.close(udp)
+    end
+
+    test "deactivate idempotent and FIN ignored pre-connect" do
+      inactive = base_state(active: false)
+
+      assert {:reply, :ok, ^inactive} = Connection.handle_call(:deactivate, from(), inactive)
+
+      state = base_state(phase: :syn_sent, recv_conn_id: 1809)
+      fin = header(Packet.st_fin(), 1809, 1, 0)
+
+      assert {:noreply, ignored} =
+               Connection.handle_info({:utp_packet, fin, <<>>, []}, state)
+
+      assert ignored.phase == :syn_sent
+    end
+  end
+
+  describe "Dispatcher connect, timeout, and failure branches" do
+    test "start_connect plus await_connected completes BEP 29 handshake" do
+      {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+      conn_id = 1901
+
+      assert {:reply, {:ok, {:utp, pid}}, %{}} =
+               Dispatcher.handle_call(
+                 {:start_connect, @ip, peer_port, [conn_id: conn_id]},
+                 from(),
+                 %{}
+               )
+
+      state_hdr = header(Packet.st_state(), conn_id, 500, 1)
+      send(pid, {:utp_packet, state_hdr, <<>>, []})
+      assert :ok = Connection.await_connected({:utp, pid}, 5_000)
+      assert :connected = TestSupport.Sync.sync(pid).phase
+
+      TestSupport.Sync.safe_stop(pid)
+      :gen_udp.close(peer_udp)
+      :gen_udp.close(udp)
+    end
+
+    test "start_connect GenServer.call exits promptly while dispatcher is suspended" do
+      {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+      parent = self()
+      barrier = make_ref()
+
+      :ok = :sys.suspend(Dispatcher)
+
+      {caller, mon} =
+        spawn_monitor(fn ->
+          send(parent, {barrier, :ready})
+
+          result =
+            try do
+              GenServer.call(
+                Dispatcher,
+                {:start_connect, @ip, peer_port, [conn_id: 1905]},
+                200
+              )
+            catch
+              :exit, reason -> {:call_exit, reason}
+            end
+
+          send(parent, {barrier, result})
+        end)
+
+      assert_receive {^barrier, :ready}, 2_000
+      assert_receive {^barrier, {:call_exit, {:timeout, {GenServer, :call, _}}}}, 2_000
+      assert_receive {:DOWN, ^mon, :process, ^caller, :normal}, 2_000
+
+      :ok = TestSupport.Sync.safe_resume(Dispatcher)
+      :gen_udp.close(peer_udp)
+    end
+
+    test "connect returns timeout when the peer never answers ST_STATE" do
+      {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+
+      task =
+        Task.async(fn ->
+          Dispatcher.connect(@ip, peer_port, [conn_id: 1904], 100)
+        end)
+
+      assert {:error, :timeout} = Task.await(task, 5_000)
+
+      :gen_udp.close(peer_udp)
+      :gen_udp.close(udp)
+    end
+
+    test "connect returns timeout when dispatcher start_connect is suspended" do
+      {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+
+      :ok = :sys.suspend(Dispatcher)
+
+      task =
+        Task.async(fn ->
+          Dispatcher.connect(@ip, peer_port, [conn_id: 1902], 100)
+        end)
+
+      assert {:error, :timeout} = Task.await(task, 2_000)
+      :ok = TestSupport.Sync.safe_resume(Dispatcher)
+      :gen_udp.close(peer_udp)
+    end
+
+    test "await_connected returns error when handshake never completes" do
+      {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+
+      assert {:ok, {:utp, pid}} =
+               Connection.start_client(udp, @ip, 19_997, conn_id: 1903)
+
+      assert {:error, :timeout} = Connection.await_connected({:utp, pid}, 50)
+      TestSupport.Sync.safe_stop(pid)
+      :gen_udp.close(udp)
+    end
+  end
+
   # --- helpers ---
+
+  defp map_has?(map, key), do: Map.has_key?(map, key)
+
+  defp selective_ack_bitmask(ack_nr, seqs) do
+    offsets =
+      seqs
+      |> Enum.map(&(Packet.seq_diff(&1, ack_nr) - 2))
+      |> Enum.filter(&(&1 >= 0))
+
+    byte_count =
+      offsets
+      |> Enum.max()
+      |> Kernel.+(1)
+      |> then(&max(div(&1 + 31, 32) * 4, 4))
+
+    offset_set = MapSet.new(offsets)
+
+    for byte_index <- 0..(byte_count - 1), into: <<>> do
+      <<selective_ack_byte(offset_set, byte_index)>>
+    end
+  end
+
+  defp selective_ack_byte(offset_set, byte_index) do
+    Enum.reduce(0..7, 0, fn bit_index, acc ->
+      offset = byte_index * 8 + bit_index
+
+      if MapSet.member?(offset_set, offset) do
+        Bitwise.bor(acc, Bitwise.bsl(1, bit_index))
+      else
+        acc
+      end
+    end)
+  end
 
   defp from, do: {self(), make_ref()}
 

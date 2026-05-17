@@ -305,6 +305,67 @@ defmodule Magnet.ConnectionFetcherBatch4Test do
     end
   end
 
+  describe "Connection wire edge cases" do
+    test "returns invalid_message when length prefix exceeds cap" do
+      {client, server, listen} = loopback_pair!()
+
+      spawn(fn ->
+        :gen_tcp.send(server, <<0, 16, 0, 0, 0>>)
+        :gen_tcp.close(server)
+      end)
+
+      conn = ut_metadata_conn(client, total_size: 50, unchoked?: true)
+      assert {:error, reason} = Magnet.Connection.request_piece(conn, 0)
+      assert reason in [:invalid_message, :timeout, :closed, :peer_died]
+
+      :gen_tcp.close(client)
+      :gen_tcp.close(listen)
+    end
+
+    test "returns invalid_piece_size when declared total_size disagrees across pieces" do
+      hash = :crypto.strong_rand_bytes(20)
+      pad = 18_000
+
+      info = %{
+        "name" => "1234567890",
+        "length" => pad + 50,
+        "piece length" => 16_384,
+        "pieces" => :binary.copy(<<0::160>>, 2),
+        "pad" => :binary.copy(<<0>>, pad)
+      }
+
+      info_blob = Bento.encode!(info)
+      metadata_size = byte_size(info_blob)
+
+      {port, _listen_ref} =
+        start_handshake_server!(hash, info_blob,
+          mode: :serve,
+          piece1_total_size: metadata_size + 500
+        )
+
+      on_exit(fn -> Magnet.Bootstrap.stop(hash) end)
+      peer = %Peer{ip: {127, 0, 0, 1}, port: port}
+
+      assert {:error, {:metadata_size_mismatch, bad, ^metadata_size}} =
+               Magnet.Connection.fetch_metadata(peer, hash)
+
+      assert bad == metadata_size + 500
+    end
+
+    test "fetch_metadata uses second peer when first dial fails" do
+      {_, info_blob, hash} = build_info_blob!(name: "pool-fallback")
+      {port, _} = start_handshake_server!(hash, info_blob, mode: :serve)
+      good = %Peer{ip: {127, 0, 0, 1}, port: port}
+      bad = %Peer{ip: {127, 0, 0, 1}, port: 1}
+      magnet = %Magnet{hash: hash, trackers: [], display_name: "pool"}
+
+      on_exit(fn -> Magnet.Bootstrap.stop(hash) end)
+
+      assert {:ok, _path, false} =
+               Magnet.Fetcher.fetch_metadata_from_peer_for_test(magnet, bad, [bad, good])
+    end
+  end
+
   ## loopback helpers --------------------------------------------------------
 
   defp short_connection_env!(overrides \\ []) do

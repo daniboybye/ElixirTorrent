@@ -140,6 +140,46 @@ defmodule TrackerUDPLoopbackTest do
       refute_receive {:retry_server, :connect, <<2::64>>}, 50
     end
 
+    test "udp_scrape retries after expired connection id and reconnects via ConnectionIds cache" do
+      hash = @hash
+      {port, server_pid} = start_expired_scrape_server()
+
+      on_exit(fn ->
+        Process.exit(server_pid, :kill)
+      end)
+
+      Application.put_env(:elixir_torrent, :udp_backoff_ms, fn _attempt -> 20 end)
+      on_exit(fn -> Application.delete_env(:elixir_torrent, :udp_backoff_ms) end)
+
+      {:ok, socket} =
+        :gen_udp.open(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+      on_exit(fn -> :gen_udp.close(socket) end)
+
+      assert %{^hash => %{seeders: 5, leechers: 10, completed: 15}} =
+               Tracker.udp_scrape(socket, {127, 0, 0, 1}, port, [hash])
+    end
+
+    test "udp_scrape halts when a later scrape chunk fails after the first succeeds" do
+      hashes = for _ <- 1..75, do: :crypto.strong_rand_bytes(20)
+      {port, server_pid} = start_chunked_scrape_server()
+
+      on_exit(fn ->
+        Process.exit(server_pid, :kill)
+      end)
+
+      Application.put_env(:elixir_torrent, :udp_backoff_ms, fn _attempt -> 20 end)
+      on_exit(fn -> Application.delete_env(:elixir_torrent, :udp_backoff_ms) end)
+
+      {:ok, socket} =
+        :gen_udp.open(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+      on_exit(fn -> :gen_udp.close(socket) end)
+
+      assert %Tracker.Error{reason: "chunk failed"} =
+               Tracker.udp_scrape(socket, {127, 0, 0, 1}, port, hashes, max_udp_attempts: 0)
+    end
+
     test "IPv6 announce socket is bound to the selected source address" do
       assert {:ok, probe_socket} = Acceptor.open_udp(:inet6, @loopback_v6)
       assert {:ok, {@loopback_v6, _port}} = :inet.sockname(probe_socket)
@@ -368,6 +408,114 @@ defmodule TrackerUDPLoopbackTest do
     case data do
       <<^protocol_id::binary-size(8), 0::32, _::binary-size(4)>> -> true
       _ -> false
+    end
+  end
+
+  defp start_expired_scrape_server do
+    parent = self()
+
+    pid =
+      spawn_link(fn ->
+        {:ok, socket} =
+          :gen_udp.open(0, [:binary, active: true, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+        {:ok, port} = :inet.port(socket)
+        send(parent, {:expired_scrape_ready, port})
+        expired_scrape_loop(socket, 0)
+      end)
+
+    receive do
+      {:expired_scrape_ready, port} -> {port, pid}
+    after
+      5_000 -> flunk("expired scrape server failed to start")
+    end
+  end
+
+  defp expired_scrape_loop(socket, connect_count) do
+    protocol_id = @protocol_id
+
+    receive do
+      {:udp, ^socket, ip, client_port,
+       <<^protocol_id::binary-size(8), 0::32, tid::binary-size(4)>>} ->
+        next_connect = connect_count + 1
+        connection_id = <<next_connect::64>>
+
+        :gen_udp.send(
+          socket,
+          ip,
+          client_port,
+          <<0::32, tid::binary, connection_id::binary>>
+        )
+
+        expired_scrape_loop(socket, next_connect)
+
+      {:udp, ^socket, ip, client_port,
+       <<connection_id::binary-size(8), 2::32, tid::binary-size(4), _rest::binary>>} ->
+        response =
+          if connection_id == <<1::64>> do
+            <<3::32, tid::binary, "Connection ID expired">>
+          else
+            <<2::32, tid::binary, 5::32, 15::32, 10::32>>
+          end
+
+        :gen_udp.send(socket, ip, client_port, response)
+        expired_scrape_loop(socket, connect_count)
+    end
+  end
+
+  defp start_chunked_scrape_server do
+    parent = self()
+
+    pid =
+      spawn_link(fn ->
+        {:ok, socket} =
+          :gen_udp.open(0, [:binary, active: true, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+        {:ok, port} = :inet.port(socket)
+        send(parent, {:chunk_scrape_ready, port})
+        chunked_scrape_loop(socket, @connection_id)
+      end)
+
+    receive do
+      {:chunk_scrape_ready, port} -> {port, pid}
+    after
+      5_000 -> flunk("chunked scrape server failed to start")
+    end
+  end
+
+  defp chunked_scrape_loop(socket, connection_id) do
+    protocol_id = @protocol_id
+
+    receive do
+      {:udp, ^socket, ip, client_port,
+       <<^protocol_id::binary-size(8), 0::32, tid::binary-size(4)>>} ->
+        :gen_udp.send(
+          socket,
+          ip,
+          client_port,
+          <<0::32, tid::binary, connection_id::binary>>
+        )
+
+        chunked_scrape_loop(socket, connection_id)
+
+      {:udp, ^socket, ip, client_port,
+       <<^connection_id::binary-size(8), 2::32, tid::binary-size(4), rest::binary>>} ->
+        hash_count = div(byte_size(rest), 20)
+
+        response =
+          if hash_count == Tracker.UDP.max_scrape_hashes() do
+            stats =
+              for _ <- 1..hash_count do
+                <<1::32, 2::32, 3::32>>
+              end
+
+            <<2::32, tid::binary, IO.iodata_to_binary(stats)::binary>>
+          else
+            <<3::32, tid::binary, "chunk failed">>
+          end
+
+        :gen_udp.send(socket, ip, client_port, response)
+        chunked_scrape_loop(socket, connection_id)
     end
   end
 

@@ -768,6 +768,163 @@ defmodule Peer.ConnectionManagerTest do
       assert evicted_after_second == @snub_evict_batch
     end
   end
+
+  describe "dial_done handling and stopped-manager API guards" do
+    import ExUnit.CaptureLog
+
+    test "public API returns :ok when the manager is absent or already stopped" do
+      hash = :crypto.strong_rand_bytes(20)
+      pex_src = <<0xAB::160>>
+      peer = %Peer{ip: {9, 9, 9, 9}, port: 6999}
+
+      for api <- [
+            fn -> Peer.ConnectionManager.offer_peers(hash, [peer]) end,
+            fn -> Peer.ConnectionManager.offer_peers_from_pex(hash, pex_src, [peer]) end,
+            fn -> Peer.ConnectionManager.revoke_pex_peers(hash, pex_src, [peer]) end,
+            fn -> Peer.ConnectionManager.apply_pex_delta(hash, pex_src, [peer], [peer]) end,
+            fn -> Peer.ConnectionManager.kick(hash) end
+          ] do
+        assert :ok = api.()
+      end
+
+      {:ok, pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: manager_via(hash))
+
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
+
+      assert :ok = GenServer.stop(pid)
+
+      for api <- [
+            fn -> Peer.ConnectionManager.offer_peers(hash, [peer]) end,
+            fn -> Peer.ConnectionManager.offer_peers_from_pex(hash, pex_src, [peer]) end,
+            fn -> Peer.ConnectionManager.revoke_pex_peers(hash, pex_src, [peer]) end,
+            fn -> Peer.ConnectionManager.apply_pex_delta(hash, pex_src, [peer], [peer]) end,
+            fn -> Peer.ConnectionManager.kick(hash) end
+          ] do
+        assert :ok = api.()
+      end
+    end
+
+    test "dial_done drops connected endpoints, keeps failures, and records backoff" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_isolated_manager(hash)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
+
+      start_swarm_with_connected(hash, 60)
+
+      ok_peer = %Peer{ip: {10, 0, 0, 1}, port: 7001}
+      fail_peer = %Peer{ip: {10, 0, 0, 2}, port: 7002}
+
+      queue =
+        %{}
+        |> DialQueue.offer([ok_peer], :discovery)
+        |> DialQueue.offer([fail_peer], :discovery)
+
+      task_pid =
+        spawn(fn ->
+          receive do
+            :done -> :ok
+          end
+        end)
+
+      on_exit(fn -> Process.exit(task_pid, :kill) end)
+
+      :sys.replace_state(pid, fn state ->
+        %{state | queue: queue, dialing?: true, dial_task: task_pid}
+      end)
+
+      selected = [{ok_peer.ip, ok_peer.port}, {fail_peer.ip, fail_peer.port}]
+      results = {1, %{timeout: 1}, [{fail_peer, :timeout}]}
+
+      log =
+        capture_log(fn ->
+          send(pid, {:dial_done, selected, results})
+          _ = :sys.get_state(pid)
+        end)
+
+      state = :sys.get_state(pid)
+      refute state.dialing?
+      assert state.dial_task == nil
+      refute Map.has_key?(state.queue, {ok_peer.ip, ok_peer.port})
+      assert Map.has_key?(state.queue, {fail_peer.ip, fail_peer.port})
+      assert Peer.DialBackoff.blocked?(hash, fail_peer.ip, fail_peer.port)
+      assert log =~ "[peer_dial]"
+      assert log =~ "ok=1"
+    end
+
+    test "dial_now while already dialing does not start a second batch" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_isolated_manager(hash)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
+
+      peer = %Peer{ip: {10, 0, 0, 3}, port: 7003}
+      queue = DialQueue.offer(%{}, [peer], :discovery)
+
+      blocked_task =
+        spawn(fn ->
+          receive do
+            :release -> :ok
+          end
+        end)
+
+      on_exit(fn -> Process.exit(blocked_task, :kill) end)
+
+      :sys.replace_state(pid, fn state ->
+        %{state | queue: queue, dialing?: true, dial_task: blocked_task}
+      end)
+
+      :ok = GenServer.cast(pid, :dial_now)
+      _ = :sys.get_state(pid)
+
+      state = :sys.get_state(pid)
+      assert state.dialing?
+      assert state.dial_task == blocked_task
+    end
+
+    test "empty queue dial continue replenishes cached candidates" do
+      hash = :crypto.strong_rand_bytes(20)
+      announce_pid = start_announce_spy(hash)
+      pid = start_isolated_manager(hash)
+
+      on_exit(fn ->
+        safe_stop(pid)
+        safe_stop(announce_pid)
+      end)
+
+      :sys.replace_state(pid, fn state -> %{state | dialing?: false, queue: %{}} end)
+      :ok = GenServer.cast(pid, :dial_now)
+      _ = :sys.get_state(pid)
+
+      assert discovery_counts(announce_pid) == {0, 1}
+    end
+
+    test "offer during an active dial keeps the existing dial task" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_isolated_manager(hash)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
+
+      peer = %Peer{ip: {10, 0, 0, 5}, port: 7005}
+      queue = DialQueue.offer(%{}, [peer], :discovery)
+
+      blocked_task =
+        spawn(fn ->
+          receive do
+            :release -> :ok
+          end
+        end)
+
+      on_exit(fn -> Process.exit(blocked_task, :kill) end)
+
+      :sys.replace_state(pid, fn state ->
+        %{state | queue: queue, dialing?: true, dial_task: blocked_task}
+      end)
+
+      :ok = Peer.ConnectionManager.offer_peers(hash, [%Peer{ip: {10, 0, 0, 6}, port: 7006}])
+
+      state = :sys.get_state(pid)
+      assert state.dialing?
+      assert state.dial_task == blocked_task
+    end
+  end
 end
 
 defmodule Peer.ConnectionManagerTest.SwarmStub do

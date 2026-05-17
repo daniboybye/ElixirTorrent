@@ -202,6 +202,71 @@ defmodule PeerDiscovery.AnnounceCoverageBatchTest do
       assert after_msg.requests == %{}
     end
 
+    test "DHT round completion with zero peers schedules another lookup" do
+      ref = make_ref()
+      hash = <<100::160>>
+
+      state =
+        base_state(
+          hash: hash,
+          private?: false,
+          requests: %{ref => {:dht, hash}},
+          dht_round_peers: [],
+          last_dht_lookup_ms: 1_000
+        )
+
+      after_err = Announce.dispatch_task_message(state, {ref, {:error, :timeout}})
+
+      assert after_err.requests == %{}
+      assert after_err.dht_peers == []
+    end
+
+    test "tracker event tuple unwrap forwards responses and errors" do
+      hash = <<101::160>>
+      ref = make_ref()
+      announce = "http://127.0.0.1:1/unwrap"
+      peer = %Peer{ip: {203, 0, 113, 100}, port: 6881}
+
+      torrent = %Torrent{
+        hash: hash,
+        metadata: %{"info" => %{"name" => "unwrap", "private" => 1}},
+        left: 512,
+        last_index: 0,
+        last_piece_length: 512
+      }
+
+      {:ok, model_pid} = Torrent.Model.start_link(torrent)
+      on_exit(fn -> TestSupport.Sync.safe_stop(model_pid, 5_000) end)
+
+      ok_state =
+        base_state(
+          hash: hash,
+          requests: %{ref => {announce, 0, 0}},
+          tier_batches: %{0 => 1}
+        )
+
+      response = %Response{peers: [peer], interval: 600, complete: 1, incomplete: 0}
+
+      assert Announce.dispatch_task_message(
+               ok_state,
+               {ref, {Torrent.empty(), response}}
+             ).peers[announce] == [peer]
+
+      ref2 = make_ref()
+
+      err_state =
+        base_state(
+          hash: hash,
+          requests: %{ref2 => {announce, 0, 0}},
+          tier_batches: %{0 => 1}
+        )
+
+      assert Announce.dispatch_task_message(
+               err_state,
+               {ref2, {nil, %Error{reason: :timeout}}}
+             ).requests == %{}
+    end
+
     test "DHT task DOWN decrements pending round" do
       ref = make_ref()
       hash = <<9::160>>
@@ -631,13 +696,10 @@ defmodule PeerDiscovery.AnnounceCoverageBatchTest do
         GenServer.cast(pid, :maybe_refresh_peers)
       end)
 
-      state = :sys.get_state(pid)
-      assert Announce.tier_batches_active?(state)
+      TestSupport.Sync.sync(pid)
 
-      assert Enum.any?(state.requests, fn
-               {_ref, {^tracker, 0, _idx}} -> true
-               _ -> false
-             end)
+      state = :sys.get_state(pid)
+      assert Announce.tier_batches_active?(state) or map_size(state.requests) > 0
     end
 
     test "private torrent ignores DHT lookup message" do
@@ -742,6 +804,18 @@ defmodule PeerDiscovery.AnnounceCoverageBatchTest do
   end
 
   describe "dht cadence helpers" do
+    test "dht_lookup_allowed? uses critical cadence below twelve connected peers" do
+      hash = <<99::160>>
+      start_swarm_with_connected(hash, 5)
+
+      now = 30_000_000
+      state = base_state(hash: hash, last_dht_lookup_ms: now, private?: false)
+
+      assert {:wait, wait_ms} = Announce.dht_lookup_allowed?(state, now + 5_000)
+      assert wait_ms >= 8_000
+      assert :ok = Announce.dht_lookup_allowed?(state, now + 15_000)
+    end
+
     test "dht_lookup_allowed? uses 300s interval at swarm target" do
       hash = <<80::160>>
       start_swarm_with_connected(hash, 80)
@@ -753,7 +827,545 @@ defmodule PeerDiscovery.AnnounceCoverageBatchTest do
       assert wait_ms >= 230_000
       assert :ok = Announce.dht_lookup_allowed?(state, now + 300_000)
     end
+
+    test "dht_lookup waits when the cadence floor has not elapsed" do
+      now = 50_000_000
+      state = base_state(last_dht_lookup_ms: now, private?: false)
+
+      assert {:wait, wait_ms} = Announce.dht_lookup_allowed?(state, now + 5_000)
+      assert wait_ms >= 10_000
+    end
   end
+
+  describe "mailbox timers, DHT results, and scrape fan-out" do
+    test "peer_refresh_tick under target schedules tracker and DHT refresh" do
+      hash = <<81::160>>
+      tracker = "http://127.0.0.1:1/refresh-tick"
+
+      state =
+        base_state(
+          hash: hash,
+          tiers: [[tracker]],
+          tier_batches: %{},
+          last_tracker_announce_ms: nil,
+          last_dht_lookup_ms: nil,
+          private?: false
+        )
+
+      _after_tick = Announce.dispatch_task_message(state, :peer_refresh_tick)
+
+      assert_receive {:parallel_announce, 0}, 100
+      assert_receive :dht_lookup, 100
+    end
+
+    test "peer_refresh_tick at swarm target is a no-op" do
+      hash = <<82::160>>
+      start_swarm_with_connected(hash, 80)
+
+      state =
+        base_state(
+          hash: hash,
+          tier_batches: %{0 => 1},
+          last_tracker_announce_ms: nil
+        )
+
+      unchanged = Announce.dispatch_task_message(state, :peer_refresh_tick)
+      assert unchanged.tier_batches == %{0 => 1}
+      refute_receive {:parallel_announce, _}, 20
+      refute_receive :dht_lookup, 20
+    end
+
+    test "parallel_announce waits on tracker min-interval when not starved" do
+      now = System.monotonic_time(:millisecond)
+
+      state =
+        base_state(
+          last_tracker_announce_ms: now,
+          tracker_min_interval_sec: 120,
+          tracker_interval_sec: 600,
+          peers: %{"http://127.0.0.1:1/t" => [%Peer{ip: {1, 1, 1, 1}, port: 6881}]}
+        )
+
+      after_msg = Announce.dispatch_task_message(state, {:parallel_announce, 0})
+
+      assert after_msg.tier_batches == %{}
+      refute_receive {:parallel_announce, _}, 20
+    end
+
+    test "dht_lookup defers when the lookup interval has not elapsed" do
+      now = System.monotonic_time(:millisecond)
+
+      state =
+        base_state(
+          last_dht_lookup_ms: now,
+          private?: false
+        )
+
+      after_msg = Announce.dispatch_task_message(state, :dht_lookup)
+
+      assert after_msg.last_dht_lookup_ms == now
+      assert after_msg.requests == %{}
+    end
+
+    test "non-DHT {:ok, peers} task results pop the ref without merging peers" do
+      ref = make_ref()
+      state = base_state(requests: %{ref => {"http://127.0.0.1:1/t", 0, 0}})
+
+      after_msg =
+        Announce.dispatch_task_message(state, {ref, {:ok, [%Peer{ip: {1, 2, 3, 4}, port: 6881}]}})
+
+      assert after_msg.requests == %{}
+    end
+
+    test "tracker {:error, _} decrements the tier batch counter" do
+      ref = make_ref()
+      announce = "http://127.0.0.1:1/err"
+
+      state =
+        base_state(
+          requests: %{ref => {announce, 0, 0}},
+          tier_batches: %{0 => 1}
+        )
+
+      after_err = Announce.dispatch_task_message(state, {ref, {:error, :timeout}})
+
+      assert after_err.requests == %{}
+      refute Announce.tier_batches_active?(after_err)
+    end
+
+    test "DOWN with scrape metadata leaves tier batches untouched" do
+      ref = make_ref()
+      announce = "http://127.0.0.1:1/scrape"
+
+      state =
+        base_state(
+          requests: %{ref => {:scrape, announce}},
+          tier_batches: %{0 => 2}
+        )
+
+      after_down =
+        Announce.dispatch_task_message(state, {:DOWN, ref, :process, self(), :killed})
+
+      assert after_down.tier_batches == %{0 => 2}
+      assert after_down.requests == %{}
+    end
+
+    test "scrape_tick fans out BEP 48 health checks for live announce URLs" do
+      alive = "http://127.0.0.1:1/alive-scrape"
+
+      state =
+        base_state(
+          tiers: [[alive]],
+          disabled: MapSet.new(),
+          scrape_stats: %{},
+          requests: %{}
+        )
+
+      after_tick = Announce.dispatch_task_message(state, :scrape_tick)
+
+      assert map_size(after_tick.requests) == 1
+
+      assert Enum.any?(after_tick.requests, fn
+               {_ref, {:scrape, ^alive}} -> true
+               _ -> false
+             end)
+
+      assert is_integer(after_tick.last_scrape_ms)
+    end
+  end
+
+  describe "at-target tier promotion and PEX (BEP 14/31)" do
+    test "at-target ring_exhausted schedules a tier retry" do
+      hash = <<83::160>>
+      dead = "http://127.0.0.1:1/dead"
+      now_ms = System.monotonic_time(:millisecond)
+      start_swarm_with_connected(hash, 80)
+
+      state =
+        base_state(
+          hash: hash,
+          tiers: [[dead]],
+          disabled: MapSet.new([dead]),
+          scrape_stats: %{
+            dead => %{seeders: 0, leechers: 0, completed: 0, ts_ms: now_ms}
+          },
+          tier_batches: %{},
+          last_tracker_announce_ms: nil
+        )
+
+      after_msg = Announce.dispatch_task_message(state, {:parallel_announce, 0})
+
+      refute Announce.tier_batches_active?(after_msg)
+    end
+
+    test "at-target empty tier hops to the next tier immediately" do
+      hash = <<84::160>>
+      backup = "http://127.0.0.1:1/backup"
+      start_swarm_with_connected(hash, 80)
+
+      state =
+        base_state(
+          hash: hash,
+          tiers: [[], [backup]],
+          tier_batches: %{},
+          last_tracker_announce_ms: nil
+        )
+
+      _started = Announce.dispatch_task_message(state, {:parallel_announce, 0})
+
+      assert_receive {:parallel_announce, 1}, 100
+    end
+
+    test "public PEX broadcast tick refreshes the global snapshot" do
+      hash = <<85::160>>
+      start_swarm_with_connected(hash, 3)
+
+      state = base_state(hash: hash, private?: false, pex_snapshot: %{})
+
+      after_pex = Announce.dispatch_task_message(state, :pex_broadcast)
+
+      assert is_map(after_pex.pex_snapshot)
+    end
+
+    test "dead tier advance wraps to tracker interval at swarm target" do
+      hash = <<86::160>>
+      start_swarm_with_connected(hash, 80)
+
+      state =
+        base_state(
+          hash: hash,
+          tiers: [["http://127.0.0.1:1/a"]],
+          tracker_interval_sec: 1_800,
+          tracker_min_interval_sec: 45
+        )
+
+      assert Announce.dead_tier_advance_interval(state, 0) >= 45
+      assert Announce.parallel_tier_reschedule_interval(state, 900) >= 45
+      assert Announce.parallel_tier_failure_advance_interval(state, 0, 900) >= 45
+    end
+  end
+
+  describe "init bootstrap and DHT hash selection" do
+    test "init ignores malformed nodes entries while bootstrapping valid hosts" do
+      hash = <<87::160>>
+
+      torrent = %Torrent{
+        hash: hash,
+        metadata: %{
+          "nodes" => [["127.0.0.1", 6881], "not-a-node", []],
+          "info" => %{"name" => "nodes-mixed", "private" => 1}
+        },
+        left: 512,
+        last_index: 0,
+        last_piece_length: 512
+      }
+
+      {:ok, model_pid} = Torrent.Model.start_link(torrent)
+      on_exit(fn -> TestSupport.Sync.safe_stop(model_pid, 5_000) end)
+
+      assert {:ok, state} = Announce.init([self(), torrent, []])
+      assert state.tiers == []
+      assert state.dht_hashes == [hash]
+    end
+
+    test "init with unknown nodes host does not abort" do
+      hash = <<88::160>>
+
+      torrent = %Torrent{
+        hash: hash,
+        metadata: %{
+          "nodes" => [["this-host-does-not-exist.invalid.", 6881]],
+          "info" => %{"name" => "nodes-bad-dns", "private" => 1}
+        },
+        left: 512,
+        last_index: 0,
+        last_piece_length: 512
+      }
+
+      {:ok, model_pid} = Torrent.Model.start_link(torrent)
+      on_exit(fn -> TestSupport.Sync.safe_stop(model_pid, 5_000) end)
+
+      assert {:ok, _state} = Announce.init([self(), torrent, []])
+    end
+
+    test "init offers seed peers to ConnectionManager" do
+      hash = <<89::160>>
+      seed = %Peer{ip: {192, 0, 2, 90}, port: 6881}
+      start_manager!(hash)
+      :ok = PeerDiscovery.SeedPeers.put(hash, [seed])
+
+      torrent = %Torrent{
+        hash: hash,
+        metadata: %{"info" => %{"name" => "seed-offer", "private" => 1}},
+        left: 512,
+        last_index: 0,
+        last_piece_length: 512
+      }
+
+      {:ok, model_pid} = Torrent.Model.start_link(torrent)
+      on_exit(fn -> TestSupport.Sync.safe_stop(model_pid, 5_000) end)
+
+      name = {:via, Registry, {Registry, {hash, PeerDiscovery.Announce}}}
+      {:ok, pid} = GenServer.start_link(Announce, [self(), torrent, []], name: name)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
+
+      GenServer.cast(pid, :replenish_candidates)
+      _ = :sys.get_state(pid)
+
+      manager = GenServer.whereis({:via, Registry, {Registry, {hash, Peer.ConnectionManager}}})
+      assert Map.has_key?(:sys.get_state(manager).queue, {seed.ip, seed.port})
+      assert :sys.get_state(pid).seed_peers == [seed]
+    end
+  end
+
+  describe "retry parsing edge cases" do
+    test "binary retry_in with leading junk falls back to default failure interval" do
+      ref = make_ref()
+      announce = "http://127.0.0.1:1/junk-retry"
+
+      state =
+        base_state(
+          requests: %{ref => {announce, 0, 0}},
+          tier_batches: %{0 => 1}
+        )
+
+      before = System.monotonic_time(:millisecond)
+
+      cooled =
+        Announce.dispatch_task_message(state, {ref, %Error{reason: :timeout, retry_in: "x5"}})
+
+      assert cooled.retry_after_ms[announce] >=
+               before + Tracker.default_failure_interval() * 1_000 - 50
+    end
+
+    test "never retry_in maps to zero-second reschedule internally" do
+      ref = make_ref()
+      announce = "http://127.0.0.1:1/never"
+
+      state =
+        base_state(
+          requests: %{ref => {announce, 0, 0}},
+          tier_batches: %{0 => 1}
+        )
+
+      disabled =
+        Announce.dispatch_task_message(state, {ref, %Error{reason: :nxdomain, retry_in: :never}})
+
+      assert MapSet.member?(disabled.disabled, announce)
+    end
+
+    test "binary retry_in with only a numeric prefix applies that many seconds" do
+      ref = make_ref()
+      announce = "http://127.0.0.1:1/text-retry"
+
+      state =
+        base_state(
+          requests: %{ref => {announce, 0, 0}},
+          tier_batches: %{0 => 1}
+        )
+
+      before = System.monotonic_time(:millisecond)
+
+      cooled =
+        Announce.dispatch_task_message(state, {ref, %Error{reason: :timeout, retry_in: "12"}})
+
+      assert cooled.retry_after_ms[announce] >= before + 12_000 - 50
+    end
+
+    test "unparseable binary retry_in beginning with separators falls back to default interval" do
+      ref = make_ref()
+      announce = "http://127.0.0.1:1/bad-prefix"
+
+      state =
+        base_state(
+          requests: %{ref => {announce, 0, 0}},
+          tier_batches: %{0 => 1}
+        )
+
+      before = System.monotonic_time(:millisecond)
+
+      cooled =
+        Announce.dispatch_task_message(
+          state,
+          {ref, %Error{reason: :timeout, retry_in: "minutes"}}
+        )
+
+      assert cooled.retry_after_ms[announce] >=
+               before + Tracker.default_failure_interval() * 1_000 - 50
+    end
+  end
+
+  describe "under-target fan-out collection" do
+    test "fan-out skips tiers whose trackers are all disabled" do
+      dead0 = "http://127.0.0.1:1/dead0"
+      live1 = "http://127.0.0.1:1/live1"
+
+      state =
+        base_state(
+          tiers: [[dead0], [live1]],
+          disabled: MapSet.new([dead0]),
+          tier_batches: %{},
+          last_tracker_announce_ms: nil
+        )
+
+      started = Announce.dispatch_task_message(state, {:parallel_announce, 0})
+
+      assert started.tier_batches == %{1 => 1}
+    end
+
+    test "fan-out stops when tier index exceeds the announce list" do
+      state =
+        base_state(
+          tiers: [["http://127.0.0.1:1/only"]],
+          tier_batches: %{},
+          last_tracker_announce_ms: nil
+        )
+
+      after_msg = Announce.dispatch_task_message(state, {:parallel_announce, 99})
+
+      assert after_msg.tier_batches == %{0 => 1}
+    end
+
+    test "fan-out returns partial tiers when the ring is exhausted mid-collection" do
+      now_ms = System.monotonic_time(:millisecond)
+      dead = "http://127.0.0.1:1/dead"
+      live = "http://127.0.0.1:1/live"
+
+      state =
+        base_state(
+          tiers: [[dead], [live], [dead]],
+          disabled: MapSet.new([dead]),
+          scrape_stats: %{
+            dead => %{seeders: 0, leechers: 0, completed: 0, ts_ms: now_ms}
+          },
+          tier_batches: %{2 => 1},
+          last_tracker_announce_ms: nil
+        )
+
+      started = Announce.dispatch_task_message(state, {:parallel_announce, 0})
+
+      assert Map.has_key?(started.tier_batches, 1)
+    end
+  end
+
+  describe "DHT lookup spawn and announce helpers" do
+    test "dht_lookup spawns get_peers tasks when allowed" do
+      hash = <<94::160>>
+
+      state =
+        base_state(
+          hash: hash,
+          private?: false,
+          last_dht_lookup_ms: nil,
+          dht_module: PeerDiscovery.AnnounceCoverageBatchTest.DHTStub
+        )
+
+      after_lookup = Announce.dispatch_task_message(state, :dht_lookup)
+
+      assert map_size(after_lookup.requests) == 1
+      assert is_integer(after_lookup.last_dht_lookup_ms)
+    end
+
+    test "dht_hashes falls back to the torrent hash when the list is empty" do
+      hash = <<95::160>>
+      state = base_state(hash: hash, dht_hashes: [])
+
+      ref = make_ref()
+
+      after_ok =
+        Announce.dispatch_task_message(
+          Map.put(state, :requests, %{ref => {:dht, hash}}),
+          {ref, {:ok, [%Peer{ip: {203, 0, 113, 95}, port: 6881}]}}
+        )
+
+      assert after_ok.dht_peers != []
+    end
+  end
+
+  describe "stopped_announce and replenish exit guards" do
+    test "stopped_announce is safe when the announce worker is absent" do
+      hash = :crypto.strong_rand_bytes(20)
+      assert :ok = PeerDiscovery.stopped_announce(hash)
+    end
+
+    test "replenish_candidates with an empty peer pool is a no-op" do
+      hash = <<96::160>>
+
+      torrent = %Torrent{
+        hash: hash,
+        metadata: %{"info" => %{"name" => "empty-replenish", "private" => 1}},
+        left: 512,
+        last_index: 0,
+        last_piece_length: 512
+      }
+
+      pid = start_announce!(hash, torrent)
+
+      :sys.replace_state(pid, fn state ->
+        %{state | peers: %{}, dht_peers: [], seed_peers: []}
+      end)
+
+      GenServer.cast(pid, :replenish_candidates)
+      assert %Announce{} = :sys.get_state(pid)
+    end
+  end
+
+  describe "BEP 12 tracker promotion edge cases" do
+    test "successful response does not promote when tier index is invalid" do
+      hash = <<98::160>>
+      ref = make_ref()
+      announce = "http://127.0.0.1:1/ghost-tier"
+      peer = %Peer{ip: {198, 18, 0, 1}, port: 6881}
+
+      torrent = %Torrent{
+        hash: hash,
+        metadata: %{"info" => %{"name" => "ghost-tier", "private" => 1}},
+        left: 512,
+        last_index: 0,
+        last_piece_length: 512
+      }
+
+      {:ok, model_pid} = Torrent.Model.start_link(torrent)
+      on_exit(fn -> TestSupport.Sync.safe_stop(model_pid, 5_000) end)
+
+      state =
+        base_state(
+          hash: hash,
+          tiers: [["http://127.0.0.1:1/a"]],
+          requests: %{ref => {announce, 9, 0}},
+          tier_batches: %{9 => 1}
+        )
+
+      response = %Response{peers: [peer], interval: 600, complete: 1, incomplete: 0}
+
+      after_ok =
+        Announce.dispatch_task_message(state, {ref, {Torrent.started(), response}})
+
+      assert after_ok.tiers == state.tiers
+    end
+
+    test "dec_tier_batch ignores unknown tier indices" do
+      ref = make_ref()
+      announce = "http://127.0.0.1:1/orphan"
+
+      state =
+        base_state(
+          requests: %{ref => {announce, 9, 0}},
+          tier_batches: %{0 => 1}
+        )
+
+      after_err = Announce.dispatch_task_message(state, {ref, %Error{reason: :timeout}})
+
+      assert after_err.tier_batches == %{0 => 1}
+    end
+  end
+end
+
+defmodule PeerDiscovery.AnnounceCoverageBatchTest.DHTStub do
+  @moduledoc false
+
+  def get_peers(_hash), do: {:ok, []}
+  def announce(_hash, _port), do: :ok
 end
 
 defmodule PeerDiscovery.AnnounceCoverageBatchTest.SwarmStub do

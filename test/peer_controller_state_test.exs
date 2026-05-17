@@ -1105,6 +1105,278 @@ defmodule PeerControllerStateTest do
     end
   end
 
+  describe "upload reject guards, LTEP/unchoke fallbacks, and pin selection" do
+    @block_len 4_096
+
+    test "bad index and bad bounds return protocol_error without a wire reject" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 2), fn _ ->
+        with_sender_stub(hash, fn _key ->
+          seed =
+            base_state(hash, 2,
+              choke: false,
+              status: :seed,
+              fast_extension: %Peer.Controller.FastExtension{}
+            )
+
+          assert {:error, :protocol_error, ^seed} = State.handle_request(seed, 99, 0, @block_len)
+
+          assert {:error, :protocol_error, ^seed} =
+                   State.handle_request(seed, 0, 0, @piece_len + 1)
+
+          refute_received {:sent, _}
+        end)
+      end)
+    end
+
+    test "superseed_hidden rejects non-assigned pieces on the wire when Fast is negotiated" do
+      hash = :crypto.strong_rand_bytes(20)
+      id = <<0x55::160>>
+      piece_data = :crypto.strong_rand_bytes(@piece_len)
+
+      with_tmp_dir(fn dir ->
+        torrent =
+          build_two_piece_torrent(hash, dir, piece_data)
+          |> Map.put(:peer_status, nil)
+
+        with_model(torrent, fn _ ->
+          {:ok, superseed} = Torrent.Superseed.start_link(hash)
+
+          on_exit(fn -> stop_quietly(superseed) end)
+
+          {:ok, fh_pid} = Torrent.FileHandle.start_link(hash)
+          on_exit(fn -> stop_quietly(fh_pid) end)
+
+          case Task.Supervisor.start_link(
+                 max_restarts: 0,
+                 name: {:via, Registry, {Registry, {hash, Torrent.Uploader}}}
+               ) do
+            {:ok, _} -> :ok
+            {:error, {:already_started, _}} -> :ok
+          end
+
+          seed_piece_on_disk!(hash, 0, piece_data)
+          seed_piece_on_disk!(hash, 1, piece_data)
+
+          assert :armed = Torrent.Superseed.arm(hash)
+          assert :active = Torrent.Superseed.activate(hash, 0)
+
+          leech_bf = Torrent.Bitfield.make(2)
+
+          assert {:ok, assigned} = Torrent.Superseed.assign(hash, id, leech_bf)
+          hidden = if assigned == 0, do: 1, else: 0
+
+          with_sender_stub(hash, id, fn _key ->
+            state =
+              base_state(hash, 2,
+                id: id,
+                choke: false,
+                status: :seed,
+                superseed_piece: assigned,
+                fast_extension: %Peer.Controller.FastExtension{}
+              )
+
+            assert ^state = State.handle_request(state, hidden, 0, @block_len)
+            assert_receive {:sent, {:reject, ^hidden, 0, @block_len}}
+          end)
+        end)
+      end)
+    end
+
+    test "unchoke on an already-unchoked peer is a no-op" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_sender_stub(hash, fn _key ->
+        state = base_state(hash, 4, choke: false, status: :seed)
+        assert ^state = State.unchoke(state)
+        refute_received {:sent, _}
+      end)
+    end
+
+    test "handle_extended with ltep nil ignores all LTEP payloads" do
+      hash = :crypto.strong_rand_bytes(20)
+      state = base_state(hash, 4, ltep: nil)
+
+      assert ^state = State.handle_extended(state, 0, "d2:id1i1ee")
+      assert ^state = State.handle_extended(state, 2, Magnet.UtMetadata.encode_request(0))
+    end
+
+    test "unavailable metadata with no peer ut_metadata id skips wire reject" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        with_sender_stub(hash, fn _key ->
+          # Local session knows ut_metadata, but the peer never negotiated an id.
+          state = base_state(hash, 4, ltep: Session.new([UtMetadataExtension]))
+          request = Magnet.UtMetadata.encode_request(0)
+
+          assert %State{ut_metadata_requests: %{count: 1}} =
+                   State.handle_extended(state, ut_metadata_local_id(), request)
+
+          refute_received {:sent, _}
+        end)
+      end)
+    end
+
+    test "ensure_piece_index pins from model peer_status when status is unset" do
+      hash = :crypto.strong_rand_bytes(20)
+      bf = Torrent.Bitfield.set(Torrent.Bitfield.make(4), 2, 1)
+
+      torrent = sample_torrent(hash, 4) |> Map.put(:peer_status, 2)
+
+      with_model(torrent, fn _ ->
+        state = base_state(hash, 4, status: nil)
+
+        assert %State{status: 2} = State.handle_bitfield(state, bf)
+      end)
+    end
+
+    test "ensure_piece_index falls back to active download index when choice is empty" do
+      hash = :crypto.strong_rand_bytes(20)
+      bf = Torrent.Bitfield.set(Torrent.Bitfield.make(4), 1, 1)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        start_downloads_supervisor(hash)
+
+        for i <- 0..3, do: :ok = Torrent.PiecesStatistic.set(hash, i, :complete)
+
+        assert :ok =
+                 Torrent.Downloads.piece(
+                   hash,
+                   3,
+                   fn -> send(self(), :piece_done) end,
+                   fn -> :ok end
+                 )
+
+        state = base_state(hash, 4, status: nil)
+
+        assert %State{status: 3} = State.handle_bitfield(state, bf)
+      end)
+    end
+
+    test "ensure_piece_index leaves status unset when no piece is choosable" do
+      hash = :crypto.strong_rand_bytes(20)
+      bf = Torrent.Bitfield.make(4)
+
+      with_model(sample_torrent(hash, 4, left: 4 * @piece_len), fn _ ->
+        state = base_state(hash, 4, status: nil, interested: false)
+
+        assert %State{status: nil} = State.handle_bitfield(state, bf)
+      end)
+    end
+
+    test "start_ltep advertises metadata_size when the model has info_blob" do
+      hash = :crypto.strong_rand_bytes(20)
+      info_blob = Bento.encode!(%{"name" => "md-ltep", "length" => 128})
+
+      with_model(metadata_torrent(hash, info_blob), fn _ ->
+        with_sender_stub(hash, fn _key ->
+          state = base_state(hash, 1, status: :seed)
+
+          assert %State{ltep: %Session{}} = State.start_ltep(state)
+          assert_receive {:sent, {:socket_raw, wire}}, @timeout
+
+          raw = IO.iodata_to_binary(wire)
+          <<_len::32, 20, 0, payload::binary>> = raw
+          assert payload =~ "metadata_size"
+          assert payload =~ "i30e"
+        end)
+      end)
+    end
+
+    test "handle_choke rejects in-flight piece downloads and clears the pipeline" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        start_downloads_supervisor(hash)
+
+        assert :ok =
+                 Torrent.Downloads.piece(
+                   hash,
+                   0,
+                   fn -> :ok end,
+                   fn -> :ok end
+                 )
+
+        state =
+          base_state(hash, 4,
+            status: 0,
+            interested: true,
+            requests: MapSet.new([{0, 0, @piece_len}])
+          )
+
+        assert %State{choke_me: true, requests: reqs, pending_requests: 0} =
+                 State.handle_choke(state)
+
+        assert MapSet.size(reqs) == 0
+      end)
+    end
+
+    test "handle_unchoke refills the download pipeline after a choke" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        start_downloads_supervisor(hash)
+
+        assert :ok =
+                 Torrent.Downloads.piece(
+                   hash,
+                   0,
+                   fn -> :ok end,
+                   fn -> :ok end
+                 )
+
+        state =
+          base_state(hash, 4,
+            status: 0,
+            interested: true,
+            choke_me: true,
+            pending_requests: 0
+          )
+
+        assert %State{choke_me: false} = State.handle_unchoke(state)
+      end)
+    end
+
+    test "superseed_hidden without Fast is a silent ignore" do
+      hash = :crypto.strong_rand_bytes(20)
+      id = <<0x66::160>>
+
+      with_tmp_dir(fn dir ->
+        torrent =
+          build_two_piece_torrent(hash, dir, :crypto.strong_rand_bytes(@piece_len))
+          |> Map.put(:peer_status, nil)
+
+        with_model(torrent, fn _ ->
+          {:ok, superseed} = Torrent.Superseed.start_link(hash)
+          on_exit(fn -> stop_quietly(superseed) end)
+
+          assert :armed = Torrent.Superseed.arm(hash)
+          assert :active = Torrent.Superseed.activate(hash, 0)
+
+          leech_bf = Torrent.Bitfield.make(2)
+          assert {:ok, assigned} = Torrent.Superseed.assign(hash, id, leech_bf)
+          hidden = if assigned == 0, do: 1, else: 0
+
+          with_sender_stub(hash, id, fn _key ->
+            state =
+              base_state(hash, 2,
+                id: id,
+                choke: false,
+                status: :seed,
+                superseed_piece: assigned,
+                fast_extension: nil
+              )
+
+            assert ^state = State.handle_request(state, hidden, 0, @block_len)
+            refute_received {:sent, _}
+          end)
+        end)
+      end)
+    end
+  end
+
   ## helpers -----------------------------------------------------------------
 
   defp sample_torrent(hash, pieces_count, opts \\ []) do
@@ -1137,15 +1409,25 @@ defmodule PeerControllerStateTest do
   end
 
   defp with_model(torrent, fun) do
-    {:ok, model_pid} = Torrent.Model.start_link(torrent)
+    case Torrent.Model.start_link(torrent) do
+      {:ok, model_pid} ->
+        on_exit(fn ->
+          try do
+            TestSupport.Sync.safe_stop(model_pid, 5_000)
+          catch
+            :exit, _ -> :ok
+          end
+        end)
 
-    on_exit(fn ->
-      try do
-        TestSupport.Sync.safe_stop(model_pid, 5_000)
-      catch
-        :exit, _ -> :ok
-      end
-    end)
+      {:error, {:already_started, model_pid}} ->
+        on_exit(fn ->
+          try do
+            TestSupport.Sync.safe_stop(model_pid, 5_000)
+          catch
+            :exit, _ -> :ok
+          end
+        end)
+    end
 
     :ok = Torrent.PiecesStatistic.init(torrent)
     fun.(torrent)
@@ -1203,6 +1485,43 @@ defmodule PeerControllerStateTest do
       download_dir: download_dir,
       peer_status: :seed
     }
+  end
+
+  defp build_two_piece_torrent(hash, download_dir, piece_data) do
+    pieces_hash =
+      :crypto.hash(:sha, piece_data) <> :crypto.hash(:sha, piece_data)
+
+    info = %{
+      "name" => "seed2.bin",
+      "length" => 2 * @piece_len,
+      "piece length" => @piece_len,
+      "pieces" => pieces_hash
+    }
+
+    %Torrent{
+      hash: hash,
+      metadata: %{"info" => info},
+      left: 0,
+      downloaded: 2 * @piece_len,
+      last_index: 1,
+      last_piece_length: @piece_len,
+      bitfield: Torrent.Bitfield.make(2),
+      download_dir: download_dir,
+      peer_status: :seed
+    }
+  end
+
+  defp start_downloads_supervisor(hash) do
+    name = {:via, Registry, {Registry, {hash, Torrent.Downloads}}}
+
+    case DynamicSupervisor.start_link(
+           name: name,
+           extra_arguments: [hash],
+           strategy: :one_for_one
+         ) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+    end
   end
 
   defp with_upload_stack(torrent, fun) do

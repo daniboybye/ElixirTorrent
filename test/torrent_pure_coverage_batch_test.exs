@@ -60,6 +60,7 @@ defmodule TorrentPureCoverageBatchTest do
     test "dec, dec_all, remove_peer, and reconcile_stale_statuses" do
       hash = :crypto.strong_rand_bytes(20)
       torrent = sample_torrent(hash, 3)
+
       bitfield =
         Bitfield.make(3)
         |> Bitfield.set(0, 1)
