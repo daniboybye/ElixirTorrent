@@ -25,5 +25,7 @@ defmodule Torrent.Swarm.Disconnect do
       {_id, pid, _type, _modules} when is_pid(pid) -> [pid]
       _ -> []
     end)
+  catch
+    :exit, {:noproc, _} -> []
   end
 end
