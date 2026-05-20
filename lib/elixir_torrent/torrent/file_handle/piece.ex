@@ -47,6 +47,7 @@ defmodule Torrent.FileHandle.Piece do
   # flushed synchronously to the io_device, and the struct is re-derivable from
   # FileHandle.context/1), so idle self-termination and rare crashes are both
   # handled by lazy restart on next access rather than a supervisor restart.
+  @spec child_spec([Torrent.index()]) :: Supervisor.child_spec()
   def child_spec(args) do
     %{
       id: __MODULE__,
@@ -65,6 +66,7 @@ defmodule Torrent.FileHandle.Piece do
     end
   end
 
+  @spec key(Torrent.hash(), Torrent.index()) :: {Torrent.index(), Torrent.hash()}
   def key(hash, index), do: {index, hash}
 
   @spec check?(Torrent.hash(), Torrent.index(), :download | :resume) :: boolean()
@@ -114,6 +116,7 @@ defmodule Torrent.FileHandle.Piece do
     end
   end
 
+  @spec init(t()) :: {:ok, t(), timeout()}
   def init(%__MODULE__{files: paths} = piece) do
     # `paths` from FileHandle.piece_struct/2 is [{path, length}]. Open raw fds
     # owned by this GenServer and replace `files` with [{fd, length}] so
@@ -122,11 +125,14 @@ defmodule Torrent.FileHandle.Piece do
     {:ok, %__MODULE__{piece | files: open_files(paths)}, @timeout_idle}
   end
 
+  @spec terminate(term(), t()) :: :ok
   def terminate(_reason, %__MODULE__{files: fds} = piece) do
     _ = flush_pending_writes(piece)
     close_files(fds)
   end
 
+  @spec handle_call(term(), GenServer.from(), t()) ::
+          {:reply, :ok | boolean() | {:ok, binary()} | :error, t(), timeout()}
   def handle_call(:flush, _, piece) do
     piece = flush_pending_writes(piece)
     {:reply, :ok, piece, @timeout_idle}
@@ -143,6 +149,7 @@ defmodule Torrent.FileHandle.Piece do
     {:reply, do_read(begin + piece.offset, length, piece.files), piece, @timeout_idle}
   end
 
+  @spec handle_cast({:write, Torrent.begin(), binary()}, t()) :: {:noreply, t(), timeout()}
   def handle_cast({:write, begin, block}, piece) do
     piece = buffer_write(piece, begin, block)
     piece = maybe_flush_writes(piece)
@@ -151,6 +158,7 @@ defmodule Torrent.FileHandle.Piece do
 
   # Idle: flush any coalesced blocks, then terminate. The receive-timeout only
   # fires with an empty mailbox, so no cast can race a partial buffer here.
+  @spec handle_info(:timeout, t()) :: {:stop, :normal, t()}
   def handle_info(:timeout, piece) do
     piece = flush_pending_writes(piece)
     {:stop, :normal, piece}

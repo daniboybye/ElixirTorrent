@@ -267,6 +267,7 @@ end
 defmodule SuperseedTest.SenderStub do
   use GenServer
 
+  @spec start_link(Peer.key(), pid()) :: GenServer.on_start()
   def start_link(key, test_pid) do
     GenServer.start_link(__MODULE__, test_pid,
       name: {:via, Registry, {Registry, {key, Peer.Sender}}}

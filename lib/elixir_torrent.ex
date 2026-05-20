@@ -51,6 +51,7 @@ defmodule ElixirTorrent do
   @type file_entry :: Torrent.Files.Entry.t()
 
   @doc "Starts the CLI loop used by the escript entrypoint."
+  @spec main([String.t()]) :: no_return()
   def main(_), do: loop()
 
   @doc """

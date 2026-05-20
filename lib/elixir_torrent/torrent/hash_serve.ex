@@ -13,6 +13,7 @@ defmodule Torrent.HashServe do
 
   @max_tasks 8
 
+  @spec child_spec(Torrent.hash()) :: Supervisor.child_spec()
   def child_spec(hash) do
     %{
       start:

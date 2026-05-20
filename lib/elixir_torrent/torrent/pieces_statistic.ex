@@ -168,6 +168,7 @@ defmodule Torrent.PiecesStatistic do
   end
 
   # nil when the torrent's table is missing (magnet handoff window, shutdown).
+  @spec get_status(Torrent.hash(), Torrent.index()) :: status() | nil
   def get_status(hash, index) do
     case table_ref_safe(hash) do
       nil -> nil
@@ -177,8 +178,10 @@ defmodule Torrent.PiecesStatistic do
     ArgumentError -> nil
   end
 
+  @spec have?(Torrent.hash(), Torrent.index()) :: boolean()
   def have?(hash, index), do: get_status(hash, index) === :complete
 
+  @spec i(Torrent.hash()) :: :ok
   def i(hash), do: :ets.i(table_ref(hash))
 
   # def pieces_for_check(hash) do

@@ -75,6 +75,7 @@ defmodule Magnet.UtMetadata do
   end
 
   @doc false
+  @spec extension_name() :: String.t()
   def extension_name, do: Extension.name()
 
   @doc """

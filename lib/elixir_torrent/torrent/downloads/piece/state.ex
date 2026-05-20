@@ -58,6 +58,7 @@ defmodule Torrent.Downloads.Piece.State do
 
   @compile {:inline, subpieces: 2}
 
+  @spec make({Torrent.hash(), Torrent.index()}) :: t()
   def make({hash, index}) do
     %__MODULE__{
       index: index,
@@ -66,6 +67,7 @@ defmodule Torrent.Downloads.Piece.State do
     }
   end
 
+  @spec download(t(), Piece.callback(), Piece.callback()) :: t()
   def download(%__MODULE__{waiting: [], requests: []} = state, _, _) do
     state.requests_are_dealt.()
     state
@@ -127,7 +129,7 @@ defmodule Torrent.Downloads.Piece.State do
     Enum.count(state.requests, &(&1.subpiece == subpiece))
   end
 
-  # @spec request(t(), Peer.id(), Piece.callback()) :: t()
+  @spec request(t(), Peer.id(), Piece.callback_peer_request()) :: t()
   def request(%__MODULE__{waiting: []} = state, _, _), do: state
 
   def request(state, peer_id, callback) do

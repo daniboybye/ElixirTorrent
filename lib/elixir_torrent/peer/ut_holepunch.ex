@@ -30,14 +30,19 @@ defmodule Peer.UtHolepunch do
   @inbound_rate_window_ms 10_000
 
   @doc false
+  @spec err_none() :: 0
   def err_none, do: @err_none
   @doc false
+  @spec err_no_such_peer() :: 1
   def err_no_such_peer, do: @err_no_such_peer
   @doc false
+  @spec err_not_connected() :: 2
   def err_not_connected, do: @err_not_connected
   @doc false
+  @spec err_no_support() :: 3
   def err_no_support, do: @err_no_support
   @doc false
+  @spec err_no_self() :: 4
   def err_no_self, do: @err_no_self
 
   @doc false

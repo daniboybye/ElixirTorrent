@@ -236,10 +236,14 @@ defmodule TorrentControllerParallelTest.MockPeer do
   @moduledoc false
   use GenServer
 
+  @type t :: %{controller: pid()}
+
+  @spec start_link(Torrent.hash(), Peer.id(), keyword()) :: GenServer.on_start()
   def start_link(hash, id, opts) do
     GenServer.start_link(__MODULE__, {hash, id, opts})
   end
 
+  @spec init({Torrent.hash(), Peer.id(), keyword()}) :: {:ok, t()}
   def init({hash, id, opts}) do
     key = Peer.make_key(hash, id)
     Registry.register(Registry, {key, Peer}, nil)
@@ -265,5 +269,7 @@ defmodule TorrentControllerParallelTest.MockPeer do
     {:ok, %{controller: ctrl}}
   end
 
+  @spec handle_info({:DOWN, reference(), :process, pid(), term()}, t()) ::
+          {:stop, :normal, t()}
   def handle_info({:DOWN, _, :process, _ctrl, _}, state), do: {:stop, :normal, state}
 end

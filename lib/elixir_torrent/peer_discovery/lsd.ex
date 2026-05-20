@@ -38,6 +38,7 @@ defmodule PeerDiscovery.LSD do
   # (each Infohash line is ~50 bytes; 20 hashes ≈ 1 KB payload).
   @max_hashes_per_message 20
 
+  @spec start_link(term()) :: GenServer.on_start()
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, [], name: __MODULE__)
   end

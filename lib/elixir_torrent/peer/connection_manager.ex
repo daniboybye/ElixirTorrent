@@ -38,6 +38,7 @@ defmodule Peer.ConnectionManager do
   # than @snub_grace_ms so we drop stallers before the wall-clock zero-byte path.
   @idle_unchoked_snub_ms 30_000
 
+  @spec start_link(Torrent.hash()) :: GenServer.on_start()
   def start_link(hash) do
     GenServer.start_link(__MODULE__, hash, name: via(hash))
   end

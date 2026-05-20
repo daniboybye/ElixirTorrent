@@ -13,7 +13,8 @@ defmodule Peer.Controller do
   alias Peer.Sender
   alias Torrent.{Downloads, Uploader}
 
-  # @spec start_link({Peer.id(), Torrent.hash(), port(), Peer.reserved()}) :: GenServer.on_start()
+  @spec start_link([Torrent.hash() | Peer.id() | Peer.Transport.socket() | Peer.reserved()]) ::
+          GenServer.on_start()
   def start_link([hash, id, socket, reserved]) do
     GenServer.start_link(
       __MODULE__,
@@ -307,6 +308,8 @@ defmodule Peer.Controller do
     :exit, _ -> :ok
   end
 
+  @spec init([Torrent.hash() | Peer.id() | Peer.Transport.socket() | Peer.reserved()]) ::
+          {:ok, State.t()}
   def init([hash, id, socket, reserved]) do
     # The peer supervisor is one_for_all: a Sender exit tears this process down
     # with an exit signal, which skips terminate/2 unless exits are trapped —
@@ -336,6 +339,7 @@ defmodule Peer.Controller do
      }}
   end
 
+  @spec terminate(term(), State.t()) :: :ok
   def terminate({:shutdown, :protocol_error}, state) do
     State.notify_hash_request_disconnect(state, :protocol_error)
     Torrent.Superseed.release(state.hash, state.id)
@@ -421,6 +425,8 @@ defmodule Peer.Controller do
     _, _ -> {:ok, state}
   end
 
+  @spec handle_info(term(), State.t()) ::
+          {:noreply, State.t()} | {:stop, term(), State.t()}
   def handle_info(:pex_initial_snapshot, %State{} = state) do
     if state.pex_outbound.initial_pending? and not state.pex_outbound.initial_sent? do
       key = State.key(state)
@@ -459,6 +465,10 @@ defmodule Peer.Controller do
     end
   end
 
+  @spec handle_call(term(), GenServer.from(), State.t()) ::
+          {:reply, term(), State.t()}
+          | {:stop, term(), State.t()}
+          | {:stop, term(), term(), State.t()}
   def handle_call({:complete_upload, index, begin, length, block}, _from, state) do
     {reply, state} = State.complete_upload(state, index, begin, length, block)
     {:reply, reply, state}
@@ -751,6 +761,8 @@ defmodule Peer.Controller do
     end
   end
 
+  @spec handle_cast(term(), State.t()) ::
+          {:noreply, State.t()} | {:stop, term(), State.t()}
   def handle_cast({:handle_extended, [0, payload]}, %State{} = state) do
     state =
       state

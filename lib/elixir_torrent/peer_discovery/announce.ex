@@ -90,13 +90,16 @@ defmodule PeerDiscovery.Announce do
   # doesn't unblock announcing a known-dead tracker.
   @scrape_ttl_ms 20 * 60 * 1_000
 
+  @spec start_link([pid() | Torrent.t()]) :: GenServer.on_start()
   def start_link([_pid, torrent] = args) do
     GenServer.start_link(__MODULE__, args, name: via(torrent.hash))
   end
 
   @doc false
+  @spec name(Torrent.hash()) :: GenServer.name()
   def name(hash), do: via(hash)
 
+  @spec get(Torrent.hash()) :: [Peer.t()]
   def get(hash),
     do: GenServer.call(via(hash), :get)
 
@@ -116,6 +119,7 @@ defmodule PeerDiscovery.Announce do
   @spec peer_list(%__MODULE__{}) :: [Peer.t()]
   def peer_list(%__MODULE__{} = state), do: merged_peers(state)
 
+  @spec connecting_to_peers(Torrent.hash()) :: :ok
   def connecting_to_peers(hash) do
     _ignored = PeerDiscovery.ensure_announce(hash)
     GenServer.cast(via(hash), :connecting_to_peers)
@@ -271,6 +275,7 @@ defmodule PeerDiscovery.Announce do
     :exit, _ -> :ok
   end
 
+  @spec init([pid() | Torrent.t() | keyword()]) :: {:ok, %__MODULE__{}}
   def init([pid, torrent]), do: init([pid, torrent, []])
 
   def init([pid, torrent, opts]) do
@@ -361,6 +366,8 @@ defmodule PeerDiscovery.Announce do
     %{state | last_dht_lookup_ms: now_ms}
   end
 
+  @spec handle_call(term(), GenServer.from(), %__MODULE__{}) ::
+          {:reply, [Peer.t()] | boolean() | :ok, %__MODULE__{}}
   def handle_call(:get, _, state),
     do: {:reply, merged_peers(state), state}
 
@@ -378,6 +385,7 @@ defmodule PeerDiscovery.Announce do
     {:reply, :ok, state}
   end
 
+  @spec handle_cast(term(), %__MODULE__{}) :: {:noreply, %__MODULE__{}}
   def handle_cast(:connecting_to_peers, state) do
     peer_list = merged_peers(state)
 
@@ -413,6 +421,8 @@ defmodule PeerDiscovery.Announce do
     {:noreply, state}
   end
 
+  @spec handle_info(term(), %__MODULE__{}) ::
+          {:noreply, %__MODULE__{}} | {:stop, :normal, %__MODULE__{}}
   def handle_info(:peer_refresh_tick, state) do
     send_after(self(), :peer_refresh_tick, @peer_refresh_tick_ms)
     {:noreply, maybe_refresh_under_target(state)}

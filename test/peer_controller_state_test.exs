@@ -1638,12 +1638,16 @@ defmodule PeerControllerStateTest.UploadHost do
 
   alias Peer.Controller.State
 
+  @spec start_link(State.t()) :: GenServer.on_start()
   def start_link(state), do: GenServer.start_link(__MODULE__, state)
 
+  @spec handle_request(pid(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
+          State.t() | {:error, :protocol_error, State.t()}
   def handle_request(pid, index, begin, length) do
     GenServer.call(pid, {:run, :handle_request, [index, begin, length]}, 10_000)
   end
 
+  @spec get_state(pid()) :: State.t()
   def get_state(pid), do: GenServer.call(pid, :get_state)
 
   @impl GenServer
@@ -1679,6 +1683,7 @@ defmodule PeerControllerStateTest.DummyPeer do
   @moduledoc false
   use GenServer
 
+  @spec start_link(GenServer.name()) :: GenServer.on_start()
   def start_link(name), do: GenServer.start_link(__MODULE__, nil, name: name)
 
   @impl GenServer

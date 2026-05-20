@@ -33,6 +33,7 @@ defmodule Peer do
   @id_length 20
   @id_key {__MODULE__, :id}
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(args) do
     %{
       id: __MODULE__,
@@ -42,6 +43,8 @@ defmodule Peer do
     }
   end
 
+  @spec start_link(Torrent.hash(), id(), Peer.Transport.socket(), reserved()) ::
+          Supervisor.on_start()
   def start_link(hash, id, socket, reserved) do
     # Both children are temporary + significant: when either exits (tcp_closed,
     # graceful disconnect, protocol_error), auto_shutdown tears the peer tree

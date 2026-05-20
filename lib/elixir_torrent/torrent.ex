@@ -109,12 +109,16 @@ defmodule Torrent do
 
   @compile {:inline, empty: 0, started: 0, completed: 0, stopped: 0, event_to_string: 1}
 
+  @spec started() :: 2
   def started, do: @started
 
+  @spec empty() :: 0
   def empty, do: @empty
 
+  @spec completed() :: 1
   def completed, do: @completed
 
+  @spec stopped() :: 3
   def stopped, do: @stopped
 
   @spec event_to_string(0..3) :: String.t() | nil
@@ -126,6 +130,7 @@ defmodule Torrent do
 
   def event_to_string(@stopped), do: "stopped"
 
+  @spec hex_encoded_hash(Torrent.hash()) :: String.t()
   def hex_encoded_hash(hash) do
     hash
     |> :crypto.bytes_to_integer()
@@ -162,12 +167,14 @@ defmodule Torrent do
 
   defdelegate stop(pid), to: Supervisor
 
+  @spec init({Path.t(), keyword()}) :: {:ok, {map(), [any()]}}
   def init({path, opts}) when is_binary(path) and is_list(opts) do
     download_dir = normalize_download_dir(Keyword.get(opts, :download_dir))
     %Torrent{hash: hash} = torrent = parse_file!(path) |> Map.put(:download_dir, download_dir)
     start_torrent(torrent, hash, opts)
   end
 
+  @spec init(Path.t()) :: {:ok, {map(), [any()]}}
   def init(path) when is_binary(path), do: init({path, []})
 
   defp start_torrent(%Torrent{hash: hash} = torrent, hash, opts) do

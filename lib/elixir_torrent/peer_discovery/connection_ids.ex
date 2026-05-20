@@ -39,14 +39,20 @@ defmodule PeerDiscovery.ConnectionIds do
     GenServer.cast(__MODULE__, {:invalidate, socket, ip, port})
   end
 
+  @spec init(term()) :: {:ok, State.t()}
   def init(_), do: {:ok, %State{}}
 
+  @spec handle_cast({:invalidate, port(), :inet.ip_address(), :inet.port_number()}, State.t()) ::
+          {:noreply, State.t()}
   def handle_cast({:invalidate, socket, ip, port}, %State{} = state) do
     {:ok, local_port} = :inet.port(socket)
     key = {ip, port, local_port}
     {:noreply, update_in(state, [Access.key!(:ids)], &Map.delete(&1, key))}
   end
 
+  @spec handle_call(term(), GenServer.from(), State.t()) ::
+          {:reply, {:ok, Tracker.connection_id()} | Tracker.Error.t() | :error, State.t()}
+          | {:noreply, State.t()}
   def handle_call([socket, ip, port], from, %State{} = state) do
     # Some UDP trackers appear to bind connection_id validity to the client's source port.
     # We open new UDP sockets over time, so cache connection_ids per (tracker endpoint, local port).
@@ -80,6 +86,7 @@ defmodule PeerDiscovery.ConnectionIds do
     end
   end
 
+  @spec handle_info(term(), State.t()) :: {:noreply, State.t()}
   def handle_info({:timeout, key}, state),
     do: {:noreply, Map.update!(state, :ids, &Map.delete(&1, key))}
 

@@ -1,6 +1,7 @@
 defmodule PeerDiscoveryDualSwarmDHTStub do
   @moduledoc false
 
+  @spec get_peers(Torrent.hash()) :: {:ok, [Peer.t()]} | {:error, :timeout}
   def get_peers(hash) do
     test_pid = Process.whereis(__MODULE__)
     send(test_pid, {:dual_swarm_get_peers, self(), hash})
@@ -12,6 +13,7 @@ defmodule PeerDiscoveryDualSwarmDHTStub do
     end
   end
 
+  @spec announce(Torrent.hash(), :inet.port_number()) :: :ok
   def announce(hash, _port) do
     send(Process.whereis(__MODULE__), {:dual_swarm_announce, hash})
     :ok
@@ -1229,6 +1231,7 @@ end
 defmodule PeerDiscoveryAnnounceTest.SwarmStub do
   @moduledoc false
 
+  @spec start_link(term()) :: {:ok, pid()}
   def start_link(_arg) do
     Task.start_link(fn ->
       release = make_ref()

@@ -64,10 +64,12 @@ defmodule Peer.DialStats do
   @decay_num 7
   @decay_den 8
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     %{id: __MODULE__, start: {__MODULE__, :start_link, [[]]}}
   end
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end

@@ -2,12 +2,14 @@ defmodule PeerWireTest.ControllerCapture do
   @moduledoc false
   use GenServer
 
+  @spec start_link(Peer.key(), pid()) :: GenServer.on_start()
   def start_link(key, test_pid) do
     GenServer.start_link(__MODULE__, {key, test_pid},
       name: {:via, Registry, {Registry, {key, Peer.Controller}}}
     )
   end
 
+  @spec whereis(Peer.key()) :: pid() | nil
   def whereis(key), do: GenServer.whereis({:via, Registry, {Registry, {key, Peer.Controller}}})
 
   @impl GenServer

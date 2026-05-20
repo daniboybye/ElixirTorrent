@@ -492,6 +492,7 @@ defmodule PeerRequestPipelineTest.DummyPeer do
   @moduledoc false
   use GenServer
 
+  @spec start_link(GenServer.name()) :: GenServer.on_start()
   def start_link(name), do: GenServer.start_link(__MODULE__, nil, name: name)
 
   @impl GenServer

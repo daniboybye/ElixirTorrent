@@ -59,6 +59,7 @@ defmodule Peer.DialBackoff do
   # records :churn when registration happened, so DialBackoff must not double-block.
   @non_reachability_reasons [:already_connected, :not_connectable, :socket_handoff_failed]
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     %{
       id: __MODULE__,
@@ -66,6 +67,7 @@ defmodule Peer.DialBackoff do
     }
   end
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end

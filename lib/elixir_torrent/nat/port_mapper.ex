@@ -19,6 +19,7 @@ defmodule NAT.PortMapper do
   # and stops the pointless work.
   @method_max_failures 5
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     %{
       id: __MODULE__,
@@ -26,6 +27,7 @@ defmodule NAT.PortMapper do
     }
   end
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end

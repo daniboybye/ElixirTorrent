@@ -29,12 +29,15 @@ defmodule Peer.LTEP.Extension do
   @optional_callbacks outbound_fields: 0
 
   @doc false
+  @spec name(module()) :: String.t()
   def name(module) when is_atom(module), do: module.name()
 
   @doc false
+  @spec local_id(module()) :: pos_integer()
   def local_id(module) when is_atom(module), do: module.local_id()
 
   @doc false
+  @spec outbound_fields(module()) :: map()
   def outbound_fields(module) when is_atom(module) do
     if function_exported?(module, :outbound_fields, 0) do
       module.outbound_fields()

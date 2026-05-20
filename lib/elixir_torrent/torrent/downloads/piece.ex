@@ -12,11 +12,13 @@ defmodule Torrent.Downloads.Piece do
   require Logger
 
   @type mode :: :endgame | nil
+  @type callback :: (-> term())
   @type callback_peer_request :: (Torrent.index(), Torrent.begin(), Torrent.length() -> any())
 
   @max_length trunc(:math.pow(2, 14))
   @compile {:inline, max_length: 0}
 
+  @spec child_spec([Torrent.index()]) :: Supervisor.child_spec()
   def child_spec(args) do
     %{
       id: __MODULE__,
@@ -30,8 +32,10 @@ defmodule Torrent.Downloads.Piece do
     GenServer.start_link(__MODULE__, {hash, index}, name: key(index, hash))
   end
 
+  @spec max_length() :: pos_integer()
   def max_length, do: @max_length
 
+  @spec download(pid(), callback(), callback()) :: :ok
   def download(pid, downloaded, requests_are_dealt),
     do: GenServer.cast(pid, {:download, [downloaded, requests_are_dealt]})
 
@@ -107,8 +111,13 @@ defmodule Torrent.Downloads.Piece do
     end
   end
 
+  @spec init({Torrent.hash(), Torrent.index()}) :: {:ok, State.t()}
   def init(arg), do: {:ok, State.make(arg)}
 
+  @spec handle_cast(term(), State.t()) ::
+          {:noreply, State.t()}
+          | {:stop, :normal, State.t()}
+          | {:stop, {:shutdown, :idle_orphan | :timeout | :wrong_subpiece}, State.t()}
   def handle_cast({:abort_if_orphan, force?}, state) do
     cond do
       state.requests != [] ->
@@ -131,6 +140,8 @@ defmodule Torrent.Downloads.Piece do
   # requests_are_dealt closure so the controller frees this active-piece slot
   # and picks another. Without this wake edge, a stall silently drains
   # @max_parallel_pieces one by one until the pump has zero live pieces.
+  @spec handle_info(term(), State.t()) ::
+          {:noreply, State.t()} | {:stop, {:shutdown, :idle_orphan | :timeout}, State.t()}
   def handle_info(:timeout, state) do
     abort_orphan_worker(state, :timeout)
   end
@@ -158,6 +169,8 @@ defmodule Torrent.Downloads.Piece do
   # to decide whether a peer pinned to this piece can be re-pinned. True while
   # any subpiece is still unclaimed (waiting) OR in-flight (requests) — in
   # endgame, waiting can be empty while requests hold every block on choked peers.
+  @spec handle_call(term(), GenServer.from(), State.t()) ::
+          {:reply, boolean() | :ok | :noop, State.t()}
   def handle_call(:has_waiting?, _from, state) do
     {:reply, state.waiting != [] or state.requests != [], state}
   end
@@ -178,6 +191,7 @@ defmodule Torrent.Downloads.Piece do
   # termination means the piece completed successfully; requests_are_dealt was
   # already fired earlier via State.do_request when the last subpiece was
   # handed out, so we skip that path.
+  @spec terminate(term(), State.t()) :: :ok
   def terminate(:normal, _state), do: :ok
 
   def terminate(_reason, state) do

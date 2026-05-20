@@ -15,6 +15,7 @@ defmodule Magnet.Fetcher.Session do
           status: String.t()
         }
 
+  @spec start_link({Magnet.t(), pid(), reference()}) :: GenServer.on_start()
   def start_link({%Magnet{} = magnet, caller, ref}) when is_pid(caller) and is_reference(ref) do
     GenServer.start_link(__MODULE__, {magnet, caller, ref})
   end

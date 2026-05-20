@@ -157,6 +157,7 @@ end
 defmodule HandshakesTest.SwarmStub do
   @moduledoc false
 
+  @spec start_link(term()) :: {:ok, pid()}
   def start_link(_arg) do
     Task.start_link(fn ->
       release = make_ref()

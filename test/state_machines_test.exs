@@ -43,6 +43,7 @@ defmodule Peer.DialBackoffStateM do
     }
   end
 
+  @spec command_gen(model()) :: PropCheck.BasicTypes.type()
   def command_gen(%{hash: hash, endpoints: endpoints}) when endpoints != [] do
     pick = endpoint_pick(endpoints)
 
@@ -54,6 +55,7 @@ defmodule Peer.DialBackoffStateM do
     ])
   end
 
+  @spec command_gen(model()) :: PropCheck.BasicTypes.type()
   def command_gen(%{hash: hash}) do
     {:record, [hash, :timeout, {127, 0, 0, 1}]}
   end
@@ -86,15 +88,18 @@ defmodule Peer.DialBackoffStateM do
   end
 
   defcommand :record do
-    def impl(hash, reason, {ip, port}) do
+    @spec record(Torrent.hash(), atom(), endpoint()) :: :ok
+    def record(hash, reason, {ip, port}) do
       :ok = DialBackoff.record(hash, ip, port, reason)
       _ = :sys.get_state(DialBackoff)
       :ok
     end
 
-    def next(state, args, result), do: apply_record(state, args, result)
+    @spec record_next(model(), [Torrent.hash() | atom() | endpoint()], :ok) :: model()
+    def record_next(state, args, result), do: apply_record(state, args, result)
 
-    def post(state, args, :ok) do
+    @spec record_post(model(), [Torrent.hash() | atom() | endpoint()], :ok) :: boolean()
+    def record_post(state, args, :ok) do
       expected = apply_record(state, args, :ok)
 
       case args do
@@ -128,40 +133,51 @@ defmodule Peer.DialBackoffStateM do
   end
 
   defcommand :mark_productive do
-    def impl(hash, {ip, port}) do
+    @spec mark_productive(Torrent.hash(), endpoint()) :: :ok
+    def mark_productive(hash, {ip, port}) do
       :ok = DialBackoff.mark_productive(hash, ip, port)
       _ = :sys.get_state(DialBackoff)
       :ok
     end
 
-    def next(state, [_hash, ep], _result) do
+    @spec mark_productive_next(model(), [Torrent.hash() | endpoint()], :ok) :: model()
+    def mark_productive_next(state, [_hash, ep], _result) do
       state
       |> Map.update!(:productive, &MapSet.put(&1, ep))
       |> Map.update!(:blocks, &Map.delete(&1, ep))
     end
 
-    def post(state, [_hash, {ip, port}], :ok) do
+    @spec mark_productive_post(model(), [Torrent.hash() | endpoint()], :ok) :: boolean()
+    def mark_productive_post(state, [_hash, {ip, port}], :ok) do
       DialBackoff.productive?(state.hash, ip, port) and
         not DialBackoff.blocked?(state.hash, ip, port)
     end
   end
 
   defcommand :blocked do
-    def impl(hash, {ip, port}) do
+    @spec blocked(Torrent.hash(), endpoint()) :: boolean()
+    def blocked(hash, {ip, port}) do
       DialBackoff.blocked?(hash, ip, port)
     end
 
-    def post(state, [_hash, {ip, port}], result) do
+    @spec blocked_post(model(), [Torrent.hash() | endpoint()], boolean()) :: boolean()
+    def blocked_post(state, [_hash, {ip, port}], result) do
       is_boolean(result) and result == Map.has_key?(state.blocks, {ip, port})
     end
   end
 
   defcommand :filter do
-    def impl(hash, min_count, peers) do
+    @spec filter(Torrent.hash(), non_neg_integer(), [Peer.t()]) :: [Peer.t()]
+    def filter(hash, min_count, peers) do
       DialBackoff.filter(peers, hash, min_count)
     end
 
-    def post(state, [_hash, min_count, peers], result) do
+    @spec filter_post(
+            model(),
+            [Torrent.hash() | non_neg_integer() | [Peer.t()]],
+            [Peer.t()]
+          ) :: boolean()
+    def filter_post(state, [_hash, min_count, peers], result) do
       if is_list(result) do
         expected = model_filter(state, peers, min_count)
         normalize_peers(result) == normalize_peers(expected)
@@ -229,6 +245,7 @@ defmodule Peer.ConnectionManager.QueueStateM do
 
   @agent_key :queue_statem_sut_agent
 
+  @type endpoint :: {:inet.ip_address(), :inet.port_number()}
   @type model :: %{
           hash: Torrent.hash(),
           queue: DialQueue.t(),
@@ -266,6 +283,7 @@ defmodule Peer.ConnectionManager.QueueStateM do
       raise ArgumentError, "QueueStateM SUT agent not registered in test process"
   end
 
+  @spec command_gen(model()) :: PropCheck.BasicTypes.type()
   def command_gen(%{hash: hash, pex_sources: sources})
       when is_list(sources) and sources != [] do
     frequency([
@@ -276,6 +294,7 @@ defmodule Peer.ConnectionManager.QueueStateM do
     ])
   end
 
+  @spec command_gen(model()) :: PropCheck.BasicTypes.type()
   def command_gen(%{hash: hash}) do
     {:offer_discovery, [hash, []]}
   end
@@ -305,23 +324,27 @@ defmodule Peer.ConnectionManager.QueueStateM do
   end
 
   defcommand :offer_discovery do
-    def impl(hash, peers) do
+    @spec offer_discovery(Torrent.hash(), [Peer.t()]) :: :ok
+    def offer_discovery(hash, peers) do
       Agent.update(sut_agent!(), fn q -> DialQueue.offer(q, peers, :discovery, hash: hash) end)
       :ok
     end
 
-    def next(state, [_hash, peers], _result) do
+    @spec offer_discovery_next(model(), [Torrent.hash() | [Peer.t()]], :ok) :: model()
+    def offer_discovery_next(state, [_hash, peers], _result) do
       %{state | queue: DialQueue.offer(state.queue, peers, :discovery, hash: state.hash)}
     end
 
-    def post(state, [_hash, peers], _result) do
+    @spec offer_discovery_post(model(), [Torrent.hash() | [Peer.t()]], :ok) :: boolean()
+    def offer_discovery_post(state, [_hash, peers], _result) do
       expected = DialQueue.offer(state.queue, peers, :discovery, hash: state.hash)
       Agent.get(sut_agent!(), & &1) == expected
     end
   end
 
   defcommand :offer_pex do
-    def impl(hash, peers, pex_src) do
+    @spec offer_pex(Torrent.hash(), [Peer.t()], binary()) :: :ok
+    def offer_pex(hash, peers, pex_src) do
       Agent.update(sut_agent!(), fn q ->
         DialQueue.offer(q, peers, {:pex, pex_src}, hash: hash)
       end)
@@ -329,14 +352,16 @@ defmodule Peer.ConnectionManager.QueueStateM do
       :ok
     end
 
-    def next(state, [_hash, peers, pex_src], _result) do
+    @spec offer_pex_next(model(), [Torrent.hash() | [Peer.t()] | binary()], :ok) :: model()
+    def offer_pex_next(state, [_hash, peers, pex_src], _result) do
       %{
         state
         | queue: DialQueue.offer(state.queue, peers, {:pex, pex_src}, hash: state.hash)
       }
     end
 
-    def post(state, [_hash, peers, pex_src], _result) do
+    @spec offer_pex_post(model(), [Torrent.hash() | [Peer.t()] | binary()], :ok) :: boolean()
+    def offer_pex_post(state, [_hash, peers, pex_src], _result) do
       expected =
         DialQueue.offer(state.queue, peers, {:pex, pex_src}, hash: state.hash)
 
@@ -345,36 +370,43 @@ defmodule Peer.ConnectionManager.QueueStateM do
   end
 
   defcommand :revoke_pex do
-    def impl(endpoints, pex_src) do
+    @spec revoke_pex([Peer.t() | endpoint()], binary()) :: :ok
+    def revoke_pex(endpoints, pex_src) do
       Agent.update(sut_agent!(), fn q -> DialQueue.revoke_pex(q, pex_src, endpoints) end)
       :ok
     end
 
-    def pre(state, [endpoints, pex_src]) do
+    @spec revoke_pex_pre(model(), [[Peer.t() | endpoint()] | binary()]) :: boolean()
+    def revoke_pex_pre(state, [endpoints, pex_src]) do
       Enum.any?(endpoints, fn ep ->
         key = if is_tuple(ep), do: ep, else: {ep.ip, ep.port}
         Map.has_key?(state.queue, key)
       end) and pex_src in state.pex_sources
     end
 
-    def next(state, [endpoints, pex_src], _result) do
+    @spec revoke_pex_next(model(), [[Peer.t() | endpoint()] | binary()], :ok) :: model()
+    def revoke_pex_next(state, [endpoints, pex_src], _result) do
       %{state | queue: DialQueue.revoke_pex(state.queue, pex_src, endpoints)}
     end
 
-    def post(state, [endpoints, pex_src], _result) do
+    @spec revoke_pex_post(model(), [[Peer.t() | endpoint()] | binary()], :ok) :: boolean()
+    def revoke_pex_post(state, [endpoints, pex_src], _result) do
       expected = DialQueue.revoke_pex(state.queue, pex_src, endpoints)
       Agent.get(sut_agent!(), & &1) == expected
     end
   end
 
   defcommand :peers do
-    def impl(_hash) do
+    @spec peers(Torrent.hash()) :: [Peer.t()]
+    def peers(_hash) do
       Agent.get(sut_agent!(), &DialQueue.peers/1)
     end
 
-    def next(state, _args, _result), do: state
+    @spec peers_next(model(), [Torrent.hash()], [Peer.t()]) :: model()
+    def peers_next(state, _args, _result), do: state
 
-    def post(%{queue: model_q}, [_hash], result) do
+    @spec peers_post(model(), [Torrent.hash()], [Peer.t()]) :: boolean()
+    def peers_post(%{queue: model_q}, [_hash], result) do
       is_list(result) and normalize_peers(result) == normalize_peers(DialQueue.peers(model_q))
     end
   end

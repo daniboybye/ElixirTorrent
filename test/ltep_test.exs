@@ -9,13 +9,25 @@ defmodule Peer.LTEPTest do
 
   defmodule DuplicateIdA do
     @behaviour Peer.LTEP.Extension
+
+    @impl Peer.LTEP.Extension
+    @spec name() :: String.t()
     def name, do: "test_a"
+
+    @impl Peer.LTEP.Extension
+    @spec local_id() :: pos_integer()
     def local_id, do: 42
   end
 
   defmodule DuplicateIdB do
     @behaviour Peer.LTEP.Extension
+
+    @impl Peer.LTEP.Extension
+    @spec name() :: String.t()
     def name, do: "test_b"
+
+    @impl Peer.LTEP.Extension
+    @spec local_id() :: pos_integer()
     def local_id, do: 42
   end
 

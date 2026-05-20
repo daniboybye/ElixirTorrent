@@ -41,10 +41,13 @@ defmodule Peer.MSE do
   def vc, do: @vc
 
   @doc false
+  @spec crypto_plaintext() :: 1
   def crypto_plaintext, do: @crypto_plaintext
   @doc false
+  @spec crypto_rc4() :: 2
   def crypto_rc4, do: @crypto_rc4
   @doc false
+  @spec key_len() :: 96
   def key_len, do: @key_len
 
   @doc """

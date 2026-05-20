@@ -597,6 +597,7 @@ defmodule HandshakesCoverageBatchTest.TorrentHashStub do
   @moduledoc false
   use GenServer
 
+  @spec child_spec(Torrent.hash()) :: Supervisor.child_spec()
   def child_spec(hash) do
     %{
       id: {__MODULE__, hash},
@@ -605,8 +606,10 @@ defmodule HandshakesCoverageBatchTest.TorrentHashStub do
     }
   end
 
+  @spec start_link(Torrent.hash()) :: GenServer.on_start()
   def start_link(hash), do: GenServer.start_link(__MODULE__, hash)
 
+  @spec init(Torrent.hash()) :: {:ok, Torrent.hash()}
   def init(hash) do
     Registry.register(Registry, self(), hash)
     {:ok, hash}
@@ -616,6 +619,7 @@ end
 defmodule HandshakesCoverageBatchTest.DummyWorker do
   @moduledoc false
 
+  @spec start_link(term()) :: {:ok, pid()}
   def start_link(_swarm_hash) do
     Task.start_link(fn ->
       release = make_ref()

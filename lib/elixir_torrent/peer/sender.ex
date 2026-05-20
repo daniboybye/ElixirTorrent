@@ -80,6 +80,7 @@ defmodule Peer.Sender do
           frame_stall_ref: reference() | nil
         }
 
+  @spec start_link([Torrent.hash() | Peer.id() | socket()]) :: GenServer.on_start()
   def start_link([hash, id, socket]) do
     key = Peer.make_key(hash, id)
     state = %__MODULE__{socket: socket, buffer: <<>>, key: key, active: false}
@@ -195,8 +196,13 @@ defmodule Peer.Sender do
     :exit, _ -> {:error, :noproc}
   end
 
+  @spec init(t()) :: {:ok, t(), timeout()}
   def init(state), do: {:ok, state, @timeout}
 
+  @spec handle_call(term(), GenServer.from(), t()) ::
+          {:reply, term(), t()}
+          | {:reply, term(), t(), timeout()}
+          | {:stop, term(), t()}
   def handle_call(:activate, _, %__MODULE__{socket: socket, active: false} = state) do
     case Peer.Transport.setopts(socket, active: true) do
       :ok ->
@@ -286,6 +292,8 @@ defmodule Peer.Sender do
     :send_failed -> {:stop, :normal, state}
   end
 
+  @spec handle_cast(term(), t()) ::
+          {:noreply, t()} | {:noreply, t(), timeout()} | {:stop, term(), t()}
   def handle_cast(:choke, state), do: do_send(state, @choke_id)
 
   def handle_cast(:unchoke, state), do: do_send(state, @unchoke_id)
@@ -338,6 +346,8 @@ defmodule Peer.Sender do
   def handle_cast({:hash_reject, req}, state),
     do: do_send(state, [@hash_reject_id, Peer.HashWire.encode_reject(req)])
 
+  @spec handle_info(term(), t()) ::
+          {:noreply, t()} | {:noreply, t(), timeout()} | {:stop, term(), t()}
   def handle_info(:drain_buffered, state), do: drain_inbound(state)
 
   # MSE: active-mode data is tagged with the inner (raw) socket and is ciphertext;
@@ -413,6 +423,7 @@ defmodule Peer.Sender do
 
   def handle_info({:frame_stall, _stale_ref}, state), do: {:noreply, state, @timeout}
 
+  @spec terminate(term(), t()) :: :ok
   def terminate(reason, %__MODULE__{key: key}) do
     case reason do
       :normal ->

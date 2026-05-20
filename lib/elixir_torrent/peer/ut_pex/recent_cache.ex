@@ -13,6 +13,7 @@ defmodule Peer.UtPex.RecentCache do
 
   @type family :: :inet | :inet6
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     %{
       id: __MODULE__,
@@ -20,6 +21,7 @@ defmodule Peer.UtPex.RecentCache do
     }
   end
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end

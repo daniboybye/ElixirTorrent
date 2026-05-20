@@ -117,6 +117,7 @@
           {Credo.Check.Readability.Semicolons, []},
           {Credo.Check.Readability.SingleFunctionToBlockPipe, []},
           {Credo.Check.Readability.SpaceAfterCommas, []},
+          {Credo.Check.Readability.Specs, []},
           {Credo.Check.Readability.StrictModuleLayout, []},
           {Credo.Check.Readability.StringSigils, []},
           {Credo.Check.Readability.TrailingBlankLine, []},
@@ -253,15 +254,6 @@
           # check's fix is the same regardless of call shape, so it cannot
           # tell the improving cases from the hurting ones.
           {Credo.Check.Readability.SinglePipe, []},
-          # Unlike the other checks in this section, this one is NOT a case of
-          # fighting a better existing pattern — @spec is genuinely valuable
-          # here (Dialyzer already runs in mix quality) and this codebase uses
-          # @spec pervasively already. 311 findings across 65 files is real
-          # work though: a wrong @spec is worse than a missing one (misleading
-          # documentation, and it can hide the exact Dialyzer warnings it
-          # should surface). Needs a deliberate pass reading each function to
-          # infer correct types, not a bulk fill-in.
-          {Credo.Check.Readability.Specs, []},
           # 77 findings scattered across nearly every subsystem, many on the
           # dial/wire hot path (handshakes.ex up to 43, magnet/connection.ex 50,
           # tracker.ex up to 56, utp/connection.ex up to 42,

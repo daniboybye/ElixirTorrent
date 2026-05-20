@@ -12,6 +12,7 @@ defmodule Acceptor.Connection.Handler do
   @spec port() :: :inet.port_number()
   def port, do: GenServer.call(__MODULE__, :port)
 
+  @spec init(term()) :: {:ok, Peer.Transport.socket()} | {:stop, term()}
   def init(_) do
     with {:ok, socket} <- open_listen_socket({:stop, :no_free_port}) do
       {:ok, port} = :inet.port(socket)
@@ -26,6 +27,8 @@ defmodule Acceptor.Connection.Handler do
     end
   end
 
+  @spec handle_call(:port, GenServer.from(), Peer.Transport.socket()) ::
+          {:reply, :inet.port_number(), Peer.Transport.socket()}
   def handle_call(:port, _, socket) do
     {:ok, port} = :inet.port(socket)
     {:reply, port, socket}

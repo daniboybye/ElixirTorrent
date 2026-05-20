@@ -430,10 +430,14 @@ defmodule TorrentControllerSwarmCoverageBatchTest.MockPeer do
   @moduledoc false
   use GenServer
 
+  @type t :: %{controller: pid(), sender: pid()}
+
+  @spec start_link(Torrent.hash(), Peer.id()) :: GenServer.on_start()
   def start_link(hash, id) do
     GenServer.start_link(__MODULE__, {hash, id})
   end
 
+  @spec init({Torrent.hash(), Peer.id()}) :: {:ok, t()}
   def init({hash, id}) do
     key = Peer.make_key(hash, id)
     Registry.register(Registry, {key, Peer}, nil)
@@ -453,5 +457,7 @@ defmodule TorrentControllerSwarmCoverageBatchTest.MockPeer do
     {:ok, %{controller: ctrl, sender: sender}}
   end
 
+  @spec handle_info({:DOWN, reference(), :process, pid(), term()}, t()) ::
+          {:stop, :normal, t()}
   def handle_info({:DOWN, _, :process, _pid, _}, state), do: {:stop, :normal, state}
 end

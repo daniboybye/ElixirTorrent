@@ -5,8 +5,13 @@ defmodule Magnet.ConnectionTest.WireIds do
   # accessors Magnet.Connection consumes.
   use Peer.Const
 
+  @spec choke() :: <<_::8>>
   def choke, do: @choke_id
+
+  @spec unchoke() :: <<_::8>>
   def unchoke, do: @unchoke_id
+
+  @spec interested() :: <<_::8>>
   def interested, do: @interested_id
 end
 

@@ -930,6 +930,7 @@ end
 defmodule Peer.ConnectionManagerTest.SwarmStub do
   @moduledoc false
 
+  @spec start_link(term()) :: {:ok, pid()}
   def start_link(_arg) do
     Task.start_link(fn ->
       release = make_ref()
@@ -945,10 +946,14 @@ defmodule Peer.ConnectionManagerTest.MockPeer do
   @moduledoc false
   use GenServer
 
+  @type t :: %{controller: pid()}
+
+  @spec start_link(Torrent.hash(), Peer.id(), keyword()) :: GenServer.on_start()
   def start_link(hash, id, opts) do
     GenServer.start_link(__MODULE__, {hash, id, opts})
   end
 
+  @spec init({Torrent.hash(), Peer.id(), keyword()}) :: {:ok, t()}
   def init({hash, id, opts}) do
     key = Peer.make_key(hash, id)
     Registry.register(Registry, {key, Peer}, nil)
@@ -986,6 +991,8 @@ defmodule Peer.ConnectionManagerTest.MockPeer do
     {:ok, %{controller: ctrl}}
   end
 
+  @spec handle_info({:DOWN, reference(), :process, pid(), term()}, t()) ::
+          {:stop, :normal, t()}
   def handle_info({:DOWN, _, :process, _ctrl, _}, state), do: {:stop, :normal, state}
 end
 
@@ -993,14 +1000,21 @@ defmodule Peer.ConnectionManagerTest.AnnounceSpy do
   @moduledoc false
   use GenServer
 
+  @type t :: %{refreshes: non_neg_integer(), replenishes: non_neg_integer()}
+
+  @spec init(nil) :: {:ok, t()}
   def init(nil), do: {:ok, %{refreshes: 0, replenishes: 0}}
 
+  @spec handle_cast(:maybe_refresh_peers, t()) :: {:noreply, t()}
   def handle_cast(:maybe_refresh_peers, state),
     do: {:noreply, %{state | refreshes: state.refreshes + 1}}
 
+  @spec handle_cast(:replenish_candidates, t()) :: {:noreply, t()}
   def handle_cast(:replenish_candidates, state),
     do: {:noreply, %{state | replenishes: state.replenishes + 1}}
 
+  @spec handle_call(:discovery_counts, GenServer.from(), t()) ::
+          {:reply, {non_neg_integer(), non_neg_integer()}, t()}
   def handle_call(:discovery_counts, _from, state),
     do: {:reply, {state.refreshes, state.replenishes}, state}
 end

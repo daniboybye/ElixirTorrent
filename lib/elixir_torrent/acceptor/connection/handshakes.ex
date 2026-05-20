@@ -8,6 +8,7 @@ defmodule Acceptor.Connection.Handshakes do
 
   require Logger
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     %{
       id: __MODULE__,
@@ -52,6 +53,7 @@ defmodule Acceptor.Connection.Handshakes do
   # stayed 0 across 100+ dial batches with :prefer active (was 346 before).
   @mse_outbound :prefer
 
+  @spec recv(Peer.Transport.socket()) :: :ok
   def recv(socket) do
     case recv_task(socket) do
       {:ok, _pid} -> :ok

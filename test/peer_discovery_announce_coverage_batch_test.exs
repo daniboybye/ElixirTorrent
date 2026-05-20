@@ -1364,13 +1364,17 @@ end
 defmodule PeerDiscovery.AnnounceCoverageBatchTest.DHTStub do
   @moduledoc false
 
+  @spec get_peers(Torrent.hash()) :: {:ok, [Peer.t()]}
   def get_peers(_hash), do: {:ok, []}
+
+  @spec announce(Torrent.hash(), :inet.port_number()) :: :ok
   def announce(_hash, _port), do: :ok
 end
 
 defmodule PeerDiscovery.AnnounceCoverageBatchTest.SwarmStub do
   @moduledoc false
 
+  @spec start_link(term()) :: {:ok, pid()}
   def start_link(_arg) do
     Task.start_link(fn ->
       release = make_ref()

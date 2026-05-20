@@ -213,8 +213,10 @@ end
 defmodule Peer.SenderStub do
   use GenServer
 
+  @spec init({Peer.key(), pid()}) :: {:ok, {Peer.key(), pid()}}
   def init({key, test_pid}), do: {:ok, {key, test_pid}}
 
+  @spec handle_cast(term(), {Peer.key(), pid()}) :: {:noreply, {Peer.key(), pid()}}
   def handle_cast(message, {key, test_pid}) do
     send(test_pid, {:sent, message})
     {:noreply, {key, test_pid}}

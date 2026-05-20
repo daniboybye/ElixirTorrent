@@ -45,6 +45,7 @@ defmodule PeerDiscovery.StartedAnnounces do
 
   @table __MODULE__
 
+  @spec start_link(term()) :: GenServer.on_start()
   def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
   @impl GenServer

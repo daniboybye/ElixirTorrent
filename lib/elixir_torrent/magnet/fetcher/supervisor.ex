@@ -1,6 +1,7 @@
 defmodule Magnet.Fetcher.Supervisor do
   @moduledoc false
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     %{
       id: __MODULE__,

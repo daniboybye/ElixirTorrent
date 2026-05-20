@@ -10,6 +10,7 @@ defmodule Torrent.Swarm do
 
   require Logger
 
+  @spec child_spec(Torrent.hash()) :: Supervisor.child_spec()
   def child_spec(hash) do
     %{
       id: __MODULE__,
@@ -51,6 +52,7 @@ defmodule Torrent.Swarm do
     do_assign_peer_to_piece?(hash, key, index, active_indices)
   end
 
+  @spec assign_peer_to_piece?(Torrent.hash(), Peer.key(), Torrent.index()) :: boolean()
   def assign_peer_to_piece?(hash, key, index) do
     do_assign_peer_to_piece?(hash, key, index, Downloads.active_indices(hash))
   end

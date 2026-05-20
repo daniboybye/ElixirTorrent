@@ -1666,6 +1666,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.TorrentHashStub do
   @moduledoc false
   use GenServer
 
+  @spec child_spec(Torrent.hash()) :: Supervisor.child_spec()
   def child_spec(hash) do
     %{
       id: {__MODULE__, hash},
@@ -1674,8 +1675,10 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.TorrentHashStub do
     }
   end
 
+  @spec start_link(Torrent.hash()) :: GenServer.on_start()
   def start_link(hash), do: GenServer.start_link(__MODULE__, hash)
 
+  @spec init(Torrent.hash()) :: {:ok, Torrent.hash()}
   def init(hash) do
     Registry.register(Registry, self(), hash)
     {:ok, hash}
@@ -1685,6 +1688,7 @@ end
 defmodule AcceptorDialHandshakeCoverageBatchTest.DummyWorker do
   @moduledoc false
 
+  @spec start_link(term()) :: {:ok, pid()}
   def start_link(_swarm_hash) do
     Task.start_link(fn ->
       release = make_ref()
@@ -1700,6 +1704,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.SentCollector do
   @moduledoc false
   use GenServer
 
+  @spec start_link(Peer.key(), pid()) :: GenServer.on_start()
   def start_link(key, test_pid) do
     GenServer.start_link(__MODULE__, {key, test_pid},
       name: {:via, Registry, {Registry, {key, Peer.Sender}}}
@@ -1736,6 +1741,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.RelayPeer do
   alias Peer.UtHolepunch.Extension, as: UtHolepunchExtension
   alias Peer.UtPex.Extension, as: UtPexExtension
 
+  @spec start_link(Torrent.hash(), Torrent.hash(), Peer.id(), pid()) :: GenServer.on_start()
   def start_link(_swarm_hash, hash, id, test_pid) do
     GenServer.start_link(__MODULE__, {hash, id, test_pid})
   end
@@ -1773,6 +1779,14 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.TargetPeer do
   alias Peer.LTEP.{Handshake, Session}
   alias Peer.UtHolepunch.Extension, as: UtHolepunchExtension
 
+  @spec start_link(
+          Torrent.hash(),
+          Torrent.hash(),
+          Peer.id(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          boolean()
+        ) :: GenServer.on_start()
   def start_link(_swarm_hash, hash, id, endpoint_ip, endpoint_port, holepunch?) do
     GenServer.start_link(__MODULE__, {hash, id, endpoint_ip, endpoint_port, holepunch?})
   end
