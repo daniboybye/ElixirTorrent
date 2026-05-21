@@ -54,38 +54,9 @@ defmodule NAT.PortMapper do
     {:noreply, state}
   end
 
-  def handle_info(:map_ports, %{failures: failures, dead_methods: dead} = state) do
-    port = Acceptor.port()
-    gateway = NAT.NATPMP.default_gateway()
-    local_ip = Acceptor.primary_ips().inet || Acceptor.ip()
-
-    Logger.debug(
-      "[nat] mapping attempt port=#{port} local_ip=#{inspect(local_ip)} gateway=#{inspect(gateway)} skip=#{inspect(MapSet.to_list(dead))}"
-    )
-
-    summary = map_all(port, dead)
+  def handle_info(:map_ports, state) do
+    {summary, method_failures, dead, failures, next_ms} = run_map_ports_cycle(state)
     mapped = mapped_count(summary)
-    log_summary(summary, port, dead)
-
-    {method_failures, dead} = update_method_state(state, summary)
-
-    {failures, next_ms} =
-      cond do
-        mapped >= @min_mapped ->
-          {0, @refresh_ms}
-
-        # All viable methods are dead — nothing more we can do this run. Sleep
-        # a full refresh interval (still keeps the timer alive in case ports
-        # get manually opened / a NAT-PMP-capable router replaces the current
-        # one and the process is restarted).
-        all_methods_dead?(dead) ->
-          Logger.debug("[nat] all_methods_dead — sleeping until next refresh")
-          {0, @refresh_ms}
-
-        true ->
-          failures = failures + 1
-          {failures, retry_delay_ms(failures)}
-      end
 
     if mapped < @min_mapped and not all_methods_dead?(dead) do
       Logger.debug("[nat] retry_scheduled failures=#{failures} delay_ms=#{next_ms}")
@@ -95,6 +66,47 @@ defmodule NAT.PortMapper do
 
     {:noreply,
      %{state | failures: failures, method_failures: method_failures, dead_methods: dead}}
+  end
+
+  @spec run_map_ports_cycle(map()) ::
+          {map(), %{atom() => non_neg_integer()}, MapSet.t(), non_neg_integer(), pos_integer()}
+  defp run_map_ports_cycle(%{failures: failures, dead_methods: dead} = state) do
+    port = Acceptor.port()
+    gateway = NAT.NATPMP.default_gateway()
+    local_ip = Acceptor.primary_ips().inet || Acceptor.ip()
+
+    Logger.debug(
+      "[nat] mapping attempt port=#{port} local_ip=#{inspect(local_ip)} gateway=#{inspect(gateway)} skip=#{inspect(MapSet.to_list(dead))}"
+    )
+
+    summary = map_all(port, dead)
+    log_summary(summary, port, dead)
+
+    {method_failures, dead} = update_method_state(state, summary)
+    {failures, next_ms} = map_ports_retry_schedule(failures, mapped_count(summary), dead)
+
+    {summary, method_failures, dead, failures, next_ms}
+  end
+
+  @spec map_ports_retry_schedule(non_neg_integer(), non_neg_integer(), MapSet.t()) ::
+          {non_neg_integer(), pos_integer()}
+  defp map_ports_retry_schedule(failures, mapped, dead) do
+    cond do
+      mapped >= @min_mapped ->
+        {0, @refresh_ms}
+
+      # All viable methods are dead — nothing more we can do this run. Sleep
+      # a full refresh interval (still keeps the timer alive in case ports
+      # get manually opened / a NAT-PMP-capable router replaces the current
+      # one and the process is restarted).
+      all_methods_dead?(dead) ->
+        Logger.debug("[nat] all_methods_dead — sleeping until next refresh")
+        {0, @refresh_ms}
+
+      true ->
+        failures = failures + 1
+        {failures, retry_delay_ms(failures)}
+    end
   end
 
   @spec log_nat_type() :: :ok

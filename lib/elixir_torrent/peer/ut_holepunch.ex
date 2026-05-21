@@ -289,37 +289,73 @@ defmodule Peer.UtHolepunch do
           :inet.port_number()
         ) :: Peer.Controller.State.t()
   defp do_relay(state, target_key, target_ltep, target_ip, target_port) do
-    hash = state.hash
-    initiator_key = State.key(state)
+    with {:ok, payloads} <- relay_connect_payloads(state, target_ip, target_port) do
+      handle_relay_send_result(
+        state,
+        target_key,
+        target_ltep,
+        target_ip,
+        target_port,
+        payloads
+      )
+    else
+      _ -> state
+    end
+  end
 
+  @spec relay_connect_payloads(Peer.Controller.State.t(), :inet.ip_address(), :inet.port_number()) ::
+          {:ok, {{:inet.ip_address(), :inet.port_number()}, binary(), binary()}} | :error
+  defp relay_connect_payloads(state, target_ip, target_port) do
     with true <- Session.peer_supports?(state.ltep, @extension_name),
-         {:ok, {init_ip, init_port}} <- peer_endpoint(state.socket),
+         {:ok, {init_ip, init_port} = initiator_endpoint} <- peer_endpoint(state.socket),
          target_for_initiator when is_binary(target_for_initiator) <-
            encode_connect(target_ip, target_port),
          initiator_for_target when is_binary(initiator_for_target) <-
            encode_connect(init_ip, init_port) do
-      # BEP 55 relay sends connect hints to two peers; either may drop mid-relay
-      # (Endpoints still registered briefly while Sender/uTP is shutting down).
-      case relay_connect_sends(
-             {initiator_key, state.ltep, target_for_initiator},
-             {target_key, target_ltep, initiator_for_target}
-           ) do
-        :ok ->
-          Logger.debug(
-            "[holepunch] rendezvous_relay hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} initiator=#{inspect({init_ip, init_port})}"
-          )
-
-          state
-
-        {:error, reason} ->
-          Logger.debug(
-            "[holepunch] relay_send_failed hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} reason=#{inspect(reason)}"
-          )
-
-          state
-      end
+      {:ok, {initiator_endpoint, target_for_initiator, initiator_for_target}}
     else
-      _ -> state
+      _ -> :error
+    end
+  end
+
+  @spec handle_relay_send_result(
+          Peer.Controller.State.t(),
+          Peer.key(),
+          Session.t(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          {{:inet.ip_address(), :inet.port_number()}, binary(), binary()}
+        ) :: Peer.Controller.State.t()
+  defp handle_relay_send_result(
+         state,
+         target_key,
+         target_ltep,
+         target_ip,
+         target_port,
+         {initiator_endpoint, target_for_initiator, initiator_for_target}
+       ) do
+    hash = state.hash
+    initiator_key = State.key(state)
+
+    # BEP 55 relay sends connect hints to two peers; either may drop mid-relay
+    # (Endpoints still registered briefly while Sender/uTP is shutting down).
+    case relay_connect_sends(
+           {initiator_key, state.ltep, target_for_initiator},
+           {target_key, target_ltep, initiator_for_target}
+         ) do
+      :ok ->
+        Logger.debug(
+          "[holepunch] rendezvous_relay hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} initiator=#{inspect(initiator_endpoint)}"
+        )
+
+        state
+
+      {:error, reason} ->
+        Logger.debug(
+          "[holepunch] relay_send_failed hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} reason=#{inspect(reason)}"
+        )
+
+        state
     end
   end
 

@@ -200,13 +200,22 @@ defmodule Peer.Controller do
     block_size = byte_size(block)
     max = Torrent.Downloads.piece_max_length()
 
-    with true <- block_size > 0,
-         true <- block_size <= max,
-         pieces_count when is_integer(pieces_count) <- Torrent.get(hash, :pieces_count),
+    valid_block_size?(block_size, max) and
+      valid_piece_bounds?(hash, index, begin, block_size)
+  end
+
+  @spec valid_block_size?(non_neg_integer(), pos_integer()) :: boolean()
+  defp valid_block_size?(block_size, max) do
+    block_size > 0 and block_size <= max
+  end
+
+  @spec valid_piece_bounds?(Torrent.hash(), Torrent.index(), Torrent.begin(), non_neg_integer()) ::
+          boolean()
+  defp valid_piece_bounds?(hash, index, begin, block_size) do
+    with pieces_count when is_integer(pieces_count) <- Torrent.get(hash, :pieces_count),
          true <- index >= 0 and index < pieces_count,
-         piece_len when is_integer(piece_len) <- Torrent.Model.piece_length(hash, index),
-         true <- begin >= 0 and begin + block_size <= piece_len do
-      true
+         piece_len when is_integer(piece_len) <- Torrent.Model.piece_length(hash, index) do
+      begin >= 0 and begin + block_size <= piece_len
     else
       _ -> false
     end

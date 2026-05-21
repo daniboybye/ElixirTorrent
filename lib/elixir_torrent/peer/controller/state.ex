@@ -443,46 +443,71 @@ defmodule Peer.Controller.State do
         drain_recent?: false
       )
 
+    {added, dropped} = pex_delta_entries(state, current, initial?)
+    encode_and_deliver_pex_delta(state, added, dropped, initial?, opts)
+  end
+
+  @spec pex_delta_entries(t(), map(), boolean()) :: {list(), list()}
+  defp pex_delta_entries(state, current, initial?) do
     clients = client_for_order(state)
 
-    {added, dropped} =
-      if initial? do
-        {Outbound.order_entries(Map.values(current), clients), []}
-      else
-        {added_raw, dropped_raw} = Peer.UtPex.outbound_delta(state.pex_outbound.sent, current)
+    if initial? do
+      {Outbound.order_entries(Map.values(current), clients), []}
+    else
+      {added_raw, dropped_raw} = Peer.UtPex.outbound_delta(state.pex_outbound.sent, current)
 
-        {
-          Outbound.order_entries(added_raw, clients),
-          Outbound.order_endpoints(dropped_raw, clients)
-        }
-      end
+      {
+        Outbound.order_entries(added_raw, clients),
+        Outbound.order_endpoints(dropped_raw, clients)
+      }
+    end
+  end
 
+  @spec encode_and_deliver_pex_delta(t(), list(), list(), boolean(), keyword()) :: t()
+  defp encode_and_deliver_pex_delta(state, added, dropped, initial?, opts) do
     case Peer.UtPex.encode_delta(added, dropped, initial?: initial?) do
       {:ok, payload, report} ->
-        case deliver_pex_payload(state, payload, opts) do
-          {:ok, state} ->
-            apply_pex_encode_report(state, report, initial?)
-
-          {:error, state} when initial? ->
-            put_in(state.pex_outbound.initial_pending?, false)
-
-          {:error, state} ->
-            state
-        end
+        handle_pex_payload_delivery(state, payload, report, initial?, opts)
 
       {:error, :empty} when initial? ->
-        %{
-          state
-          | pex_outbound: %{
-              state.pex_outbound
-              | initial_sent?: true,
-                initial_pending?: false
-            }
-        }
+        mark_pex_initial_sent_empty(state)
 
       {:error, :empty} ->
         state
     end
+  end
+
+  @spec handle_pex_payload_delivery(
+          t(),
+          binary(),
+          Peer.UtPex.EncodeReport.t(),
+          boolean(),
+          keyword()
+        ) ::
+          t()
+  defp handle_pex_payload_delivery(state, payload, report, initial?, opts) do
+    case deliver_pex_payload(state, payload, opts) do
+      {:ok, state} ->
+        apply_pex_encode_report(state, report, initial?)
+
+      {:error, state} when initial? ->
+        put_in(state.pex_outbound.initial_pending?, false)
+
+      {:error, state} ->
+        state
+    end
+  end
+
+  @spec mark_pex_initial_sent_empty(t()) :: t()
+  defp mark_pex_initial_sent_empty(state) do
+    %{
+      state
+      | pex_outbound: %{
+          state.pex_outbound
+          | initial_sent?: true,
+            initial_pending?: false
+        }
+    }
   end
 
   @spec deliver_pex_payload(t(), binary(), keyword()) :: {:ok, t()} | {:error, t()}
@@ -1352,28 +1377,39 @@ defmodule Peer.Controller.State do
         state
 
       {pending, state} ->
-        with :ok <- HashWire.validate_hashes_payload(req, hashes_binary),
-             {:ok, block_count} <- hash_verify_block_count(state.hash, req),
-             {:ok, {base, proof}} <- HashWire.split_hashes(req, hashes_binary),
-             all = base ++ proof,
-             true <-
-               Torrent.Merkle.verify_hashes(
-                 req.pieces_root,
-                 req.base_layer,
-                 req.index,
-                 req.length,
-                 req.proof_layers,
-                 all,
-                 block_count
-               ) do
-          HashTransfer.notify(pending.caller, pending.ref, {:ok, req, all})
-          state
-        else
-          _ ->
-            HashTransfer.notify(pending.caller, pending.ref, {:error, :protocol_error, req})
-            {:error, :protocol_error, state}
-        end
+        handle_pending_hashes(state, pending, req, hashes_binary)
     end
+  end
+
+  @spec handle_pending_hashes(t(), map(), HashWire.t(), binary()) ::
+          t() | {:error, :protocol_error, t()}
+  defp handle_pending_hashes(state, pending, req, hashes_binary) do
+    with :ok <- HashWire.validate_hashes_payload(req, hashes_binary),
+         {:ok, block_count} <- hash_verify_block_count(state.hash, req),
+         {:ok, {base, proof}} <- HashWire.split_hashes(req, hashes_binary),
+         all = base ++ proof,
+         true <-
+           verify_merkle_hashes(req, all, block_count) do
+      HashTransfer.notify(pending.caller, pending.ref, {:ok, req, all})
+      state
+    else
+      _ ->
+        HashTransfer.notify(pending.caller, pending.ref, {:error, :protocol_error, req})
+        {:error, :protocol_error, state}
+    end
+  end
+
+  @spec verify_merkle_hashes(HashWire.t(), list(), non_neg_integer()) :: boolean()
+  defp verify_merkle_hashes(req, all, block_count) do
+    Torrent.Merkle.verify_hashes(
+      req.pieces_root,
+      req.base_layer,
+      req.index,
+      req.length,
+      req.proof_layers,
+      all,
+      block_count
+    )
   end
 
   @spec handle_hash_reject(t(), HashWire.t()) :: t()
@@ -1422,22 +1458,25 @@ defmodule Peer.Controller.State do
 
       true ->
         case HashServe.validate_outbound(state.hash, req) do
-          :ok ->
-            ref = make_ref()
-            timer = Process.send_after(self(), {:hash_request_timeout, ref}, timeout)
-            pending = %{ref: ref, request: req, caller: caller, timer: timer}
-            :ok = Sender.hash_request(key(state), req)
-
-            {:ok, ref,
-             %{
-               state
-               | hash_requests: Map.put(state.hash_requests, req_key, pending)
-             }}
-
-          {:error, reason} ->
-            {:error, reason, state}
+          :ok -> enqueue_hash_request(state, req, req_key, caller, timeout)
+          {:error, reason} -> {:error, reason, state}
         end
     end
+  end
+
+  @spec enqueue_hash_request(t(), HashWire.t(), term(), pid(), timeout()) ::
+          {:ok, reference(), t()}
+  defp enqueue_hash_request(state, req, req_key, caller, timeout) do
+    ref = make_ref()
+    timer = Process.send_after(self(), {:hash_request_timeout, ref}, timeout)
+    pending = %{ref: ref, request: req, caller: caller, timer: timer}
+    :ok = Sender.hash_request(key(state), req)
+
+    {:ok, ref,
+     %{
+       state
+       | hash_requests: Map.put(state.hash_requests, req_key, pending)
+     }}
   end
 
   @doc false
@@ -1528,43 +1567,9 @@ defmodule Peer.Controller.State do
   @spec do_make_request(t()) :: t()
   defp do_make_request(%__MODULE__{interested: true, status: index} = state)
        when is_integer(index) do
-    cond do
-      full_requests_queue?(state) ->
-        log_download(state, "request_skip queue_full index=#{index}", :debug)
-        state
-
-      state.choke_me and not FastExtension.download?(state.fast_extension, index) ->
-        log_download(state, "request_skip choked index=#{index}", :debug)
-        state
-
-      true ->
-        pid = self()
-
-        case Downloads.request(
-               state.hash,
-               index,
-               state.id,
-               &GenServer.cast(pid, {:request, [&1, &2, &3]})
-             ) do
-          :error ->
-            # Piece worker is gone (verify-fail, timeout, race between our
-            # pin and the worker exiting). Clear the pin so the next
-            # Swarm.interested_for_piece edge (or a fresh :interested cast
-            # from the controller) can re-pin us to a live piece.
-            log_download(state, "request_skip piece_dead index=#{index}", :debug)
-            clear_pin(state)
-
-          :noop ->
-            # Piece alive but nothing to hand out (waiting=[], endgame cap).
-            # Do not touch pending_requests — pre-ack cast used to inflate
-            # reqq here and false-saturate fill_request_pipeline.
-            log_download(state, "request_skip piece_drained index=#{index}", :debug)
-            state
-
-          :ok ->
-            log_download(state, "request_queued index=#{index}", :debug)
-            increment_pending(state)
-        end
+    case download_request_skip_reason(state, index) do
+      nil -> apply_download_request(state, index)
+      reason -> log_download_request_skip(state, index, reason)
     end
   end
 
@@ -1575,6 +1580,57 @@ defmodule Peer.Controller.State do
   end
 
   defp do_make_request(state), do: state
+
+  @spec download_request_skip_reason(t(), Torrent.index()) :: :queue_full | :choked | nil
+  defp download_request_skip_reason(state, index) do
+    cond do
+      full_requests_queue?(state) -> :queue_full
+      state.choke_me and not FastExtension.download?(state.fast_extension, index) -> :choked
+      true -> nil
+    end
+  end
+
+  @spec log_download_request_skip(t(), Torrent.index(), :queue_full | :choked) :: t()
+  defp log_download_request_skip(state, index, :queue_full) do
+    log_download(state, "request_skip queue_full index=#{index}", :debug)
+    state
+  end
+
+  defp log_download_request_skip(state, index, :choked) do
+    log_download(state, "request_skip choked index=#{index}", :debug)
+    state
+  end
+
+  @spec apply_download_request(t(), Torrent.index()) :: t()
+  defp apply_download_request(state, index) do
+    pid = self()
+
+    case Downloads.request(
+           state.hash,
+           index,
+           state.id,
+           &GenServer.cast(pid, {:request, [&1, &2, &3]})
+         ) do
+      :error ->
+        # Piece worker is gone (verify-fail, timeout, race between our
+        # pin and the worker exiting). Clear the pin so the next
+        # Swarm.interested_for_piece edge (or a fresh :interested cast
+        # from the controller) can re-pin us to a live piece.
+        log_download(state, "request_skip piece_dead index=#{index}", :debug)
+        clear_pin(state)
+
+      :noop ->
+        # Piece alive but nothing to hand out (waiting=[], endgame cap).
+        # Do not touch pending_requests — pre-ack cast used to inflate
+        # reqq here and false-saturate fill_request_pipeline.
+        log_download(state, "request_skip piece_drained index=#{index}", :debug)
+        state
+
+      :ok ->
+        log_download(state, "request_queued index=#{index}", :debug)
+        increment_pending(state)
+    end
+  end
 
   @spec check_interested(t()) :: t()
   defp check_interested(%__MODULE__{status: status} = state)
@@ -1753,11 +1809,20 @@ defmodule Peer.Controller.State do
   defp flush_choked_uploads(%__MODULE__{fast_extension: nil} = state), do: state
 
   defp flush_choked_uploads(%__MODULE__{fast_extension: %FastExtension{}} = state) do
-    {allowed, rejected} =
-      Enum.split_with(state.upload_requests, fn {index, _begin, _length} ->
-        FastExtension.upload?(state.fast_extension, index)
-      end)
+    {allowed, rejected} = partition_upload_requests(state)
+    cancel_rejected_uploads(state, rejected)
+    %{state | upload_requests: MapSet.new(allowed)}
+  end
 
+  @spec partition_upload_requests(t()) :: {list(), list()}
+  defp partition_upload_requests(state) do
+    Enum.split_with(state.upload_requests, fn {index, _begin, _length} ->
+      FastExtension.upload?(state.fast_extension, index)
+    end)
+  end
+
+  @spec cancel_rejected_uploads(t(), list()) :: :ok
+  defp cancel_rejected_uploads(state, rejected) do
     Enum.each(rejected, fn {index, begin, length} ->
       :ok = Uploader.cancel(state.hash, state.id, index, begin, length)
 
@@ -1765,8 +1830,6 @@ defmodule Peer.Controller.State do
         Sender.reject(key(state), index, begin, length)
       end
     end)
-
-    %{state | upload_requests: MapSet.new(allowed)}
   end
 
   @spec bitfield_log(t()) :: String.t()

@@ -114,17 +114,7 @@ defmodule Peer.Endpoints do
         %{table: table, monitors: monitors} = state
       ) do
     key = endpoint_key(hash, ip, port)
-
-    monitors =
-      case :ets.lookup(table, key) do
-        [{^key, old_pid}] when old_pid != pid and is_pid(old_pid) ->
-          if Process.alive?(old_pid), do: Peer.disconnect(old_pid)
-          drop_monitors_for_key(monitors, key)
-
-        _ ->
-          monitors
-      end
-
+    monitors = drop_old_endpoint_monitors(table, monitors, key, pid)
     ref = Process.monitor(pid)
     :ets.insert(table, {key, pid})
     now = System.monotonic_time(:millisecond)
@@ -210,6 +200,18 @@ defmodule Peer.Endpoints do
   @spec endpoint_key(Torrent.hash(), :inet.ip_address(), :inet.port_number()) ::
           {Torrent.hash(), :inet.ip_address(), :inet.port_number()}
   defp endpoint_key(hash, ip, port), do: {hash, ip, port}
+
+  @spec drop_old_endpoint_monitors(:ets.table(), map(), term(), pid()) :: map()
+  defp drop_old_endpoint_monitors(table, monitors, key, pid) do
+    case :ets.lookup(table, key) do
+      [{^key, old_pid}] when old_pid != pid and is_pid(old_pid) ->
+        if Process.alive?(old_pid), do: Peer.disconnect(old_pid)
+        drop_monitors_for_key(monitors, key)
+
+      _ ->
+        monitors
+    end
+  end
 
   @spec drop_peer_id(:ets.table(), {Torrent.hash(), :inet.ip_address(), :inet.port_number()}) ::
           :ok

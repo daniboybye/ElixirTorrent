@@ -112,27 +112,14 @@ defmodule Peer.Holepunch do
   @spec send_rendezvous(Torrent.hash(), Peer.key(), :inet.ip_address(), :inet.port_number()) ::
           :ok
   defp send_rendezvous(hash, relay_key, target_ip, target_port) do
-    with {:ok, ltep} <- Peer.Controller.ltep_session(relay_key),
-         true <- Session.peer_supports?(ltep, UtHolepunch.extension_name()),
-         payload when is_binary(payload) <- encode_rendezvous(target_ip, target_port),
-         id when is_integer(id) and id > 0 <-
-           Session.peer_extension_id(ltep, UtHolepunch.extension_name()),
-         true <- reserve_attempt(hash, target_ip, target_port) do
-      case Peer.LTEP.send_extended(relay_key, id, payload) do
-        :ok ->
-          # High-volume, low-yield outbound attempt: under CGNAT most targets
-          # are unreachable and most relays can't reach them either. The
-          # interesting events (connect_recv, punch_ok) stay at :info.
-          Logger.debug(
-            "[holepunch] rendezvous_sent hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} relay=#{Peer.log_key(relay_key)}"
-          )
-
-        {:error, reason} ->
-          # Relay disconnected between pick and send — not our caller's problem.
-          Logger.debug(
-            "[holepunch] rendezvous_send_failed target=#{inspect({target_ip, target_port})} reason=#{inspect(reason)}"
-          )
-      end
+    with {:ok, id, payload} <- rendezvous_send_args(relay_key, hash, target_ip, target_port) do
+      log_rendezvous_send_result(
+        hash,
+        target_ip,
+        target_port,
+        relay_key,
+        Peer.LTEP.send_extended(relay_key, id, payload)
+      )
     else
       _ -> :ok
     end
@@ -140,24 +127,78 @@ defmodule Peer.Holepunch do
     :ok
   end
 
+  @spec rendezvous_send_args(
+          Peer.key(),
+          Torrent.hash(),
+          :inet.ip_address(),
+          :inet.port_number()
+        ) :: {:ok, pos_integer(), binary()} | :error
+  defp rendezvous_send_args(relay_key, hash, target_ip, target_port) do
+    with {:ok, ltep} <- Peer.Controller.ltep_session(relay_key),
+         true <- Session.peer_supports?(ltep, UtHolepunch.extension_name()),
+         payload when is_binary(payload) <- encode_rendezvous(target_ip, target_port),
+         id when is_integer(id) and id > 0 <-
+           Session.peer_extension_id(ltep, UtHolepunch.extension_name()),
+         true <- reserve_attempt(hash, target_ip, target_port) do
+      {:ok, id, payload}
+    else
+      _ -> :error
+    end
+  end
+
+  @spec log_rendezvous_send_result(
+          Torrent.hash(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          Peer.key(),
+          :ok | {:error, term()}
+        ) :: :ok
+  defp log_rendezvous_send_result(hash, target_ip, target_port, relay_key, :ok) do
+    # High-volume, low-yield outbound attempt: under CGNAT most targets
+    # are unreachable and most relays can't reach them either. The
+    # interesting events (connect_recv, punch_ok) stay at :info.
+    Logger.debug(
+      "[holepunch] rendezvous_sent hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} relay=#{Peer.log_key(relay_key)}"
+    )
+  end
+
+  defp log_rendezvous_send_result(_hash, target_ip, target_port, _relay_key, {:error, reason}) do
+    # Relay disconnected between pick and send — not our caller's problem.
+    Logger.debug(
+      "[holepunch] rendezvous_send_failed target=#{inspect({target_ip, target_port})} reason=#{inspect(reason)}"
+    )
+  end
+
   @spec pick_relay(Torrent.hash(), :inet.ip_address(), :inet.port_number()) :: Peer.key() | nil
   defp pick_relay(hash, target_ip, target_port) do
     target_pid = Peer.Endpoints.get_pid(hash, target_ip, target_port)
+    candidates = relay_candidates(hash, target_ip, target_port, target_pid)
+    select_relay_candidate(candidates)
+  end
 
-    candidates =
-      hash
-      |> Torrent.Swarm.peer_supervisors()
-      |> Enum.reject(&(target_pid != nil and &1 == target_pid))
-      |> Enum.flat_map(fn pid ->
-        with key when is_tuple(key) <- Peer.get_key(pid),
-             {:ok, ltep, pex_endpoints} <- Peer.Controller.holepunch_relay_info(key),
-             true <- Session.peer_supports?(ltep, UtHolepunch.extension_name()) do
-          [{key, MapSet.member?(pex_endpoints, {target_ip, target_port})}]
-        else
-          _ -> []
-        end
-      end)
+  @spec relay_candidates(Torrent.hash(), :inet.ip_address(), :inet.port_number(), pid() | nil) ::
+          [{Peer.key(), boolean()}]
+  defp relay_candidates(hash, target_ip, target_port, target_pid) do
+    hash
+    |> Torrent.Swarm.peer_supervisors()
+    |> Enum.reject(&(target_pid != nil and &1 == target_pid))
+    |> Enum.flat_map(&relay_candidate_from_supervisor(&1, target_ip, target_port))
+  end
 
+  @spec relay_candidate_from_supervisor(pid(), :inet.ip_address(), :inet.port_number()) ::
+          [{Peer.key(), boolean()}]
+  defp relay_candidate_from_supervisor(pid, target_ip, target_port) do
+    with key when is_tuple(key) <- Peer.get_key(pid),
+         {:ok, ltep, pex_endpoints} <- Peer.Controller.holepunch_relay_info(key),
+         true <- Session.peer_supports?(ltep, UtHolepunch.extension_name()) do
+      [{key, MapSet.member?(pex_endpoints, {target_ip, target_port})}]
+    else
+      _ -> []
+    end
+  end
+
+  @spec select_relay_candidate([{Peer.key(), boolean()}]) :: Peer.key() | nil
+  defp select_relay_candidate(candidates) do
     case Enum.find(candidates, fn {_key, knows_target?} -> knows_target? end) ||
            List.first(candidates) do
       {key, _knows_target?} -> key

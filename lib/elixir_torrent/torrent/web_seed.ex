@@ -321,9 +321,18 @@ defmodule Torrent.WebSeed do
          acc
        ) do
     file_url = file_url(state, url, path)
-
     range_hdr = "bytes=#{offset}-#{offset + length - 1}"
 
+    case fetch_segment_range(file_url, range_hdr, length) do
+      {:ok, body} ->
+        do_fetch_segments(state, url, rest, [body | acc])
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp fetch_segment_range(file_url, range_hdr, length) do
     http_opts = [
       timeout: @request_timeout_ms,
       recv_timeout: @recv_timeout_ms,
@@ -335,7 +344,7 @@ defmodule Torrent.WebSeed do
     case HTTPoison.get(file_url, [{"Range", range_hdr}, {"Accept", "*/*"}], http_opts) do
       {:ok, %HTTPoison.Response{status_code: code, body: body}} when code in [200, 206] ->
         if byte_size(body) == length do
-          do_fetch_segments(state, url, rest, [body | acc])
+          {:ok, body}
         else
           {:error, {:segment_short, byte_size(body), length}}
         end
@@ -368,29 +377,36 @@ defmodule Torrent.WebSeed do
   end
 
   def span_files(%{"files" => files}, begin_byte, end_byte) do
-    {segments, _} =
-      Enum.reduce(files, {[], 0}, fn %{"length" => file_len, "path" => path}, {acc, cursor} ->
-        file_begin = cursor
-        file_end = cursor + file_len - 1
-        cursor = cursor + file_len
+    files
+    |> Enum.reduce({[], 0}, &accumulate_file_span(&1, &2, begin_byte, end_byte))
+    |> elem(0)
+    |> Enum.reverse()
+  end
 
-        cond do
-          file_end < begin_byte ->
-            {acc, cursor}
+  defp accumulate_file_span(
+         %{"length" => file_len, "path" => path},
+         {acc, cursor},
+         begin_byte,
+         end_byte
+       ) do
+    file_begin = cursor
+    file_end = cursor + file_len - 1
+    cursor = cursor + file_len
 
-          file_begin > end_byte ->
-            {acc, cursor}
+    cond do
+      file_end < begin_byte ->
+        {acc, cursor}
 
-          true ->
-            overlap_begin = max(begin_byte, file_begin)
-            overlap_end = min(end_byte, file_end)
-            offset = overlap_begin - file_begin
-            length = overlap_end - overlap_begin + 1
-            {[%{path: path, offset: offset, length: length} | acc], cursor}
-        end
-      end)
+      file_begin > end_byte ->
+        {acc, cursor}
 
-    Enum.reverse(segments)
+      true ->
+        overlap_begin = max(begin_byte, file_begin)
+        overlap_end = min(end_byte, file_end)
+        offset = overlap_begin - file_begin
+        length = overlap_end - overlap_begin + 1
+        {[%{path: path, offset: offset, length: length} | acc], cursor}
+    end
   end
 
   # Compute the per-file URL. Path segments are URL-encoded; slashes join.

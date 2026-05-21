@@ -130,6 +130,7 @@
           #
           ## Refactoring Opportunities
           #
+          {Credo.Check.Refactor.ABCSize, []},
           {Credo.Check.Refactor.Apply, []},
           {Credo.Check.Refactor.CondStatements, []},
           {Credo.Check.Refactor.CyclomaticComplexity, []},
@@ -254,15 +255,6 @@
           # check's fix is the same regardless of call shape, so it cannot
           # tell the improving cases from the hurting ones.
           {Credo.Check.Readability.SinglePipe, []},
-          # 77 findings scattered across nearly every subsystem, many on the
-          # dial/wire hot path (handshakes.ex up to 43, magnet/connection.ex 50,
-          # tracker.ex up to 56, utp/connection.ex up to 42,
-          # peer/controller/state.ex up to 45). A real fix means decomposing
-          # each function's actual logic, not a mechanical edit — genuine
-          # refactor work belonging in its own deliberate, function-by-function
-          # pass with test coverage in hand, not a bulk lint sweep across
-          # protocol-critical code.
-          {Credo.Check.Refactor.ABCSize, []},
           # 443 findings — the single largest volume of anything surveyed. The
           # check wants every `if/else` rewritten as `cond`, which is the
           # opposite of the mainstream Elixir convention (if/else for binary

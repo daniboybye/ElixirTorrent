@@ -971,10 +971,17 @@ defmodule PeerSenderLoopbackTest do
       :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
 
     {:ok, port} = :inet.port(listen)
-    parent = self()
+    spawn_loopback_acceptor(listen, self(), @timeout)
 
+    {:ok, client} =
+      :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], @timeout)
+
+    await_loopback_server(client, listen, @timeout)
+  end
+
+  defp spawn_loopback_acceptor(listen, parent, timeout) do
     spawn(fn ->
-      case :gen_tcp.accept(listen, @timeout) do
+      case :gen_tcp.accept(listen, timeout) do
         {:ok, server} ->
           _ = :gen_tcp.controlling_process(server, parent)
           send(parent, {:loopback_server, server})
@@ -983,10 +990,9 @@ defmodule PeerSenderLoopbackTest do
           send(parent, {:loopback_accept_error, error})
       end
     end)
+  end
 
-    {:ok, client} =
-      :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], @timeout)
-
+  defp await_loopback_server(client, listen, timeout) do
     receive do
       {:loopback_server, server} ->
         {client, server, listen}
@@ -996,7 +1002,7 @@ defmodule PeerSenderLoopbackTest do
         :gen_tcp.close(listen)
         flunk("accept failed: #{inspect(error)}")
     after
-      @timeout -> flunk("accept timed out")
+      timeout -> flunk("accept timed out")
     end
   end
 

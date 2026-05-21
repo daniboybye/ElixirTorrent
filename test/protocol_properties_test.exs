@@ -11,41 +11,109 @@ defmodule ProtocolPropertiesTest do
   @property_max_runs_tight 25
 
   defp utp_header_gen do
+    gen all(fields <- utp_header_fields_gen()) do
+      {type, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr, sack?, sack_body,
+       payload} = fields
+
+      build_utp_header_sample(
+        type,
+        conn_id,
+        timestamp,
+        timestamp_diff,
+        wnd_size,
+        seq_nr,
+        ack_nr,
+        sack?,
+        sack_body,
+        payload
+      )
+    end
+  end
+
+  defp utp_header_fields_gen do
     gen all(
-          type <- integer(0..4),
-          conn_id <- integer(0..65_535),
-          timestamp <- integer(0..0xFFFF_FFFF),
-          timestamp_diff <- integer(0..0xFFFF_FFFF),
-          wnd_size <- integer(0..0xFFFF_FFFF),
-          seq_nr <- integer(0..65_535),
-          ack_nr <- integer(0..65_535),
+          core <- utp_header_core_fields_gen(),
           sack? <- boolean(),
           sack_body <- binary(min_length: 0, max_length: 4),
           payload <- binary(min_length: 0, max_length: 32)
         ) do
-      extensions =
-        if sack? and byte_size(sack_body) > 0 do
-          [{:selective_ack, sack_body}]
-        else
-          []
-        end
+      {type, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr} = core
 
-      header = %UTP.Packet{
-        type: type,
-        version: 1,
-        extension: 0,
-        conn_id: conn_id,
-        timestamp: timestamp,
-        timestamp_difference: timestamp_diff,
-        wnd_size: wnd_size,
-        seq_nr: seq_nr,
-        ack_nr: ack_nr,
-        extensions: extensions
-      }
-
-      {header, payload}
+      {type, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr, sack?, sack_body,
+       payload}
     end
   end
+
+  defp utp_header_core_fields_gen do
+    gen all(
+          {type, conn_id} <- utp_header_type_conn_gen(),
+          {timestamp, timestamp_diff, wnd_size} <- utp_header_timing_gen(),
+          {seq_nr, ack_nr} <- utp_header_seq_gen()
+        ) do
+      {type, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr}
+    end
+  end
+
+  defp utp_header_type_conn_gen do
+    gen all(
+          type <- integer(0..4),
+          conn_id <- integer(0..65_535)
+        ) do
+      {type, conn_id}
+    end
+  end
+
+  defp utp_header_timing_gen do
+    gen all(
+          timestamp <- integer(0..0xFFFF_FFFF),
+          timestamp_diff <- integer(0..0xFFFF_FFFF),
+          wnd_size <- integer(0..0xFFFF_FFFF)
+        ) do
+      {timestamp, timestamp_diff, wnd_size}
+    end
+  end
+
+  defp utp_header_seq_gen do
+    gen all(
+          seq_nr <- integer(0..65_535),
+          ack_nr <- integer(0..65_535)
+        ) do
+      {seq_nr, ack_nr}
+    end
+  end
+
+  defp build_utp_header_sample(
+         type,
+         conn_id,
+         timestamp,
+         timestamp_diff,
+         wnd_size,
+         seq_nr,
+         ack_nr,
+         sack?,
+         sack_body,
+         payload
+       ) do
+    header = %UTP.Packet{
+      type: type,
+      version: 1,
+      extension: 0,
+      conn_id: conn_id,
+      timestamp: timestamp,
+      timestamp_difference: timestamp_diff,
+      wnd_size: wnd_size,
+      seq_nr: seq_nr,
+      ack_nr: ack_nr,
+      extensions: utp_sack_extensions(sack?, sack_body)
+    }
+
+    {header, payload}
+  end
+
+  defp utp_sack_extensions(true, sack_body) when byte_size(sack_body) > 0,
+    do: [{:selective_ack, sack_body}]
+
+  defp utp_sack_extensions(_, _), do: []
 
   describe "UTP.Packet" do
     property "encode/decode roundtrip preserves header fields and payload" do

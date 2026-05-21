@@ -192,20 +192,37 @@ defmodule Magnet.UtMetadata do
 
     assembled =
       Enum.reduce_while(0..(count - 1), <<>>, fn index, acc ->
-        expected = piece_byte_size(metadata_size, index)
-
-        case Map.get(pieces, index) do
-          bin when is_binary(bin) and byte_size(bin) == expected ->
-            {:cont, acc <> bin}
-
-          _ ->
-            {:halt, :incomplete}
-        end
+        append_piece_if_valid(pieces, metadata_size, index, acc)
       end)
 
-    case assembled do
-      :incomplete -> {:error, :incomplete}
-      blob when byte_size(blob) == metadata_size -> {:ok, blob}
+    validate_assembled_blob(assembled, metadata_size)
+  end
+
+  @spec append_piece_if_valid(
+          %{non_neg_integer() => binary()},
+          pos_integer(),
+          non_neg_integer(),
+          binary()
+        ) :: {:cont, binary()} | {:halt, :incomplete}
+  defp append_piece_if_valid(pieces, metadata_size, index, acc) do
+    expected = piece_byte_size(metadata_size, index)
+
+    case Map.get(pieces, index) do
+      bin when is_binary(bin) and byte_size(bin) == expected ->
+        {:cont, acc <> bin}
+
+      _ ->
+        {:halt, :incomplete}
+    end
+  end
+
+  @spec validate_assembled_blob(binary() | :incomplete, pos_integer()) ::
+          {:ok, binary()} | {:error, term()}
+  defp validate_assembled_blob(:incomplete, _metadata_size), do: {:error, :incomplete}
+
+  defp validate_assembled_blob(blob, metadata_size) when is_binary(blob) do
+    case byte_size(blob) do
+      ^metadata_size -> {:ok, blob}
       _ -> {:error, :size_mismatch}
     end
   end

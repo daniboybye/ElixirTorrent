@@ -958,15 +958,22 @@ defmodule Peer.ConnectionManagerTest.MockPeer do
     key = Peer.make_key(hash, id)
     Registry.register(Registry, {key, Peer}, nil)
 
-    {:ok, ctrl} =
-      GenServer.start_link(
-        Peer.Controller,
-        [hash, id, nil, Peer.reserved()],
-        name: {:via, Registry, {Registry, {key, Peer.Controller}}}
-      )
-
+    {:ok, ctrl} = start_mock_peer_controller(hash, id, key)
     Process.monitor(ctrl)
+    apply_mock_peer_controller_state(key, opts)
 
+    {:ok, %{controller: ctrl}}
+  end
+
+  defp start_mock_peer_controller(hash, id, key) do
+    GenServer.start_link(
+      Peer.Controller,
+      [hash, id, nil, Peer.reserved()],
+      name: {:via, Registry, {Registry, {key, Peer.Controller}}}
+    )
+  end
+
+  defp apply_mock_peer_controller_state(key, opts) do
     now = System.monotonic_time(:millisecond)
     age_ms = Keyword.get(opts, :age_ms, 0)
     downloaded_bytes = Keyword.get(opts, :downloaded_bytes, 0)
@@ -987,8 +994,6 @@ defmodule Peer.ConnectionManagerTest.MockPeer do
           interested: Keyword.get(opts, :interested, false)
       }
     end)
-
-    {:ok, %{controller: ctrl}}
   end
 
   @spec handle_info({:DOWN, reference(), :process, pid(), term()}, t()) ::

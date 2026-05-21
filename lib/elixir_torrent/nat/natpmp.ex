@@ -48,7 +48,14 @@ defmodule NAT.NATPMP do
       when proto in [:tcp, :udp] and is_integer(port) and port > 0 do
     bind_ip = Acceptor.primary_ips().inet || {0, 0, 0, 0}
     packet = encode_map_request(proto, port, port, lifetime_seconds)
+    map_port_packet(gateway, bind_ip, packet)
+  catch
+    :exit, _ -> {:error, :timeout}
+  end
 
+  @spec map_port_packet(:inet.ip_address(), :inet.ip_address(), binary()) ::
+          {:ok, :inet.port_number(), pos_integer()} | {:error, term()}
+  defp map_port_packet(gateway, bind_ip, packet) do
     with {:ok, socket} <- open_socket(bind_ip),
          :ok <- :gen_udp.send(socket, gateway, @port, packet),
          {:ok, data} <- recv_udp(socket, @recv_timeout),
@@ -59,8 +66,6 @@ defmodule NAT.NATPMP do
       {:error, _} = error ->
         error
     end
-  catch
-    :exit, _ -> {:error, :timeout}
   end
 
   defp open_socket(bind_ip) do

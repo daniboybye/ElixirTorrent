@@ -75,26 +75,37 @@ defmodule Peer.DialBackoff do
   @spec filter([Peer.t()], Torrent.hash(), non_neg_integer()) :: [Peer.t()]
   def filter(peers, hash, min_count \\ 0) when is_list(peers) and is_integer(min_count) do
     now = System.monotonic_time(:millisecond)
+    {allowed, blocked} = partition_by_block(peers, hash, now)
+    soft_blocked = reject_sticky_blocked(blocked, hash, now)
+    apply_min_count_resurrection(allowed, soft_blocked, hash, min_count)
+  catch
+    :exit, _ -> peers
+  end
 
-    {allowed, blocked} =
-      Enum.split_with(peers, fn %Peer{ip: ip, port: port} ->
-        not blocked?(hash, ip, port, now)
-      end)
+  @spec partition_by_block([Peer.t()], Torrent.hash(), integer()) :: {[Peer.t()], [Peer.t()]}
+  defp partition_by_block(peers, hash, now) do
+    Enum.split_with(peers, fn %Peer{ip: ip, port: port} ->
+      not blocked?(hash, ip, port, now)
+    end)
+  end
 
-    # Sticky blocks (churn / hard failures / escalated) stay blocked even under target.
-    soft_blocked =
-      Enum.reject(blocked, fn %Peer{ip: ip, port: port} ->
-        sticky_blocked?(hash, ip, port, now)
-      end)
+  # Sticky blocks (churn / hard failures / escalated) stay blocked even under target.
+  @spec reject_sticky_blocked([Peer.t()], Torrent.hash(), integer()) :: [Peer.t()]
+  defp reject_sticky_blocked(blocked, hash, now) do
+    Enum.reject(blocked, fn %Peer{ip: ip, port: port} ->
+      sticky_blocked?(hash, ip, port, now)
+    end)
+  end
 
+  @spec apply_min_count_resurrection([Peer.t()], [Peer.t()], Torrent.hash(), non_neg_integer()) ::
+          [Peer.t()]
+  defp apply_min_count_resurrection(allowed, soft_blocked, hash, min_count) do
     if min_count <= 0 or length(allowed) >= min_count or soft_blocked == [] do
       allowed
     else
       need = min(min_count - length(allowed), length(soft_blocked))
       allowed ++ take_blocked_for_min_count(soft_blocked, hash, need)
     end
-  catch
-    :exit, _ -> peers
   end
 
   @doc """
@@ -223,31 +234,58 @@ defmodule Peer.DialBackoff do
   def handle_cast({:record, hash, ip, port, ttl_ms, reason}, state) do
     now = System.monotonic_time(:millisecond)
     key = key(hash, ip, port)
+    {sticky?, fail_count} = insert_failure_record(key, ip, port, ttl_ms, reason, now)
+    maybe_evict_oldest(state)
+    maybe_log_escalation(sticky?, fail_count, reason, ip, port)
+    {:noreply, state}
+  end
+
+  @spec insert_failure_record(
+          term(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          pos_integer(),
+          term(),
+          integer()
+        ) :: {boolean(), pos_integer()}
+  defp insert_failure_record(key, _ip, _port, ttl_ms, reason, now) do
     productive? = productive_at?(key, now)
-
-    prev_fail_count =
-      case :ets.lookup(@table, key) do
-        [{_, _, _, _, n}] when is_integer(n) -> n
-        _ -> 0
-      end
-
+    prev_fail_count = lookup_fail_count(key)
     fail_count = prev_fail_count + 1
     {final_ttl, sticky?} = escalate(reason, fail_count, ttl_ms, productive?)
     blocked_until = now + final_ttl
     retention_until = max(blocked_until, now + @fail_count_retention_ms)
 
     true = :ets.insert(@table, {key, blocked_until, retention_until, sticky?, fail_count})
-    maybe_evict_oldest(state)
+    {sticky?, fail_count}
+  end
 
+  @spec lookup_fail_count(term()) :: non_neg_integer()
+  defp lookup_fail_count(key) do
+    case :ets.lookup(@table, key) do
+      [{_, _, _, _, n}] when is_integer(n) -> n
+      _ -> 0
+    end
+  end
+
+  @spec maybe_log_escalation(
+          boolean(),
+          pos_integer(),
+          term(),
+          :inet.ip_address(),
+          :inet.port_number()
+        ) ::
+          :ok
+  defp maybe_log_escalation(sticky?, fail_count, reason, ip, port) do
     if sticky? and fail_count == @hard_fail_threshold and reason not in @sticky_reasons do
       # Log the moment we escalate a transient endpoint — useful for confirming
       # the throttle is actually kicking in on the CGNAT hosts we care about.
       Logger.debug(
         "[peer_dial] escalated endpoint=#{inspect(ip)}:#{port} fail_count=#{fail_count} reason=#{inspect(reason)}"
       )
+    else
+      :ok
     end
-
-    {:noreply, state}
   end
 
   @impl GenServer

@@ -138,60 +138,76 @@ defmodule Magnet.Connection do
          {:ok, info} <- wait_controller_ready(key, info),
          :ok <- Peer.Sender.deactivate(key),
          true <- Session.peer_supports?(info.ltep, @ut_metadata) do
-      metadata_size = metadata_size_from_ltep(info.ltep) || info.metadata_size
-      now_ms = System.monotonic_time(:millisecond)
-
-      unchoked? = info.unchoked? == true
-
-      conn = %__MODULE__{
-        socket: nil,
-        peer_key: key,
-        ltep: info.ltep,
-        metadata_size: metadata_size,
-        hash: Peer.key_to_hash(key),
-        pex_source: Peer.key_to_id(key),
-        transport: :swarm,
-        peer: nil,
-        unchoked?: unchoked?,
-        unchoke_since: if(unchoked?, do: now_ms, else: nil),
-        pex_inbound: %{initial?: true, rate: InboundRate.initial()}
-      }
-
-      log_ltep_ready_swarm(key, conn.ltep, metadata_size)
-
-      Logger.debug(
-        "[magnet_ut] metadata_ready transport=swarm endpoint=peer=#{Peer.log_key(key)} unchoked=#{unchoked?}"
-      )
-
-      {:ok, conn}
+      {:ok, build_swarm_conn(key, info)}
     else
-      false ->
-        close_swarm(key)
-        {:error, :no_ut_metadata}
-
-      {:error, reason} = error ->
-        step =
-          case reason do
-            :metadata_unavailable -> :controller_ready
-            :choked -> :controller_unchoke
-            _ -> :controller_ready
-          end
-
-        Logger.debug(
-          "[magnet_ut] open_swarm_fail endpoint=peer=#{Peer.log_key(key)} step=#{step} reason=#{inspect(normalize_peer_error(reason))}"
-        )
-
-        close_swarm(key)
-        error
-
-      other ->
-        Logger.debug(
-          "[magnet_ut] open_swarm_fail endpoint=peer=#{Peer.log_key(key)} step=precondition reason=#{inspect(other)}"
-        )
-
-        close_swarm(key)
-        {:error, other}
+      other -> fail_open_swarm(key, other)
     end
+  end
+
+  @spec fail_open_swarm(Peer.key(), term()) :: {:error, term()}
+  defp fail_open_swarm(key, result) do
+    error =
+      case result do
+        false ->
+          {:error, :no_ut_metadata}
+
+        {:error, reason} = error ->
+          log_open_swarm_controller_error(key, reason)
+          error
+
+        other ->
+          Logger.debug(
+            "[magnet_ut] open_swarm_fail endpoint=peer=#{Peer.log_key(key)} step=precondition reason=#{inspect(other)}"
+          )
+
+          {:error, other}
+      end
+
+    close_swarm(key)
+    error
+  end
+
+  @spec build_swarm_conn(Peer.key(), map()) :: t()
+  defp build_swarm_conn(key, info) do
+    metadata_size = metadata_size_from_ltep(info.ltep) || info.metadata_size
+    now_ms = System.monotonic_time(:millisecond)
+    unchoked? = info.unchoked? == true
+
+    conn = %__MODULE__{
+      socket: nil,
+      peer_key: key,
+      ltep: info.ltep,
+      metadata_size: metadata_size,
+      hash: Peer.key_to_hash(key),
+      pex_source: Peer.key_to_id(key),
+      transport: :swarm,
+      peer: nil,
+      unchoked?: unchoked?,
+      unchoke_since: if(unchoked?, do: now_ms, else: nil),
+      pex_inbound: %{initial?: true, rate: InboundRate.initial()}
+    }
+
+    log_ltep_ready_swarm(key, conn.ltep, metadata_size)
+
+    Logger.debug(
+      "[magnet_ut] metadata_ready transport=swarm endpoint=peer=#{Peer.log_key(key)} unchoked=#{unchoked?}"
+    )
+
+    conn
+  end
+
+  @spec log_open_swarm_controller_error(Peer.key(), term()) :: :ok
+  defp log_open_swarm_controller_error(key, reason) do
+    step =
+      case reason do
+        :metadata_unavailable -> :controller_ready
+        :choked -> :controller_unchoke
+        _ -> :controller_ready
+      end
+
+    Logger.debug(
+      "[magnet_ut] open_swarm_fail endpoint=peer=#{Peer.log_key(key)} step=#{step} reason=#{inspect(normalize_peer_error(reason))}"
+    )
   end
 
   @doc false

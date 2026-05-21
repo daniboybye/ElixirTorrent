@@ -363,19 +363,27 @@ defmodule Peer.LTEPTest do
   end
 
   defp loopback_client_server do
-    parent = self()
-
-    {:ok, listen} =
-      :gen_tcp.listen(0, [
-        :binary,
-        active: false,
-        packet: :raw,
-        reuseaddr: true,
-        ip: {127, 0, 0, 1}
-      ])
-
+    {:ok, listen} = listen_loopback_raw()
     {:ok, port} = :inet.port(listen)
+    spawn_loopback_acceptor(listen, self())
 
+    {:ok, client} =
+      :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, packet: :raw], 5_000)
+
+    await_loopback_accept(client, listen, 5_000)
+  end
+
+  defp listen_loopback_raw do
+    :gen_tcp.listen(0, [
+      :binary,
+      active: false,
+      packet: :raw,
+      reuseaddr: true,
+      ip: {127, 0, 0, 1}
+    ])
+  end
+
+  defp spawn_loopback_acceptor(listen, parent) do
     spawn(fn ->
       case :gen_tcp.accept(listen, 5_000) do
         {:ok, server} ->
@@ -386,10 +394,9 @@ defmodule Peer.LTEPTest do
           send(parent, {:loopback_accept_error, error})
       end
     end)
+  end
 
-    {:ok, client} =
-      :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, packet: :raw], 5_000)
-
+  defp await_loopback_accept(client, listen, timeout) do
     receive do
       {:loopback_server, server} ->
         {client, server, listen}
@@ -399,7 +406,7 @@ defmodule Peer.LTEPTest do
         :gen_tcp.close(listen)
         flunk("accept failed: #{inspect(error)}")
     after
-      5_000 ->
+      timeout ->
         :gen_tcp.close(client)
         :gen_tcp.close(listen)
         flunk("accept timed out")

@@ -488,8 +488,20 @@ defmodule Peer.ConnectionManager do
 
   defp select_eviction_pids(candidates, connected) do
     candidates
+    |> eligible_eviction_candidates()
+    |> pick_eviction_pids(connected)
+  end
+
+  @spec eligible_eviction_candidates(list()) :: list()
+  defp eligible_eviction_candidates(candidates) do
+    candidates
     |> Enum.filter(&eviction_eligible?/1)
     |> Enum.sort_by(fn {_pid, info} -> eviction_sort_key(info) end)
+  end
+
+  @spec pick_eviction_pids(list(), non_neg_integer()) :: [pid()]
+  defp pick_eviction_pids(sorted_candidates, connected) do
+    sorted_candidates
     |> Enum.reduce({[], connected}, fn {pid, info}, {acc, remaining} ->
       if length(acc) < @evict_batch and may_evict?(info, remaining) do
         {[pid | acc], remaining - 1}

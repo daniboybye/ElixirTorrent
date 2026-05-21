@@ -694,20 +694,29 @@ defmodule Cycle2PureProtocolCoverageTest do
   end
 
   defp loopback_pair do
-    {:ok, listen} =
-      :gen_tcp.listen(0, [
-        :binary,
-        active: false,
-        packet: :raw,
-        reuseaddr: true,
-        ip: {127, 0, 0, 1}
-      ])
-
+    {:ok, listen} = listen_loopback_raw()
     {:ok, port} = :inet.port(listen)
-    parent = self()
+    spawn_loopback_acceptor(listen, self(), @timeout)
 
+    {:ok, client} =
+      :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, packet: :raw], @timeout)
+
+    await_loopback_server(client, listen, @timeout)
+  end
+
+  defp listen_loopback_raw do
+    :gen_tcp.listen(0, [
+      :binary,
+      active: false,
+      packet: :raw,
+      reuseaddr: true,
+      ip: {127, 0, 0, 1}
+    ])
+  end
+
+  defp spawn_loopback_acceptor(listen, parent, timeout) do
     spawn(fn ->
-      case :gen_tcp.accept(listen, @timeout) do
+      case :gen_tcp.accept(listen, timeout) do
         {:ok, server} ->
           :ok = :gen_tcp.controlling_process(server, parent)
           send(parent, {:loopback_server, server})
@@ -716,15 +725,14 @@ defmodule Cycle2PureProtocolCoverageTest do
           send(parent, {:loopback_accept_error, error})
       end
     end)
+  end
 
-    {:ok, client} =
-      :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, packet: :raw], @timeout)
-
+  defp await_loopback_server(client, listen, timeout) do
     receive do
       {:loopback_server, server} -> {client, server, listen}
       {:loopback_accept_error, error} -> flunk("accept failed: #{inspect(error)}")
     after
-      @timeout -> flunk("accept timed out")
+      timeout -> flunk("accept timed out")
     end
   end
 

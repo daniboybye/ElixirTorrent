@@ -286,31 +286,45 @@ defmodule Magnet.Fetcher do
 
     case Magnet.ConnectedMetadata.fetch(magnet, announced_trackers) do
       {:ok, _, _, _} = ok ->
-        Magnet.Bootstrap.stop(magnet.hash)
-        ok
+        stop_bootstrap_and_return(magnet, ok)
 
       {:error, :info_hash_mismatch} = error ->
-        Magnet.Bootstrap.stop(magnet.hash)
-        error
+        stop_bootstrap_and_return(magnet, error)
 
       {:error, swarm_reason} ->
-        Logger.debug(
-          "[magnet_fetch] swarm_failed hash=#{hash_hex} reason=#{inspect(swarm_reason)} trying_direct"
-        )
+        try_direct_after_swarm_fail(magnet, peers, announced_trackers, hash_hex, swarm_reason)
+    end
+  end
 
-        case fetch_metadata(magnet, peers, announced_trackers) do
-          {:ok, _, _, _} = ok ->
-            Magnet.Bootstrap.stop(magnet.hash)
-            ok
+  @spec stop_bootstrap_and_return(Magnet.t(), term()) :: term()
+  defp stop_bootstrap_and_return(magnet, result) do
+    Magnet.Bootstrap.stop(magnet.hash)
+    result
+  end
 
-          {:error, :info_hash_mismatch} = error ->
-            Magnet.Bootstrap.stop(magnet.hash)
-            error
+  @spec try_direct_after_swarm_fail(
+          Magnet.t(),
+          [Peer.t()],
+          [String.t()],
+          String.t(),
+          term()
+        ) ::
+          {:ok, Path.t(), [String.t()], boolean()} | {:error, term()}
+  defp try_direct_after_swarm_fail(magnet, peers, announced_trackers, hash_hex, swarm_reason) do
+    Logger.debug(
+      "[magnet_fetch] swarm_failed hash=#{hash_hex} reason=#{inspect(swarm_reason)} trying_direct"
+    )
 
-          {:error, :metadata_unavailable} ->
-            Magnet.Bootstrap.stop(magnet.hash)
-            merge_metadata_unavailable_errors(swarm_reason, :metadata_unavailable)
-        end
+    case fetch_metadata(magnet, peers, announced_trackers) do
+      {:ok, _, _, _} = ok ->
+        stop_bootstrap_and_return(magnet, ok)
+
+      {:error, :info_hash_mismatch} = error ->
+        stop_bootstrap_and_return(magnet, error)
+
+      {:error, :metadata_unavailable} ->
+        Magnet.Bootstrap.stop(magnet.hash)
+        merge_metadata_unavailable_errors(swarm_reason, :metadata_unavailable)
     end
   end
 
@@ -389,59 +403,78 @@ defmodule Magnet.Fetcher do
   @spec discover_peers(Magnet.t(), keyword()) :: {[Peer.t()], [String.t()]}
   defp discover_peers(%Magnet{} = magnet, stats) do
     background_dht = take_background_dht_peers(magnet.hash)
-
     tracker_task = Task.async(fn -> collect_tracker_peers(magnet, stats) end)
+    dht_task = maybe_start_dht_discovery_task(magnet.hash)
 
-    dht_task =
-      if DHT.enabled?() do
-        Task.async(fn -> dht_peers_with_retry(magnet.hash, include_deep: false) end)
-      end
-
-    tracker_timeout = min(tracker_await_timeout_ms(magnet), @tracker_await_cap_ms)
-
-    {tracker_peers, announced_trackers} =
-      try do
-        Task.await(tracker_task, tracker_timeout)
-      catch
-        :exit, _ ->
-          Logger.debug(
-            "[magnet_fetch] tracker_discovery_timeout hash=#{Torrent.hex_encoded_hash(magnet.hash)} timeout_ms=#{tracker_timeout}"
-          )
-
-          {[], Enum.uniq(magnet.trackers)}
-      end
-
+    {tracker_peers, announced_trackers} = await_tracker_discovery(magnet, tracker_task)
     quick_dht_peers = await_dht_peers(dht_task)
-
-    dht_peers_list =
-      cond do
-        quick_dht_peers != [] ->
-          quick_dht_peers
-
-        not DHT.enabled?() ->
-          []
-
-        tracker_peers == [] ->
-          dht_peers_deep_retry(magnet.hash)
-
-        true ->
-          maybe_spawn_dht_deep_background(magnet.hash)
-          []
-      end
-
-    dht_peers_list = background_dht ++ dht_peers_list
-    x_pe_peers = magnet.x_pe_peers
+    dht_peers_list = resolve_dht_peers_list(magnet.hash, quick_dht_peers, tracker_peers)
 
     peers =
-      (x_pe_peers ++ tracker_peers ++ dht_peers_list)
-      |> Enum.uniq_by(&peer_key/1)
-      |> Enum.take(@max_peers)
+      merge_discovered_peers(
+        magnet.x_pe_peers,
+        tracker_peers,
+        background_dht ++ dht_peers_list
+      )
 
-    Logger.debug(
-      "[magnet_fetch] peer_discovery hash=#{Torrent.hex_encoded_hash(magnet.hash)} trackers=#{length(magnet.trackers)} x_pe=#{length(x_pe_peers)} tracker_peers=#{length(tracker_peers)} dht_peers=#{length(dht_peers_list)} unique=#{length(peers)}"
-    )
+    log_peer_discovery(magnet, tracker_peers, dht_peers_list, peers)
 
     {peers, announced_trackers}
+  end
+
+  @spec maybe_start_dht_discovery_task(Torrent.hash()) :: Task.t() | nil
+  defp maybe_start_dht_discovery_task(hash) do
+    if DHT.enabled?() do
+      Task.async(fn -> dht_peers_with_retry(hash, include_deep: false) end)
+    end
+  end
+
+  @spec await_tracker_discovery(Magnet.t(), Task.t()) :: {[Peer.t()], [String.t()]}
+  defp await_tracker_discovery(magnet, tracker_task) do
+    tracker_timeout = min(tracker_await_timeout_ms(magnet), @tracker_await_cap_ms)
+
+    try do
+      Task.await(tracker_task, tracker_timeout)
+    catch
+      :exit, _ ->
+        Logger.debug(
+          "[magnet_fetch] tracker_discovery_timeout hash=#{Torrent.hex_encoded_hash(magnet.hash)} timeout_ms=#{tracker_timeout}"
+        )
+
+        {[], Enum.uniq(magnet.trackers)}
+    end
+  end
+
+  @spec resolve_dht_peers_list(Torrent.hash(), [Peer.t()], [Peer.t()]) :: [Peer.t()]
+  defp resolve_dht_peers_list(hash, quick_dht_peers, tracker_peers) do
+    cond do
+      quick_dht_peers != [] ->
+        quick_dht_peers
+
+      not DHT.enabled?() ->
+        []
+
+      tracker_peers == [] ->
+        dht_peers_deep_retry(hash)
+
+      true ->
+        maybe_spawn_dht_deep_background(hash)
+        []
+    end
+  end
+
+  @spec merge_discovered_peers([Peer.t()], [Peer.t()], [Peer.t()]) :: [Peer.t()]
+  defp merge_discovered_peers(x_pe_peers, tracker_peers, dht_peers_list) do
+    (x_pe_peers ++ tracker_peers ++ dht_peers_list)
+    |> Enum.uniq_by(&peer_key/1)
+    |> Enum.take(@max_peers)
+  end
+
+  @spec log_peer_discovery(Magnet.t(), [Peer.t()], [Peer.t()], [Peer.t()]) :: :ok
+  defp log_peer_discovery(magnet, tracker_peers, dht_peers_list, peers) do
+    Logger.debug(
+      "[magnet_fetch] peer_discovery hash=#{Torrent.hex_encoded_hash(magnet.hash)} trackers=#{length(magnet.trackers)} x_pe=#{length(magnet.x_pe_peers)} tracker_peers=#{length(tracker_peers)} dht_peers=#{length(dht_peers_list)} unique=#{length(peers)}"
+    )
   end
 
   @dht_retry_delays_ms [0, 2_000, 5_000, 8_000]
@@ -738,40 +771,58 @@ defmodule Magnet.Fetcher do
 
     result =
       try do
-        peer_batch
-        |> Task.async_stream(
-          fn peer -> fetch_metadata_from_peer(magnet, peer, peers) end,
-          max_concurrency: @max_connections,
-          ordered: false,
-          timeout: metadata_peer_timeout_ms(),
-          on_timeout: :kill_task
-        )
-        |> Enum.reduce_while(nil, fn
-          {:ok, {:ok, path, private?}}, _acc ->
-            {:halt, {:ok, path, private?}}
-
-          {:ok, {:error, :info_hash_mismatch}}, _acc ->
-            {:halt, {:error, :info_hash_mismatch}}
-
-          _, acc ->
-            {:cont, acc}
-        end)
+        run_direct_metadata_fetch(magnet, peer_batch, peers)
       after
         ConnectionLimit.release(slots)
       end
 
-    case result do
-      {:ok, path, private?} ->
-        Logger.info("[magnet_fetch] metadata_verified hash=#{hash_hex}")
-        {:ok, path, announced_trackers, private?}
+    finalize_direct_metadata_result(result, hash_hex, announced_trackers)
+  end
 
-      {:error, :info_hash_mismatch} = error ->
-        error
+  @spec run_direct_metadata_fetch(Magnet.t(), [Peer.t()], [Peer.t()]) ::
+          {:ok, Path.t(), boolean()} | {:error, :info_hash_mismatch} | nil
+  defp run_direct_metadata_fetch(magnet, peer_batch, peers) do
+    peer_batch
+    |> Task.async_stream(
+      fn peer -> fetch_metadata_from_peer(magnet, peer, peers) end,
+      max_concurrency: @max_connections,
+      ordered: false,
+      timeout: metadata_peer_timeout_ms(),
+      on_timeout: :kill_task
+    )
+    |> Enum.reduce_while(nil, fn
+      {:ok, {:ok, path, private?}}, _acc ->
+        {:halt, {:ok, path, private?}}
 
-      nil ->
-        Logger.debug("[magnet_fetch] metadata_unavailable hash=#{hash_hex}")
-        {:error, :metadata_unavailable}
-    end
+      {:ok, {:error, :info_hash_mismatch}}, _acc ->
+        {:halt, {:error, :info_hash_mismatch}}
+
+      _, acc ->
+        {:cont, acc}
+    end)
+  end
+
+  @spec finalize_direct_metadata_result(
+          {:ok, Path.t(), boolean()} | {:error, :info_hash_mismatch} | nil,
+          String.t(),
+          [String.t()]
+        ) ::
+          {:ok, Path.t(), [String.t()], boolean()} | {:error, term()}
+  defp finalize_direct_metadata_result({:ok, path, private?}, hash_hex, announced_trackers) do
+    Logger.info("[magnet_fetch] metadata_verified hash=#{hash_hex}")
+    {:ok, path, announced_trackers, private?}
+  end
+
+  defp finalize_direct_metadata_result(
+         {:error, :info_hash_mismatch} = error,
+         _hash_hex,
+         _trackers
+       ),
+       do: error
+
+  defp finalize_direct_metadata_result(nil, hash_hex, _announced_trackers) do
+    Logger.debug("[magnet_fetch] metadata_unavailable hash=#{hash_hex}")
+    {:error, :metadata_unavailable}
   end
 
   @doc false
@@ -783,31 +834,41 @@ defmodule Magnet.Fetcher do
   @spec fetch_metadata_from_peer(Magnet.t(), Peer.t(), [Peer.t()]) ::
           {:ok, Path.t(), boolean()} | {:error, term()}
   defp fetch_metadata_from_peer(%Magnet{} = magnet, %Peer{} = primary, all_peers) do
-    peer_pool =
-      all_peers
-      |> List.delete(primary)
-      |> then(&[primary | &1])
-      |> shuffle()
-      |> Enum.take(@connection_pool_size)
+    peer_pool = build_peer_connection_pool(primary, all_peers)
 
     with {:ok, connections} <- open_connection_pool(magnet, peer_pool) do
       try do
-        with {:ok, metadata_blob} <- download_pieces(connections, magnet.hash),
-             {:ok, info, blob} <-
-               Magnet.UtMetadata.decode_and_verify_info(metadata_blob, magnet.hash),
-             {:ok, path} <- write_torrent(magnet, blob) do
-          {:ok, path, Magnet.private?(info)}
-        else
-          {:error, :info_hash_mismatch} ->
-            Logger.warning("magnet metadata failed info-hash verification")
-            {:error, :info_hash_mismatch}
-
-          {:error, _} = error ->
-            error
-        end
+        download_verify_and_write(magnet, connections)
       after
         Enum.each(connections, &Magnet.Connection.close/1)
       end
+    end
+  end
+
+  @spec build_peer_connection_pool(Peer.t(), [Peer.t()]) :: [Peer.t()]
+  defp build_peer_connection_pool(primary, all_peers) do
+    all_peers
+    |> List.delete(primary)
+    |> then(&[primary | &1])
+    |> shuffle()
+    |> Enum.take(@connection_pool_size)
+  end
+
+  @spec download_verify_and_write(Magnet.t(), [Magnet.Connection.t()]) ::
+          {:ok, Path.t(), boolean()} | {:error, term()}
+  defp download_verify_and_write(magnet, connections) do
+    with {:ok, metadata_blob} <- download_pieces(connections, magnet.hash),
+         {:ok, info, blob} <-
+           Magnet.UtMetadata.decode_and_verify_info(metadata_blob, magnet.hash),
+         {:ok, path} <- write_torrent(magnet, blob) do
+      {:ok, path, Magnet.private?(info)}
+    else
+      {:error, :info_hash_mismatch} ->
+        Logger.warning("magnet metadata failed info-hash verification")
+        {:error, :info_hash_mismatch}
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -874,21 +935,22 @@ defmodule Magnet.Fetcher do
 
   @spec infer_metadata_size([Magnet.Connection.t()]) :: pos_integer() | nil
   defp infer_metadata_size(connections) do
-    connections
-    |> Enum.find_value(fn
-      %Magnet.Connection{metadata_size: size} when is_integer(size) and size > 0 ->
-        size
-
-      %Magnet.Connection{ltep: ltep} when not is_nil(ltep) ->
-        case Peer.LTEP.Session.peer_handshake(ltep).metadata_size do
-          size when is_integer(size) and size > 0 -> size
-          _ -> nil
-        end
-
-      _ ->
-        nil
-    end)
+    Enum.find_value(connections, &metadata_size_from_conn/1)
   end
+
+  @spec metadata_size_from_conn(Magnet.Connection.t()) :: pos_integer() | nil
+  defp metadata_size_from_conn(%Magnet.Connection{metadata_size: size})
+       when is_integer(size) and size > 0,
+       do: size
+
+  defp metadata_size_from_conn(%Magnet.Connection{ltep: ltep}) when not is_nil(ltep) do
+    case Peer.LTEP.Session.peer_handshake(ltep).metadata_size do
+      size when is_integer(size) and size > 0 -> size
+      _ -> nil
+    end
+  end
+
+  defp metadata_size_from_conn(_), do: nil
 
   @spec fetch_missing_pieces(
           [Magnet.Connection.t()],

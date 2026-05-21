@@ -321,31 +321,44 @@ defmodule Acceptor.Connection.Handshakes do
           {non_neg_integer(), map(), [{Peer.t(), term()}], fam_stats()}
   defp dial_peers_async(peers, hash) do
     peers
-    |> Task.async_stream(
-      fn peer ->
-        try do
-          {peer, do_send(peer, hash)}
-        catch
-          :exit, reason -> {peer, {:error, reason}}
-          kind, reason -> {peer, {:error, {kind, reason}}}
-        end
-      end,
+    |> Task.async_stream(&dial_peer_async_task(&1, hash),
       max_concurrency: @max_concurrency,
       timeout:
         @connect_timeout_v6_ms + @utp_connect_timeout_ms + @handshake_recv_timeout_ms + 2_000,
       on_timeout: :kill_task
     )
-    |> Enum.reduce({0, %{}, [], %{inet: {0, 0}, inet6: {0, 0}}}, fn
-      {:ok, {peer, :ok}}, {ok, failures, failed, fam} ->
-        {ok + 1, failures, failed, bump_fam(fam, peer, :ok)}
+    |> Enum.reduce(dial_peers_async_init(), &dial_peers_async_step/2)
+  end
 
-      {:ok, {peer, {:error, reason}}}, {ok, failures, failed, fam} ->
-        {ok, increment_failure(failures, reason), [{peer, reason} | failed],
-         bump_fam_failure(fam, peer, reason)}
+  @spec dial_peers_async_init() :: {non_neg_integer(), map(), [{Peer.t(), term()}], fam_stats()}
+  defp dial_peers_async_init, do: {0, %{}, [], %{inet: {0, 0}, inet6: {0, 0}}}
 
-      {:exit, reason}, {ok, failures, failed, fam} ->
-        {ok, increment_failure(failures, reason), failed, fam}
-    end)
+  @spec dial_peer_async_task(Peer.t(), Torrent.hash()) :: {Peer.t(), :ok | {:error, term()}}
+  defp dial_peer_async_task(peer, hash) do
+    try do
+      {peer, do_send(peer, hash)}
+    catch
+      :exit, reason -> {peer, {:error, reason}}
+      kind, reason -> {peer, {:error, {kind, reason}}}
+    end
+  end
+
+  @spec dial_peers_async_step(
+          term(),
+          {non_neg_integer(), map(), [{Peer.t(), term()}], fam_stats()}
+        ) ::
+          {non_neg_integer(), map(), [{Peer.t(), term()}], fam_stats()}
+  defp dial_peers_async_step({:ok, {peer, :ok}}, {ok, failures, failed, fam}) do
+    {ok + 1, failures, failed, bump_fam(fam, peer, :ok)}
+  end
+
+  defp dial_peers_async_step({:ok, {peer, {:error, reason}}}, {ok, failures, failed, fam}) do
+    {ok, increment_failure(failures, reason), [{peer, reason} | failed],
+     bump_fam_failure(fam, peer, reason)}
+  end
+
+  defp dial_peers_async_step({:exit, reason}, {ok, failures, failed, fam}) do
+    {ok, increment_failure(failures, reason), failed, fam}
   end
 
   @spec increment_failure(map(), term()) :: map()
@@ -786,8 +799,16 @@ defmodule Acceptor.Connection.Handshakes do
 
     with {:ok, %{recv: r, send: s, leftover: ia}} <-
            Handshake.respond(socket, resolver, @handshake_recv_timeout_ms, prefix),
-         mse_socket = Peer.Transport.wrap(socket, %{recv: r, send: s}),
-         {hash, peer_id, reserved} <- parse_handshake(ia),
+         mse_socket = Peer.Transport.wrap(socket, %{recv: r, send: s}) do
+      finalize_inbound_mse(socket, mse_socket, ia)
+    else
+      _ -> safe_close(socket)
+    end
+  end
+
+  @spec finalize_inbound_mse(Peer.Transport.socket(), Peer.Transport.socket(), binary()) :: :ok
+  defp finalize_inbound_mse(raw_socket, mse_socket, ia) do
+    with {hash, peer_id, reserved} <- parse_handshake(ia),
          false <- BlackList.member?(peer_id),
          true <- Torrent.has_hash?(hash),
          :ok <- send_msg(mse_socket, hash),
@@ -798,7 +819,7 @@ defmodule Acceptor.Connection.Handshakes do
 
       :ok
     else
-      _ -> safe_close(socket)
+      _ -> safe_close(raw_socket)
     end
   end
 
@@ -880,6 +901,32 @@ defmodule Acceptor.Connection.Handshakes do
         ) ::
           :ok | {:error, term()}
   defp handoff_socket(hash, peer_supervisor, socket, endpoint, origin) do
+    case run_handoff_steps(hash, peer_supervisor, socket, endpoint, origin) do
+      :ok ->
+        Logger.debug(
+          "[peer_handoff] ok hash=#{Torrent.hex_encoded_hash(hash)} endpoint=#{inspect(endpoint)}"
+        )
+
+        notify_current_piece(hash, peer_supervisor)
+        :ok
+
+      reason ->
+        log_handoff_failure(hash, endpoint, reason)
+
+        safe_close(socket)
+        Peer.disconnect(peer_supervisor)
+        {:error, :socket_handoff_failed}
+    end
+  end
+
+  @spec run_handoff_steps(
+          Torrent.hash(),
+          pid(),
+          Peer.Transport.socket(),
+          term(),
+          :inbound | :outbound
+        ) :: :ok | term()
+  defp run_handoff_steps(hash, peer_supervisor, socket, endpoint, origin) do
     with sender when is_pid(sender) <- Peer.sender_pid(peer_supervisor),
          key when is_tuple(key) <- Peer.get_key(peer_supervisor),
          :ok <- register_endpoint(hash, endpoint, peer_supervisor),
@@ -887,19 +934,7 @@ defmodule Acceptor.Connection.Handshakes do
          :ok <- maybe_set_connection_origin(key, origin),
          :ok <- start_peer_protocol(key),
          :ok <- safe_activate(key) do
-      Logger.debug(
-        "[peer_handoff] ok hash=#{Torrent.hex_encoded_hash(hash)} endpoint=#{inspect(endpoint)}"
-      )
-
-      notify_current_piece(hash, peer_supervisor)
       :ok
-    else
-      reason ->
-        log_handoff_failure(hash, endpoint, reason)
-
-        safe_close(socket)
-        Peer.disconnect(peer_supervisor)
-        {:error, :socket_handoff_failed}
     end
   end
 

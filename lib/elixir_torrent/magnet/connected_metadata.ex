@@ -54,53 +54,66 @@ defmodule Magnet.ConnectedMetadata do
 
       Logger.debug("[magnet_swarm] metadata_start hash=#{hash_hex} swarm_peers=#{peer_count}")
 
-      {result, failures} =
-        keys
-        |> Enum.take(max_peers())
-        |> Task.async_stream(
-          fn key -> fetch_from_peer(magnet, key) end,
-          max_concurrency: metadata_parallel(),
-          ordered: false,
-          timeout: peer_timeout_ms(),
-          on_timeout: :kill_task
-        )
-        |> Enum.reduce_while({{:error, :metadata_unavailable}, []}, fn
-          {:ok, {:ok, path, private?}}, _acc ->
-            {:halt, {{:ok, path, announced_trackers, private?}, []}}
-
-          {:ok, {:error, :info_hash_mismatch}}, _acc ->
-            {:halt, {{:error, :info_hash_mismatch}, []}}
-
-          {:ok, {:error, reason}}, {_, failures} ->
-            {:cont, {{:error, :metadata_unavailable}, [reason | failures]}}
-
-          {:exit, reason}, {_, failures} ->
-            {:cont, {{:error, :metadata_unavailable}, [{:exit, reason} | failures]}}
-
-          _, acc ->
-            {:cont, acc}
-        end)
-
-      case result do
-        {:ok, path, trackers, private?} ->
-          Logger.info("[magnet_swarm] metadata_verified hash=#{hash_hex}")
-          {:ok, path, trackers, private?}
-
-        {:error, :info_hash_mismatch} = err ->
-          err
-
-        {:error, _} ->
-          normalized_failures =
-            failures
-            |> Enum.reverse()
-            |> Enum.map(&normalize_failure/1)
-            |> Enum.uniq()
-
-          log_metadata_round_exhausted(hash_hex, peer_count, normalized_failures)
-
-          {:error, {:metadata_unavailable, normalized_failures}}
-      end
+      finalize_parallel_fetch(magnet, announced_trackers, hash_hex, peer_count, keys)
     end
+  end
+
+  @spec finalize_parallel_fetch(Magnet.t(), [String.t()], String.t(), non_neg_integer(), [
+          Peer.key()
+        ]) ::
+          {:ok, Path.t(), [String.t()], boolean()} | {:error, term()}
+  defp finalize_parallel_fetch(magnet, announced_trackers, hash_hex, peer_count, keys) do
+    {result, failures} = run_parallel_metadata_fetch(magnet, announced_trackers, keys)
+
+    case result do
+      {:ok, path, trackers, private?} ->
+        Logger.info("[magnet_swarm] metadata_verified hash=#{hash_hex}")
+        {:ok, path, trackers, private?}
+
+      {:error, :info_hash_mismatch} = err ->
+        err
+
+      {:error, _} ->
+        normalized_failures =
+          failures
+          |> Enum.reverse()
+          |> Enum.map(&normalize_failure/1)
+          |> Enum.uniq()
+
+        log_metadata_round_exhausted(hash_hex, peer_count, normalized_failures)
+
+        {:error, {:metadata_unavailable, normalized_failures}}
+    end
+  end
+
+  @spec run_parallel_metadata_fetch(Magnet.t(), [String.t()], [Peer.key()]) ::
+          {{:ok, Path.t(), [String.t()], boolean()} | {:error, term()}, [term()]}
+  defp run_parallel_metadata_fetch(magnet, announced_trackers, keys) do
+    keys
+    |> Enum.take(max_peers())
+    |> Task.async_stream(
+      fn key -> fetch_from_peer(magnet, key) end,
+      max_concurrency: metadata_parallel(),
+      ordered: false,
+      timeout: peer_timeout_ms(),
+      on_timeout: :kill_task
+    )
+    |> Enum.reduce_while({{:error, :metadata_unavailable}, []}, fn
+      {:ok, {:ok, path, private?}}, _acc ->
+        {:halt, {{:ok, path, announced_trackers, private?}, []}}
+
+      {:ok, {:error, :info_hash_mismatch}}, _acc ->
+        {:halt, {{:error, :info_hash_mismatch}, []}}
+
+      {:ok, {:error, reason}}, {_, failures} ->
+        {:cont, {{:error, :metadata_unavailable}, [reason | failures]}}
+
+      {:exit, reason}, {_, failures} ->
+        {:cont, {{:error, :metadata_unavailable}, [{:exit, reason} | failures]}}
+
+      _, acc ->
+        {:cont, acc}
+    end)
   end
 
   @spec log_metadata_round_exhausted(String.t(), non_neg_integer(), [term()]) :: :ok
@@ -122,38 +135,16 @@ defmodule Magnet.ConnectedMetadata do
     with {:ok, info} <- safe_metadata_capable(key),
          {:ok, info} <- wait_metadata_ready(key, info),
          true <- metadata_peer?(info) do
-      Logger.debug(
-        "[magnet_swarm] metadata_peer endpoint=#{endpoint} metadata_size=#{inspect(info.metadata_size)} unchoked=#{info.unchoked?} pid=#{peer_pid(key)}"
-      )
-
-      with {:ok, conn} <- Magnet.Connection.open_swarm(key, info),
-           result <- Magnet.Connection.fetch_info(conn, magnet.hash),
-           :ok <- Magnet.Connection.close(conn) do
-        finalize_swarm_fetch(magnet, key, endpoint, result)
-      else
-        {:error, reason} = error ->
-          log_peer_failure(endpoint, :open_swarm, reason, key)
-          Magnet.Connection.close_swarm(key)
-          error
-      end
+      fetch_swarm_metadata(magnet, key, endpoint, info)
     else
       false ->
-        Logger.debug(
-          "[magnet_swarm] metadata_peer_skip endpoint=#{endpoint} reason=no_ut_metadata"
-        )
-
-        {:error, :no_ut_metadata}
+        skip_metadata_peer(endpoint, :no_ut_metadata)
 
       {:error, :metadata_size_pending} ->
-        Logger.debug(
-          "[magnet_swarm] metadata_peer_skip endpoint=#{endpoint} reason=metadata_size_pending"
-        )
-
-        {:error, :metadata_size_pending}
+        skip_metadata_peer(endpoint, :metadata_size_pending)
 
       :error ->
-        Logger.debug("[magnet_swarm] metadata_peer_skip endpoint=#{endpoint} reason=no_session")
-        {:error, :no_metadata_session}
+        skip_metadata_peer(endpoint, :no_session)
 
       {:error, reason} ->
         log_peer_failure(endpoint, :metadata_capable, reason, key)
@@ -164,6 +155,45 @@ defmodule Magnet.ConnectedMetadata do
       log_peer_failure(peer_endpoint(key), :exit, reason, key)
       Magnet.Connection.close_swarm(key)
       {:error, normalize_peer_error(reason)}
+  end
+
+  @spec fetch_swarm_metadata(Magnet.t(), Peer.key(), String.t(), map()) ::
+          {:ok, Path.t(), boolean()} | {:error, term()}
+  defp fetch_swarm_metadata(magnet, key, endpoint, info) do
+    Logger.debug(
+      "[magnet_swarm] metadata_peer endpoint=#{endpoint} metadata_size=#{inspect(info.metadata_size)} unchoked=#{info.unchoked?} pid=#{peer_pid(key)}"
+    )
+
+    with {:ok, conn} <- Magnet.Connection.open_swarm(key, info),
+         result <- Magnet.Connection.fetch_info(conn, magnet.hash),
+         :ok <- Magnet.Connection.close(conn) do
+      finalize_swarm_fetch(magnet, key, endpoint, result)
+    else
+      {:error, reason} = error ->
+        log_peer_failure(endpoint, :open_swarm, reason, key)
+        Magnet.Connection.close_swarm(key)
+        error
+    end
+  end
+
+  @spec skip_metadata_peer(String.t(), atom()) :: {:error, term()}
+  defp skip_metadata_peer(endpoint, :no_ut_metadata) do
+    Logger.debug("[magnet_swarm] metadata_peer_skip endpoint=#{endpoint} reason=no_ut_metadata")
+
+    {:error, :no_ut_metadata}
+  end
+
+  defp skip_metadata_peer(endpoint, :metadata_size_pending) do
+    Logger.debug(
+      "[magnet_swarm] metadata_peer_skip endpoint=#{endpoint} reason=metadata_size_pending"
+    )
+
+    {:error, :metadata_size_pending}
+  end
+
+  defp skip_metadata_peer(endpoint, :no_session) do
+    Logger.debug("[magnet_swarm] metadata_peer_skip endpoint=#{endpoint} reason=no_session")
+    {:error, :no_metadata_session}
   end
 
   @spec finalize_swarm_fetch(Magnet.t(), Peer.key(), String.t(), term()) ::

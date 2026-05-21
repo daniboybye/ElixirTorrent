@@ -942,11 +942,19 @@ defmodule TorrentStorageCoverageBatchTest do
   defp random_piece, do: :crypto.strong_rand_bytes(@piece_len)
 
   defp build_tiny_torrent(piece_bins, opts \\ []) do
-    piece_bins =
-      Enum.map(piece_bins, fn bin ->
-        if byte_size(bin) == @piece_len, do: bin, else: pad_piece(bin)
-      end)
+    piece_bins = normalize_piece_bins(piece_bins)
+    {info_map, info_blob, hash} = build_tiny_info(piece_bins, opts)
+    torrent = build_tiny_torrent_struct(info_map, info_blob, hash, piece_bins, opts)
+    {torrent, piece_bins}
+  end
 
+  defp normalize_piece_bins(piece_bins) do
+    Enum.map(piece_bins, fn bin ->
+      if byte_size(bin) == @piece_len, do: bin, else: pad_piece(bin)
+    end)
+  end
+
+  defp build_tiny_info(piece_bins, opts) do
     pieces_hash =
       piece_bins
       |> Enum.map(fn bin -> :crypto.hash(:sha, bin) end)
@@ -963,6 +971,11 @@ defmodule TorrentStorageCoverageBatchTest do
 
     info_blob = Bento.encode!(info_map)
     hash = Keyword.get(opts, :hash, :crypto.hash(:sha, info_blob))
+    {info_map, info_blob, hash}
+  end
+
+  defp build_tiny_torrent_struct(info_map, info_blob, hash, piece_bins, opts) do
+    total_len = length(piece_bins) * @piece_len
 
     metadata =
       %{"info" => info_map}
@@ -970,7 +983,7 @@ defmodule TorrentStorageCoverageBatchTest do
 
     bitfield = Keyword.get(opts, :bitfield, Bitfield.make(length(piece_bins)))
 
-    torrent = %Torrent{
+    %Torrent{
       hash: hash,
       metadata: metadata,
       info_blob: info_blob,
@@ -982,8 +995,6 @@ defmodule TorrentStorageCoverageBatchTest do
       download_dir: File.cwd!(),
       peer_status: nil
     }
-
-    {torrent, piece_bins}
   end
 
   defp maybe_put_url_list(meta, nil), do: meta

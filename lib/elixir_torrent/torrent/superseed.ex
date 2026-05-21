@@ -140,21 +140,12 @@ defmodule Torrent.Superseed do
     peer_pieces = Map.get(state.peer_pieces, peer_id, MapSet.new()) |> MapSet.put(index)
     state = put_in(state.peer_pieces[peer_id], peer_pieces)
 
-    case Enum.find(state.assignments, fn {_assigned_peer, piece} -> piece == index end) do
+    case find_assignment_for_piece(state.assignments, index) do
       nil ->
         {:reply, :ok, state}
 
-      {assigned_peer, ^index} ->
-        state = update_in(state.assignments, &Map.delete(&1, assigned_peer))
-        {reply, state} = assign_peer(state, assigned_peer)
-
-        new_piece =
-          case reply do
-            {:ok, piece} -> piece
-            :none -> nil
-          end
-
-        {:reply, {:rotate, assigned_peer, new_piece}, state}
+      assigned_peer ->
+        rotate_assignment_after_have(state, assigned_peer, index)
     end
   end
 
@@ -208,6 +199,26 @@ defmodule Torrent.Superseed do
 
         {{:ok, piece}, state}
     end
+  end
+
+  defp find_assignment_for_piece(assignments, index) do
+    case Enum.find(assignments, fn {_assigned_peer, piece} -> piece == index end) do
+      {assigned_peer, ^index} -> assigned_peer
+      _ -> nil
+    end
+  end
+
+  defp rotate_assignment_after_have(state, assigned_peer, _index) do
+    state = update_in(state.assignments, &Map.delete(&1, assigned_peer))
+    {reply, state} = assign_peer(state, assigned_peer)
+
+    new_piece =
+      case reply do
+        {:ok, piece} -> piece
+        :none -> nil
+      end
+
+    {:reply, {:rotate, assigned_peer, new_piece}, state}
   end
 
   defp availabilities(hash) do

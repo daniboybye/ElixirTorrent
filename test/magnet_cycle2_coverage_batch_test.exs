@@ -1047,6 +1047,19 @@ defmodule Magnet.Cycle2CoverageBatchTest do
   end
 
   defp with_metadata_peers(hash, peer_specs, fun) do
+    {model_pid, servers} = setup_metadata_peers(hash, peer_specs)
+    await_metadata_servers_ready(servers)
+
+    on_exit(fn ->
+      stop_swarm(hash)
+      TestSupport.Sync.safe_stop(model_pid, @timeout)
+    end)
+
+    keys = Map.keys(servers) |> Enum.map(&Peer.make_key(hash, &1))
+    fun.(keys, servers)
+  end
+
+  defp setup_metadata_peers(hash, peer_specs) do
     torrent = sample_torrent(hash, 4)
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
     :ok = Torrent.PiecesStatistic.init(torrent)
@@ -1060,17 +1073,13 @@ defmodule Magnet.Cycle2CoverageBatchTest do
         end
       end)
 
+    {model_pid, servers}
+  end
+
+  defp await_metadata_servers_ready(servers) do
     for {_id, ref} <- servers, is_pid(ref) do
       assert_receive {:metadata_server_ready, ^ref}, @timeout
     end
-
-    on_exit(fn ->
-      stop_swarm(hash)
-      TestSupport.Sync.safe_stop(model_pid, @timeout)
-    end)
-
-    keys = Map.keys(servers) |> Enum.map(&Peer.make_key(hash, &1))
-    fun.(keys, servers)
   end
 
   defp install_metadata_peer(acc, hash, id, wire_blob, metadata_size, meta_opts) do
@@ -1174,27 +1183,32 @@ defmodule Magnet.Cycle2CoverageBatchTest do
   end
 
   defp recv_swarm_wire_frame(socket) do
+    case recv_swarm_wire_length(socket) do
+      {:ok, :keepalive} -> recv_swarm_wire_frame(socket)
+      {:ok, len} when len >= 1 -> decode_swarm_wire_frame_body(socket, len)
+      {:error, :closed} -> {:error, :closed}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp recv_swarm_wire_length(socket) do
     case :gen_tcp.recv(socket, 4, @timeout) do
-      {:ok, <<0, 0, 0, 0>>} ->
-        recv_swarm_wire_frame(socket)
+      {:ok, <<0, 0, 0, 0>>} -> {:ok, :keepalive}
+      {:ok, <<len::32>>} -> {:ok, len}
+      error -> error
+    end
+  end
 
-      {:ok, <<len::32>>} when len >= 1 ->
-        case :gen_tcp.recv(socket, len, @timeout) do
-          {:ok, <<20, ext_id, payload::binary>>} when len >= 2 ->
-            {:ok, {:extended, ext_id, payload}}
+  defp decode_swarm_wire_frame_body(socket, len) do
+    case :gen_tcp.recv(socket, len, @timeout) do
+      {:ok, <<20, ext_id, payload::binary>>} when len >= 2 ->
+        {:ok, {:extended, ext_id, payload}}
 
-          {:ok, <<msg_id>>} when len == 1 ->
-            {:ok, {:standard, msg_id, <<>>}}
+      {:ok, <<msg_id>>} when len == 1 ->
+        {:ok, {:standard, msg_id, <<>>}}
 
-          {:ok, <<msg_id, rest::binary>>} ->
-            {:ok, {:standard, msg_id, rest}}
-
-          {:error, _} = error ->
-            error
-        end
-
-      {:error, :closed} ->
-        {:error, :closed}
+      {:ok, <<msg_id, rest::binary>>} ->
+        {:ok, {:standard, msg_id, rest}}
 
       {:error, _} = error ->
         error
@@ -1222,6 +1236,18 @@ defmodule Magnet.Cycle2CoverageBatchTest do
   end
 
   defp with_open_swarm_stack(hash, fun) do
+    {model_pid, client, server, listen, key} = setup_open_swarm_stack(hash)
+    register_open_swarm_stack_cleanup(client, server, listen, hash, model_pid)
+
+    assert {:ok, peer_sup} = Torrent.Swarm.add(hash, <<8::160>>, Peer.reserved(), client)
+    sender = Peer.sender_pid(peer_sup)
+    assert :ok = Peer.Transport.controlling_process(client, sender)
+    assert :ok = Peer.Sender.activate(key)
+
+    fun.(key, server)
+  end
+
+  defp setup_open_swarm_stack(hash) do
     torrent = sample_torrent(hash, 4)
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
     :ok = Torrent.PiecesStatistic.init(torrent)
@@ -1231,18 +1257,15 @@ defmodule Magnet.Cycle2CoverageBatchTest do
     id = <<8::160>>
     key = Peer.make_key(hash, id)
 
+    {model_pid, client, server, listen, key}
+  end
+
+  defp register_open_swarm_stack_cleanup(client, server, listen, hash, model_pid) do
     on_exit(fn ->
       for sock <- [client, server, listen], do: close_quietly(sock)
       stop_swarm(hash)
       TestSupport.Sync.safe_stop(model_pid, @timeout)
     end)
-
-    assert {:ok, peer_sup} = Torrent.Swarm.add(hash, id, Peer.reserved(), client)
-    sender = Peer.sender_pid(peer_sup)
-    assert :ok = Peer.Transport.controlling_process(client, sender)
-    assert :ok = Peer.Sender.activate(key)
-
-    fun.(key, server)
   end
 
   defp ltep_with_ut_metadata(opts) do

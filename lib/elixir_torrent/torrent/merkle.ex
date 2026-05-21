@@ -117,28 +117,9 @@ defmodule Torrent.Merkle do
 
   def proof(%__MODULE__{levels: levels, block_count: block_count}, index, layer)
       when is_integer(index) and index >= 0 and is_integer(layer) and layer >= 0 do
-    actual_nodes = ceil_div(block_count, Integer.pow(2, layer))
-
-    cond do
-      layer >= length(levels) ->
-        {:error, :invalid_layer}
-
-      index >= actual_nodes ->
-        {:error, :invalid_index}
-
-      true ->
-        proof =
-          levels
-          |> Enum.drop(layer)
-          |> Enum.drop(-1)
-          |> Enum.reduce({index, []}, fn nodes, {node_index, siblings} ->
-            sibling_index = Bitwise.bxor(node_index, 1)
-            {div(node_index, 2), [Enum.at(nodes, sibling_index) | siblings]}
-          end)
-          |> elem(1)
-          |> Enum.reverse()
-
-        {:ok, proof}
+    case validate_proof_params(levels, block_count, index, layer) do
+      :ok -> {:ok, build_proof_from_levels(levels, index, layer)}
+      error -> error
     end
   end
 
@@ -445,37 +426,16 @@ defmodule Torrent.Merkle do
          {:ok, piece_layer} <- piece_layer_level(piece_length),
          {:ok, fd} <- :file.open(path, [:binary, :raw, :read]) do
       try do
-        metadata_levels = metadata_levels(piece_hashes, piece_layer)
-
-        indices =
-          leaf_read_index_set(block_count, piece_length, piece_layer, index, length, proof_layers)
-
-        cache = read_leaf_cache(fd, file_length, block_count, indices)
-
-        with :ok <-
-               verify_piece_subtrees(
-                 cache,
-                 piece_hashes,
-                 piece_length,
-                 block_count,
-                 index,
-                 length
-               ) do
-          base = for leaf <- index..(index + length - 1), do: Map.fetch!(cache, leaf)
-
-          proofs =
-            proof_siblings_from_disk(
-              metadata_levels,
-              cache,
-              block_count,
-              piece_layer,
-              index,
-              length,
-              proof_layers
-            )
-
-          {:ok, base ++ proofs}
-        end
+        leaf_range_response_from_fd(fd, %{
+          file_length: file_length,
+          piece_hashes: piece_hashes,
+          piece_length: piece_length,
+          index: index,
+          length: length,
+          proof_layers: proof_layers,
+          block_count: block_count,
+          piece_layer: piece_layer
+        })
       after
         :file.close(fd)
       end
@@ -570,22 +530,15 @@ defmodule Torrent.Merkle do
       {stream_end, all_files, piece_specs} = build_stream_layout(files, piece_length, 0, [], [])
       piece_count = length(piece_specs)
 
-      # The alignment gap belongs to the piece address space, but peers only
-      # transfer the file-owned prefix of each file's final piece.
-      piece_lengths =
-        Enum.map(piece_specs, fn %{file: file, file_piece_index: index} ->
-          min(piece_length, file.length - index * piece_length)
-        end)
-
       {:ok,
-       %{
-         address_space_length: stream_end,
-         content_length: Enum.reduce(files, 0, &(&1.length + &2)),
-         piece_count: piece_count,
-         piece_lengths: piece_lengths,
-         all_files: all_files,
-         piece_specs: piece_specs
-       }}
+       build_piece_stream_layout(
+         stream_end,
+         files,
+         piece_length,
+         piece_count,
+         all_files,
+         piece_specs
+       )}
     end
   end
 
@@ -625,22 +578,7 @@ defmodule Torrent.Merkle do
     file_data = binary_part(piece_bytes, 0, bytes_in_file)
 
     cache =
-      for block_idx <- 0..(blocks_per_piece - 1),
-          block_start = block_idx * @block_size,
-          into: %{} do
-        leaf_index = file_piece_index * blocks_per_piece + block_idx
-
-        hash =
-          if block_start >= bytes_in_file do
-            @zero_hash
-          else
-            size = min(@block_size, bytes_in_file - block_start)
-            <<chunk::binary-size(^size), _::binary>> = binary_part(file_data, block_start, size)
-            :crypto.hash(:sha256, chunk)
-          end
-
-        {leaf_index, hash}
-      end
+      build_piece_leaf_cache(blocks_per_piece, file_piece_index, bytes_in_file, file_data)
 
     block_count = file_block_count(file.length)
     piece_subtree_hash(cache, block_count, blocks_per_piece, file_piece_index)
@@ -660,6 +598,133 @@ defmodule Torrent.Merkle do
 
     expected != nil and
       hash_file_piece_bytes(file, piece_length, file_piece_index, piece_bytes) == expected
+  end
+
+  defp validate_proof_params(levels, block_count, index, layer) do
+    actual_nodes = ceil_div(block_count, Integer.pow(2, layer))
+
+    cond do
+      layer >= length(levels) -> {:error, :invalid_layer}
+      index >= actual_nodes -> {:error, :invalid_index}
+      true -> :ok
+    end
+  end
+
+  defp build_proof_from_levels(levels, index, layer) do
+    levels
+    |> Enum.drop(layer)
+    |> Enum.drop(-1)
+    |> Enum.reduce({index, []}, fn nodes, {node_index, siblings} ->
+      sibling_index = Bitwise.bxor(node_index, 1)
+      {div(node_index, 2), [Enum.at(nodes, sibling_index) | siblings]}
+    end)
+    |> elem(1)
+    |> Enum.reverse()
+  end
+
+  defp build_piece_stream_layout(
+         stream_end,
+         files,
+         piece_length,
+         piece_count,
+         all_files,
+         piece_specs
+       ) do
+    # The alignment gap belongs to the piece address space, but peers only
+    # transfer the file-owned prefix of each file's final piece.
+    piece_lengths =
+      Enum.map(piece_specs, fn %{file: file, file_piece_index: index} ->
+        min(piece_length, file.length - index * piece_length)
+      end)
+
+    %{
+      address_space_length: stream_end,
+      content_length: Enum.reduce(files, 0, &(&1.length + &2)),
+      piece_count: piece_count,
+      piece_lengths: piece_lengths,
+      all_files: all_files,
+      piece_specs: piece_specs
+    }
+  end
+
+  defp build_piece_leaf_cache(blocks_per_piece, file_piece_index, bytes_in_file, file_data) do
+    for block_idx <- 0..(blocks_per_piece - 1),
+        block_start = block_idx * @block_size,
+        into: %{} do
+      leaf_index = file_piece_index * blocks_per_piece + block_idx
+
+      hash =
+        if block_start >= bytes_in_file do
+          @zero_hash
+        else
+          size = min(@block_size, bytes_in_file - block_start)
+          <<chunk::binary-size(^size), _::binary>> = binary_part(file_data, block_start, size)
+          :crypto.hash(:sha256, chunk)
+        end
+
+      {leaf_index, hash}
+    end
+  end
+
+  defp leaf_range_response_from_fd(fd, ctx) do
+    metadata_levels = metadata_levels(ctx.piece_hashes, ctx.piece_layer)
+
+    indices =
+      leaf_read_index_set(
+        ctx.block_count,
+        ctx.piece_length,
+        ctx.piece_layer,
+        ctx.index,
+        ctx.length,
+        ctx.proof_layers
+      )
+
+    cache = read_leaf_cache(fd, ctx.file_length, ctx.block_count, indices)
+
+    with :ok <-
+           verify_piece_subtrees(
+             cache,
+             ctx.piece_hashes,
+             ctx.piece_length,
+             ctx.block_count,
+             ctx.index,
+             ctx.length
+           ) do
+      base = for leaf <- ctx.index..(ctx.index + ctx.length - 1), do: Map.fetch!(cache, leaf)
+
+      proofs =
+        proof_siblings_from_disk(
+          metadata_levels,
+          cache,
+          ctx.block_count,
+          ctx.piece_layer,
+          ctx.index,
+          ctx.length,
+          ctx.proof_layers
+        )
+
+      {:ok, base ++ proofs}
+    end
+  end
+
+  defp piece_leaf_indices(blocks_per_piece, first_piece, last_piece, block_count) do
+    for piece <- first_piece..last_piece,
+        leaf <-
+          (piece * blocks_per_piece)..min((piece + 1) * blocks_per_piece - 1, block_count - 1),
+        into: MapSet.new(),
+        do: leaf
+  end
+
+  defp proof_leaf_indices(block_count, piece_length, piece_layer, index, length, proof_layers) do
+    proof_sibling_leaf_indices(
+      block_count,
+      piece_length,
+      piece_layer,
+      index,
+      length,
+      proof_layers
+    )
+    |> MapSet.new()
   end
 
   defp build_stream_layout([], _piece_length, stream_end, all_files, piece_specs),
@@ -1198,23 +1263,10 @@ defmodule Torrent.Merkle do
     first_piece = div(index, blocks_per_piece)
     last_piece = div(index + length - 1, blocks_per_piece)
 
-    piece_indices =
-      for piece <- first_piece..last_piece,
-          leaf <-
-            (piece * blocks_per_piece)..min((piece + 1) * blocks_per_piece - 1, block_count - 1),
-          into: MapSet.new(),
-          do: leaf
+    piece_indices = piece_leaf_indices(blocks_per_piece, first_piece, last_piece, block_count)
 
     proof_indices =
-      proof_sibling_leaf_indices(
-        block_count,
-        piece_length,
-        piece_layer,
-        index,
-        length,
-        proof_layers
-      )
-      |> MapSet.new()
+      proof_leaf_indices(block_count, piece_length, piece_layer, index, length, proof_layers)
 
     MapSet.new(index..(index + length - 1))
     |> MapSet.union(proof_indices)

@@ -285,6 +285,23 @@ defmodule Peer.HashTransferTest do
   end
 
   defp with_model(hash, root, fun) do
+    {dir, path} = setup_hash_xfer_dir!()
+    on_exit(fn -> File.rm_rf!(dir) end)
+
+    File.write!(path, :binary.copy(<<?x>>, @block * 4))
+
+    torrent = build_hash_xfer_torrent(hash, dir, build_hash_xfer_merkle(root))
+    {:ok, model} = Torrent.Model.start_link(torrent)
+    {:ok, _} = FileHandle.Store.start_link(hash)
+
+    on_exit(fn ->
+      TestSupport.Sync.safe_stop(model, 2_000)
+    end)
+
+    fun.()
+  end
+
+  defp setup_hash_xfer_dir! do
     dir =
       Path.join(
         System.tmp_dir!(),
@@ -292,12 +309,11 @@ defmodule Peer.HashTransferTest do
       )
 
     File.mkdir_p!(dir)
-    on_exit(fn -> File.rm_rf!(dir) end)
+    {dir, Path.join(dir, "data.bin")}
+  end
 
-    path = Path.join(dir, "data.bin")
-    File.write!(path, :binary.copy(<<?x>>, @block * 4))
-
-    merkle = %{
+  defp build_hash_xfer_merkle(root) do
+    %{
       piece_length: @block * 4,
       files: [
         %{
@@ -308,8 +324,10 @@ defmodule Peer.HashTransferTest do
         }
       ]
     }
+  end
 
-    torrent = %Torrent{
+  defp build_hash_xfer_torrent(hash, dir, merkle) do
+    %Torrent{
       hash: hash,
       metadata: %{
         "info" => %{"name" => "t", "piece length" => @block * 4, "length" => @block * 4}
@@ -321,17 +339,6 @@ defmodule Peer.HashTransferTest do
       kind: :hybrid,
       merkle: merkle
     }
-
-    {:ok, model} = Torrent.Model.start_link(torrent)
-    {:ok, _} = FileHandle.Store.start_link(hash)
-
-    on_exit(fn ->
-      for pid <- [model] do
-        TestSupport.Sync.safe_stop(pid, 2_000)
-      end
-    end)
-
-    fun.()
   end
 end
 

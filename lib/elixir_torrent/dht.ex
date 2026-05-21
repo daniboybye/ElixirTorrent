@@ -166,47 +166,13 @@ defmodule DHT do
     # persists the routing table). A plain GenServer would be killed outright by
     # exit(:shutdown) without terminate ever firing.
     Process.flag(:trap_exit, true)
+
     node_id = NodeId.get()
 
-    with {:ok, socket_v4, socket_v6, port} <- open_sockets(),
-         :ok <- bind_socket(socket_v4),
-         :ok <- maybe_bind_socket(socket_v6) do
-      tables = RoutingStore.load(RoutingTables.new(node_id))
-      tokens = Token.new()
+    case init_open_dht(node_id) do
+      {:ok, state} ->
+        {:ok, state}
 
-      schedule_bootstrap()
-      schedule_token_rotate(@token_rotate_ms)
-      schedule_refresh(@refresh_ms)
-      schedule_persist(@persist_ms)
-      :ok = :inet.setopts(socket_v4, active: :once)
-      if socket_v6, do: :inet.setopts(socket_v6, active: :once)
-
-      %{inet: ip4, inet6: ip6} = Acceptor.primary_ips()
-
-      Logger.info(
-        "[dht] socket family=inet port=#{port} bind=#{if ip4, do: Acceptor.format_ip(ip4), else: "any"} want=#{inspect(dht_want())}"
-      )
-
-      if socket_v6 && ip6 do
-        Logger.info(
-          "[dht] socket family=inet6 port=#{port} bind=#{Acceptor.format_ip(ip6)} v6only=true"
-        )
-      end
-
-      Logger.info(
-        "[dht] listening port=#{port} ipv4=#{if ip4, do: Acceptor.format_ip(ip4), else: "none"} ipv6=#{if ip6, do: Acceptor.format_ip(ip6), else: "none"} routing_v4=#{RoutingTable.node_count(tables.v4)} routing_v6=#{RoutingTable.node_count(tables.v6)}"
-      )
-
-      {:ok,
-       %__MODULE__{
-         socket_v4: socket_v4,
-         socket_v6: socket_v6,
-         node_id: node_id,
-         port: port,
-         routing_tables: tables,
-         tokens: tokens
-       }}
-    else
       {:error, reason} ->
         Logger.warning("DHT disabled: could not bind UDP port reason=#{inspect(reason)}")
         {:stop, reason}
@@ -315,24 +281,7 @@ defmodule DHT do
   end
 
   def handle_info({:lookup_timeout, ref}, state) do
-    case Map.get(state.lookups, ref) do
-      nil ->
-        {:noreply, state}
-
-      %{purpose: :bootstrap} ->
-        {:noreply, drop_lookup(state, ref)}
-
-      %{purpose: :announce} = lookup ->
-        {:noreply, finish_announce(state, ref, lookup)}
-
-      %{from: from, peers: peers} when peers != [] ->
-        GenServer.reply(from, {:ok, cap_lookup_peers(peers, Config.max_lookup_peers())})
-        {:noreply, drop_lookup(state, ref)}
-
-      %{from: from} ->
-        GenServer.reply(from, {:error, :no_peers})
-        {:noreply, drop_lookup(state, ref)}
-    end
+    {:noreply, handle_lookup_timeout(state, ref)}
   end
 
   def handle_info({:reannounce, hash, port}, state) do
@@ -1636,6 +1585,98 @@ defmodule DHT do
     do: Map.put(response, :token, token)
 
   defp maybe_put_token(response, nil), do: response
+
+  @spec init_open_dht(RoutingTable.node_id()) :: {:ok, t()} | {:error, term()}
+  defp init_open_dht(node_id) do
+    with {:ok, socket_v4, socket_v6, port} <- open_sockets(),
+         :ok <- bind_socket(socket_v4),
+         :ok <- maybe_bind_socket(socket_v6) do
+      tables = RoutingStore.load(RoutingTables.new(node_id))
+      tokens = Token.new()
+      init_schedules()
+      activate_udp_sockets(socket_v4, socket_v6)
+      log_dht_listen(socket_v4, socket_v6, port, tables)
+      {:ok, init_state(socket_v4, socket_v6, node_id, port, tables, tokens)}
+    end
+  end
+
+  @spec init_schedules() :: :ok
+  defp init_schedules do
+    schedule_bootstrap()
+    schedule_token_rotate(@token_rotate_ms)
+    schedule_refresh(@refresh_ms)
+    schedule_persist(@persist_ms)
+    :ok
+  end
+
+  @spec activate_udp_sockets(port(), port() | nil) :: :ok
+  defp activate_udp_sockets(socket_v4, socket_v6) do
+    :ok = :inet.setopts(socket_v4, active: :once)
+    if socket_v6, do: :inet.setopts(socket_v6, active: :once)
+    :ok
+  end
+
+  @spec log_dht_listen(port(), port() | nil, :inet.port_number(), RoutingTables.t()) :: :ok
+  defp log_dht_listen(_socket_v4, socket_v6, port, tables) do
+    %{inet: ip4, inet6: ip6} = Acceptor.primary_ips()
+
+    Logger.info(
+      "[dht] socket family=inet port=#{port} bind=#{if ip4, do: Acceptor.format_ip(ip4), else: "any"} want=#{inspect(dht_want())}"
+    )
+
+    if socket_v6 && ip6 do
+      Logger.info(
+        "[dht] socket family=inet6 port=#{port} bind=#{Acceptor.format_ip(ip6)} v6only=true"
+      )
+    end
+
+    Logger.info(
+      "[dht] listening port=#{port} ipv4=#{if ip4, do: Acceptor.format_ip(ip4), else: "none"} ipv6=#{if ip6, do: Acceptor.format_ip(ip6), else: "none"} routing_v4=#{RoutingTable.node_count(tables.v4)} routing_v6=#{RoutingTable.node_count(tables.v6)}"
+    )
+
+    :ok
+  end
+
+  @spec init_state(
+          port(),
+          port() | nil,
+          RoutingTable.node_id(),
+          :inet.port_number(),
+          RoutingTables.t(),
+          Token.t()
+        ) :: t()
+  defp init_state(socket_v4, socket_v6, node_id, port, tables, tokens) do
+    %__MODULE__{
+      socket_v4: socket_v4,
+      socket_v6: socket_v6,
+      node_id: node_id,
+      port: port,
+      routing_tables: tables,
+      tokens: tokens
+    }
+  end
+
+  @spec handle_lookup_timeout(t(), reference()) :: t()
+  defp handle_lookup_timeout(state, ref) do
+    case Map.get(state.lookups, ref) do
+      nil ->
+        state
+
+      %{purpose: :bootstrap} ->
+        drop_lookup(state, ref)
+
+      %{purpose: :announce} = lookup ->
+        finish_announce(state, ref, lookup)
+
+      %{from: from, peers: peers} when peers != [] ->
+        GenServer.reply(from, {:ok, cap_lookup_peers(peers, Config.max_lookup_peers())})
+        drop_lookup(state, ref)
+
+      %{from: from} ->
+        GenServer.reply(from, {:error, :no_peers})
+        drop_lookup(state, ref)
+    end
+  end
 
   @spec schedule_bootstrap() :: reference()
   defp schedule_bootstrap, do: Process.send_after(self(), :bootstrap, @bootstrap_after_ms)

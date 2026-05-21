@@ -189,25 +189,41 @@ defmodule Peer.DialBackoffStateM do
 
   @spec model_filter(model(), [Peer.t()], non_neg_integer()) :: [Peer.t()]
   defp model_filter(state, peers, min_count) do
-    {allowed, blocked} =
-      Enum.split_with(peers, fn %Peer{ip: ip, port: port} ->
-        not Map.has_key?(state.blocks, {ip, port})
-      end)
+    {allowed, blocked} = split_allowed_peers(state, peers)
+    soft_blocked = filter_soft_blocked(state, blocked)
+    resolve_filtered_peers(state, allowed, soft_blocked, min_count)
+  end
 
-    soft_blocked =
-      Enum.reject(blocked, fn %Peer{ip: ip, port: port} ->
-        case Map.get(state.blocks, {ip, port}) do
-          %{sticky: true} -> true
-          _ -> false
-        end
-      end)
+  defp split_allowed_peers(state, peers) do
+    Enum.split_with(peers, fn %Peer{ip: ip, port: port} ->
+      not Map.has_key?(state.blocks, {ip, port})
+    end)
+  end
 
-    if min_count <= 0 or length(allowed) >= min_count or soft_blocked == [] do
-      allowed
-    else
-      need = min(min_count - length(allowed), length(soft_blocked))
-      allowed ++ take_soft(state, soft_blocked, need)
-    end
+  defp filter_soft_blocked(state, blocked) do
+    Enum.reject(blocked, fn %Peer{ip: ip, port: port} ->
+      match?(%{sticky: true}, Map.get(state.blocks, {ip, port}))
+    end)
+  end
+
+  defp resolve_filtered_peers(_state, allowed, _soft_blocked, min_count)
+       when min_count <= 0 do
+    allowed
+  end
+
+  defp resolve_filtered_peers(_state, allowed, soft_blocked, _min_count)
+       when soft_blocked == [] do
+    allowed
+  end
+
+  defp resolve_filtered_peers(_state, allowed, _soft_blocked, min_count)
+       when length(allowed) >= min_count do
+    allowed
+  end
+
+  defp resolve_filtered_peers(state, allowed, soft_blocked, min_count) do
+    need = min(min_count - length(allowed), length(soft_blocked))
+    allowed ++ take_soft(state, soft_blocked, need)
   end
 
   defp take_soft(_state, _blocked, 0), do: []

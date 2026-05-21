@@ -105,6 +105,35 @@ defmodule UTP.Packet do
 
   @spec decode(binary()) :: {:ok, t(), binary(), [extension()]} | {:error, decode_error()}
   def decode(data) when byte_size(data) >= @header_size do
+    {type_ver, extension, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr, rest} =
+      parse_header_bytes(data)
+
+    with {:ok, version} <- version_ok(type_ver),
+         {:ok, extensions, payload} <- decode_extensions(extension, rest) do
+      header =
+        build_header(
+          type_ver,
+          extension,
+          version,
+          conn_id,
+          timestamp,
+          timestamp_diff,
+          wnd_size,
+          seq_nr,
+          ack_nr,
+          extensions
+        )
+
+      {:ok, header, payload, extensions}
+    end
+  end
+
+  def decode(_), do: {:error, :too_short}
+
+  @spec parse_header_bytes(binary()) ::
+          {byte(), byte(), 0..65_535, 0..4_294_967_295, 0..4_294_967_295, 0..4_294_967_295,
+           0..65_535, 0..65_535, binary()}
+  defp parse_header_bytes(data) do
     <<
       type_ver,
       extension,
@@ -118,26 +147,46 @@ defmodule UTP.Packet do
 
     rest = binary_part(data, @header_size, byte_size(data) - @header_size)
 
-    with {:ok, version} <- version_ok(type_ver),
-         {:ok, extensions, payload} <- decode_extensions(extension, rest) do
-      header = %__MODULE__{
-        type: type(type_ver),
-        version: version,
-        extension: extension,
-        conn_id: conn_id,
-        timestamp: timestamp,
-        timestamp_difference: timestamp_diff,
-        wnd_size: wnd_size,
-        seq_nr: seq_nr,
-        ack_nr: ack_nr,
-        extensions: extensions
-      }
-
-      {:ok, header, payload, extensions}
-    end
+    {type_ver, extension, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr, rest}
   end
 
-  def decode(_), do: {:error, :too_short}
+  @spec build_header(
+          byte(),
+          byte(),
+          byte(),
+          0..65_535,
+          0..4_294_967_295,
+          0..4_294_967_295,
+          0..4_294_967_295,
+          0..65_535,
+          0..65_535,
+          [extension()]
+        ) :: t()
+  defp build_header(
+         type_ver,
+         extension,
+         version,
+         conn_id,
+         timestamp,
+         timestamp_diff,
+         wnd_size,
+         seq_nr,
+         ack_nr,
+         extensions
+       ) do
+    %__MODULE__{
+      type: type(type_ver),
+      version: version,
+      extension: extension,
+      conn_id: conn_id,
+      timestamp: timestamp,
+      timestamp_difference: timestamp_diff,
+      wnd_size: wnd_size,
+      seq_nr: seq_nr,
+      ack_nr: ack_nr,
+      extensions: extensions
+    }
+  end
 
   @spec selective_ack_acks(t(), [extension()]) :: [0..65_535]
   def selective_ack_acks(%__MODULE__{ack_nr: ack_nr}, extensions) do

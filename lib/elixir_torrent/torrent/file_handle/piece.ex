@@ -334,49 +334,61 @@ defmodule Torrent.FileHandle.Piece do
 
   defp hash_check(torrent_hash, index, piece, fds, context) do
     {:ok, block} = do_read(piece.offset, piece.length, fds)
-
-    res =
-      case FileHandle.context(torrent_hash) do
-        %{kind: :v2, piece_specs: specs, piece_length: piece_length} when is_list(specs) ->
-          case Enum.at(specs, index) do
-            %{file: file, file_piece_index: file_piece_index} ->
-              Merkle.verify_file_piece(file, piece_length, file_piece_index, block)
-
-            _ ->
-              false
-          end
-
-        _ ->
-          # v1 and hybrid torrents keep the BEP 3 SHA-1 piece list check.
-          piece.hash === :crypto.hash(:sha, block)
-      end
-
-    hash_hex = Torrent.hex_encoded_hash(torrent_hash)
+    res = verify_piece_hash(torrent_hash, index, piece, block)
 
     if res do
-      log_verify(context, "[piece_verify] hash=#{hash_hex} index=#{index} result=ok", :ok)
-
-      Model.downloaded_piece(torrent_hash, index)
-      PiecesStatistic.set(torrent_hash, index, :complete)
+      handle_hash_check_success(torrent_hash, index, context)
     else
-      # During :resume a mismatch just means the piece isn't on disk yet — not a
-      # failure. During :download it means a peer served corrupt data, which is a
-      # genuine warning (and the caller drops that block/peer).
-      if context == :download do
-        invalidate_piece_on_disk(piece, fds)
-      end
-
-      log_verify(
-        context,
-        "[piece_verify] hash=#{hash_hex} index=#{index} result=#{if context == :resume, do: "absent", else: "fail"} expected_len=#{piece.length} read_bytes=#{byte_size(block)}",
-        :fail
-      )
-
-      Model.hash_check_failure(torrent_hash, index)
-      PiecesStatistic.set(torrent_hash, index, nil)
+      handle_hash_check_failure(torrent_hash, index, piece, fds, block, context)
     end
 
     res
+  end
+
+  defp verify_piece_hash(torrent_hash, index, piece, block) do
+    case FileHandle.context(torrent_hash) do
+      %{kind: :v2, piece_specs: specs, piece_length: piece_length} when is_list(specs) ->
+        case Enum.at(specs, index) do
+          %{file: file, file_piece_index: file_piece_index} ->
+            Merkle.verify_file_piece(file, piece_length, file_piece_index, block)
+
+          _ ->
+            false
+        end
+
+      _ ->
+        # v1 and hybrid torrents keep the BEP 3 SHA-1 piece list check.
+        piece.hash === :crypto.hash(:sha, block)
+    end
+  end
+
+  defp handle_hash_check_success(torrent_hash, index, context) do
+    hash_hex = Torrent.hex_encoded_hash(torrent_hash)
+
+    log_verify(context, "[piece_verify] hash=#{hash_hex} index=#{index} result=ok", :ok)
+
+    Model.downloaded_piece(torrent_hash, index)
+    PiecesStatistic.set(torrent_hash, index, :complete)
+  end
+
+  defp handle_hash_check_failure(torrent_hash, index, piece, fds, block, context) do
+    hash_hex = Torrent.hex_encoded_hash(torrent_hash)
+
+    # During :resume a mismatch just means the piece isn't on disk yet — not a
+    # failure. During :download it means a peer served corrupt data, which is a
+    # genuine warning (and the caller drops that block/peer).
+    if context == :download do
+      invalidate_piece_on_disk(piece, fds)
+    end
+
+    log_verify(
+      context,
+      "[piece_verify] hash=#{hash_hex} index=#{index} result=#{if context == :resume, do: "absent", else: "fail"} expected_len=#{piece.length} read_bytes=#{byte_size(block)}",
+      :fail
+    )
+
+    Model.hash_check_failure(torrent_hash, index)
+    PiecesStatistic.set(torrent_hash, index, nil)
   end
 
   defp log_verify(:download, msg, :ok), do: Logger.debug(msg)

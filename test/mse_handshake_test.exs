@@ -10,33 +10,35 @@ defmodule Peer.MSE.HandshakeTest do
   defp run_handshake(info_hash, ia, candidate_hashes) do
     {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listen)
-    parent = self()
-
-    server =
-      spawn_link(fn ->
-        {:ok, sock} = :gen_tcp.accept(listen, @timeout)
-        result = Handshake.respond(sock, Handshake.resolver(candidate_hashes), @timeout)
-        send(parent, {:server, result, sock})
-        # hold the socket open so the caller can exchange test bytes
-        receive do
-          :close -> :gen_tcp.close(sock)
-        after
-          @timeout -> :gen_tcp.close(sock)
-        end
-      end)
-
+    server = spawn_mse_responder(listen, candidate_hashes, self())
     {:ok, client} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], @timeout)
     client_result = Handshake.initiate(client, info_hash, ia, @timeout)
-
-    server_result =
-      receive do
-        {:server, r, sock} -> {r, sock}
-      after
-        @timeout -> flunk("responder did not finish")
-      end
-
+    server_result = await_mse_server_result(@timeout)
     :gen_tcp.close(listen)
     {client, client_result, server_result, server}
+  end
+
+  defp spawn_mse_responder(listen, candidate_hashes, parent) do
+    spawn_link(fn ->
+      {:ok, sock} = :gen_tcp.accept(listen, @timeout)
+      result = Handshake.respond(sock, Handshake.resolver(candidate_hashes), @timeout)
+      send(parent, {:server, result, sock})
+
+      # hold the socket open so the caller can exchange test bytes
+      receive do
+        :close -> :gen_tcp.close(sock)
+      after
+        @timeout -> :gen_tcp.close(sock)
+      end
+    end)
+  end
+
+  defp await_mse_server_result(timeout) do
+    receive do
+      {:server, r, sock} -> {r, sock}
+    after
+      timeout -> flunk("responder did not finish")
+    end
   end
 
   test "initiator and responder complete the handshake and recover the IA payload" do

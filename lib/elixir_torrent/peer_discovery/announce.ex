@@ -281,6 +281,14 @@ defmodule PeerDiscovery.Announce do
   def init([pid, torrent, opts]) do
     Process.monitor(pid)
 
+    state = init_state(pid, torrent, opts)
+    maybe_offer_seed_peers(state)
+    schedule_init_discovery(state, state.tiers)
+    {:ok, state}
+  end
+
+  @spec init_state(pid(), Torrent.t(), keyword()) :: %__MODULE__{}
+  defp init_state(pid, torrent, opts) do
     # BEP 12 chooses the initial tracker order once per torrent session. Keep
     # that order in state thereafter; successful trackers may still move to
     # the front, but ordinary re-announces must not reshuffle the tier.
@@ -292,7 +300,7 @@ defmodule PeerDiscovery.Announce do
     bootstrap_torrent_nodes(torrent.metadata)
     seed_peers = PeerDiscovery.SeedPeers.take(torrent.hash)
 
-    state = %__MODULE__{
+    %__MODULE__{
       torrent_pid: pid,
       hash: torrent.hash,
       dht_hashes: Torrent.discovery_swarm_hashes(torrent),
@@ -302,15 +310,23 @@ defmodule PeerDiscovery.Announce do
       pex_snapshot: %{},
       seed_peers: seed_peers
     }
+  end
 
+  @spec maybe_offer_seed_peers(%__MODULE__{}) :: :ok
+  defp maybe_offer_seed_peers(%__MODULE__{hash: hash, seed_peers: seed_peers}) do
     if seed_peers != [] do
       Logger.info(
-        "[peer_discovery] seed_peers_loaded hash=#{Torrent.hex_encoded_hash(torrent.hash)} count=#{length(seed_peers)}"
+        "[peer_discovery] seed_peers_loaded hash=#{Torrent.hex_encoded_hash(hash)} count=#{length(seed_peers)}"
       )
 
       send(self(), :offer_seed_peers)
     end
 
+    :ok
+  end
+
+  @spec schedule_init_discovery(%__MODULE__{}, [[String.t()]]) :: :ok
+  defp schedule_init_discovery(%__MODULE__{} = state, tiers) do
     schedule_first_announces(state, tiers)
     if pex_allowed?(state), do: schedule_pex(self(), @pex_interval_ms)
     send_after(self(), :peer_refresh_tick, @peer_refresh_tick_ms)
@@ -319,7 +335,7 @@ defmodule PeerDiscovery.Announce do
       send_after(self(), :scrape_tick, @scrape_initial_delay_ms)
     end
 
-    {:ok, state}
+    :ok
   end
 
   @spec schedule_first_announces(%__MODULE__{}, [[String.t()]]) :: :ok
@@ -635,73 +651,115 @@ defmodule PeerDiscovery.Announce do
   end
 
   @spec start_parallel_tier(%__MODULE__{}, non_neg_integer(), [String.t()]) :: %__MODULE__{}
-  defp start_parallel_tier(%__MODULE__{hash: hash} = state, tier_index, tier) do
+  defp start_parallel_tier(%__MODULE__{} = state, tier_index, tier) do
     now = System.monotonic_time(:millisecond)
+    active = parallel_tier_active_trackers(state, tier, now)
+    {alive, dead} = parallel_tier_alive_dead(state, active, now)
+    log_parallel_tier_dead_skip(state.hash, tier_index, dead, alive)
 
-    # Skip trackers disabled earlier this session (dead DNS / not-a-tracker)
-    # and trackers whose own BEP 31 cooldown has not elapsed. Cooldown is
-    # deliberately URL-local: ready siblings remain in this parallel batch.
-    active =
-      tier
-      |> Enum.with_index()
-      |> Enum.filter(fn {announce, _tracker_index} ->
-        not MapSet.member?(state.disabled, announce) and
-          tracker_retry_ready?(state, announce, now)
-      end)
+    if alive == [] do
+      parallel_tier_no_alive(state, tier_index)
+    else
+      launch_parallel_tier(state, tier_index, alive)
+    end
+  end
 
-    # BEP 48 — also skip trackers with a fresh {0,0} scrape (dead swarm for
-    # this info_hash). Kept separate from `disabled` so a later scrape or a
-    # TTL expiry can re-include them without a restart.
-    {alive, dead} =
-      Enum.split_with(active, fn {announce, _tracker_index} ->
-        tracker_alive?(state, announce, now)
-      end)
+  # Skip trackers disabled earlier this session (dead DNS / not-a-tracker)
+  # and trackers whose own BEP 31 cooldown has not elapsed. Cooldown is
+  # deliberately URL-local: ready siblings remain in this parallel batch.
+  @spec parallel_tier_active_trackers(%__MODULE__{}, [String.t()], non_neg_integer()) ::
+          [{String.t(), non_neg_integer()}]
+  defp parallel_tier_active_trackers(%__MODULE__{} = state, tier, now_ms) do
+    tier
+    |> Enum.with_index()
+    |> Enum.filter(fn {announce, _tracker_index} ->
+      not MapSet.member?(state.disabled, announce) and
+        tracker_retry_ready?(state, announce, now_ms)
+    end)
+  end
 
+  # BEP 48 — also skip trackers with a fresh {0,0} scrape (dead swarm for
+  # this info_hash). Kept separate from `disabled` so a later scrape or a
+  # TTL expiry can re-include them without a restart.
+  @spec parallel_tier_alive_dead(
+          %__MODULE__{},
+          [{String.t(), non_neg_integer()}],
+          non_neg_integer()
+        ) :: {[{String.t(), non_neg_integer()}], [{String.t(), non_neg_integer()}]}
+  defp parallel_tier_alive_dead(%__MODULE__{} = state, active, now_ms) do
+    Enum.split_with(active, fn {announce, _tracker_index} ->
+      tracker_alive?(state, announce, now_ms)
+    end)
+  end
+
+  @spec log_parallel_tier_dead_skip(
+          Torrent.hash(),
+          non_neg_integer(),
+          [{String.t(), non_neg_integer()}],
+          [{String.t(), non_neg_integer()}]
+        ) :: :ok
+  defp log_parallel_tier_dead_skip(hash, tier_index, dead, alive) do
     if dead != [] do
       Logger.debug(
         "[tracker_scrape] tier_skip hash=#{Torrent.hex_encoded_hash(hash)} tier=#{tier_index} dead=#{length(dead)} alive=#{length(alive)}"
       )
     end
 
-    if alive == [] do
-      # Under target, fan-out collection skips empty tiers; at target, hop serially.
-      if Swarm.count(hash) >= @swarm_target_peers do
-        next = next_tier_index(state.tiers, tier_index)
-        schedule_parallel_announce(state, next, dead_tier_advance_sec(state, tier_index))
-      end
+    :ok
+  end
 
-      state
-    else
-      Logger.debug(
-        "[tracker_announce] parallel hash=#{Torrent.hex_encoded_hash(hash)} tier=#{tier_index} trackers=#{length(alive)}"
-      )
-
-      requests =
-        alive
-        |> Enum.reduce(state.requests, fn {announce, tracker_index}, acc ->
-          tracker_opts = tracker_request_opts_for(state)
-
-          %Task{ref: ref} =
-            Task.Supervisor.async_nolink(Requests, Tracker, :request_with_event!, [
-              announce,
-              hash,
-              tracker_opts
-            ])
-
-          Map.put(acc, ref, {announce, tier_index, tracker_index})
-        end)
-
-      tier_batches = Map.put(state.tier_batches, tier_index, length(alive))
-      tier_batch_successes = MapSet.delete(state.tier_batch_successes, tier_index)
-
-      %{
-        state
-        | tier_index: tier_index,
-          requests: requests,
-          tier_batches: tier_batches,
-          tier_batch_successes: tier_batch_successes
-      }
+  @spec parallel_tier_no_alive(%__MODULE__{}, non_neg_integer()) :: %__MODULE__{}
+  defp parallel_tier_no_alive(%__MODULE__{hash: hash, tiers: tiers} = state, tier_index) do
+    # Under target, fan-out collection skips empty tiers; at target, hop serially.
+    if Swarm.count(hash) >= @swarm_target_peers do
+      next = next_tier_index(tiers, tier_index)
+      schedule_parallel_announce(state, next, dead_tier_advance_sec(state, tier_index))
     end
+
+    state
+  end
+
+  @spec launch_parallel_tier(
+          %__MODULE__{},
+          non_neg_integer(),
+          [{String.t(), non_neg_integer()}]
+        ) :: %__MODULE__{}
+  defp launch_parallel_tier(%__MODULE__{hash: hash} = state, tier_index, alive) do
+    Logger.debug(
+      "[tracker_announce] parallel hash=#{Torrent.hex_encoded_hash(hash)} tier=#{tier_index} trackers=#{length(alive)}"
+    )
+
+    requests = spawn_parallel_tracker_tasks(state, tier_index, alive)
+    tier_batches = Map.put(state.tier_batches, tier_index, length(alive))
+    tier_batch_successes = MapSet.delete(state.tier_batch_successes, tier_index)
+
+    %{
+      state
+      | tier_index: tier_index,
+        requests: requests,
+        tier_batches: tier_batches,
+        tier_batch_successes: tier_batch_successes
+    }
+  end
+
+  @spec spawn_parallel_tracker_tasks(
+          %__MODULE__{},
+          non_neg_integer(),
+          [{String.t(), non_neg_integer()}]
+        ) :: map()
+  defp spawn_parallel_tracker_tasks(%__MODULE__{hash: hash} = state, tier_index, alive) do
+    tracker_opts = tracker_request_opts_for(state)
+
+    Enum.reduce(alive, state.requests, fn {announce, tracker_index}, acc ->
+      %Task{ref: ref} =
+        Task.Supervisor.async_nolink(Requests, Tracker, :request_with_event!, [
+          announce,
+          hash,
+          tracker_opts
+        ])
+
+      Map.put(acc, ref, {announce, tier_index, tracker_index})
+    end)
   end
 
   # At/over swarm target: one tier at a time (BEP tier semantics).
@@ -1013,48 +1071,63 @@ defmodule PeerDiscovery.Announce do
         state
 
       1 ->
-        batches = Map.delete(batches, tier_index)
         batch_succeeded? = MapSet.member?(state.tier_batch_successes, tier_index)
 
-        state = %{
-          state
-          | tier_batches: batches,
-            tier_batch_successes: MapSet.delete(state.tier_batch_successes, tier_index)
-        }
-
-        state =
-          cond do
-            Swarm.count(state.hash) >= @swarm_target_peers and batch_succeeded? ->
-              interval = batch_announce_interval(state)
-              schedule_parallel_announce(state, tier_index, interval)
-              state
-
-            Swarm.count(state.hash) >= @swarm_target_peers ->
-              next = next_tier_index(state.tiers, tier_index)
-
-              interval =
-                parallel_tier_failure_advance_sec(
-                  state,
-                  tier_index,
-                  Tracker.default_failure_interval()
-                )
-
-              schedule_parallel_announce(state, next, interval)
-              state
-
-            reschedule_same_tier_after_batch?(state) ->
-              interval = batch_announce_interval(state)
-              schedule_parallel_announce(state, tier_index, interval)
-              state
-
-            true ->
-              maybe_continue_fanout_wave(state, tier_index)
-          end
-
         state
+        |> clear_tier_batch(tier_index)
+        |> schedule_after_tier_batch_complete(tier_index, batch_succeeded?)
 
       remaining when remaining > 1 ->
         %{state | tier_batches: Map.put(batches, tier_index, remaining - 1)}
+    end
+  end
+
+  @spec clear_tier_batch(%__MODULE__{}, non_neg_integer()) :: %__MODULE__{}
+  defp clear_tier_batch(%__MODULE__{tier_batches: batches} = state, tier_index) do
+    %{
+      state
+      | tier_batches: Map.delete(batches, tier_index),
+        tier_batch_successes: MapSet.delete(state.tier_batch_successes, tier_index)
+    }
+  end
+
+  @spec schedule_after_tier_batch_complete(%__MODULE__{}, non_neg_integer(), boolean()) ::
+          %__MODULE__{}
+  defp schedule_after_tier_batch_complete(%__MODULE__{} = state, tier_index, batch_succeeded?) do
+    if Swarm.count(state.hash) >= @swarm_target_peers do
+      schedule_at_target_tier_batch_complete(state, tier_index, batch_succeeded?)
+    else
+      schedule_under_target_tier_batch_complete(state, tier_index)
+    end
+  end
+
+  @spec schedule_at_target_tier_batch_complete(%__MODULE__{}, non_neg_integer(), boolean()) ::
+          %__MODULE__{}
+  defp schedule_at_target_tier_batch_complete(state, tier_index, true) do
+    interval = batch_announce_interval(state)
+    schedule_parallel_announce(state, tier_index, interval)
+    state
+  end
+
+  defp schedule_at_target_tier_batch_complete(state, tier_index, false) do
+    next = next_tier_index(state.tiers, tier_index)
+
+    interval =
+      parallel_tier_failure_advance_sec(state, tier_index, Tracker.default_failure_interval())
+
+    schedule_parallel_announce(state, next, interval)
+    state
+  end
+
+  @spec schedule_under_target_tier_batch_complete(%__MODULE__{}, non_neg_integer()) ::
+          %__MODULE__{}
+  defp schedule_under_target_tier_batch_complete(%__MODULE__{} = state, tier_index) do
+    if reschedule_same_tier_after_batch?(state) do
+      interval = batch_announce_interval(state)
+      schedule_parallel_announce(state, tier_index, interval)
+      state
+    else
+      maybe_continue_fanout_wave(state, tier_index)
     end
   end
 

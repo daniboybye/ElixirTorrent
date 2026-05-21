@@ -136,24 +136,31 @@ defmodule TorrentControllerParallelTest do
 
     start_swarm(hash)
     start_downloads(hash)
+    add_mock_peers(hash, build_pump_peer_configs(unchoked_count, choked_count))
+    {:ok, controller_pid} = GenServer.start(Torrent.Controller, hash)
+    register_pump_scenario_cleanup(controller_pid, hash, model_pid)
 
-    unchoked_configs =
+    {hash, controller_pid}
+  end
+
+  defp build_pump_peer_configs(unchoked_count, choked_count) do
+    unchoked =
       for i <- 1..unchoked_count do
         [id: <<i::160>>, choke_me: false, bitfield: :all]
       end
 
-    choked_configs =
-      if choked_count > 0 do
-        for i <- 1..choked_count do
-          [id: <<100 + i::160>>, choke_me: true, bitfield: :all]
-        end
-      else
-        []
-      end
+    unchoked ++ build_choked_peer_configs(choked_count)
+  end
 
-    add_mock_peers(hash, unchoked_configs ++ choked_configs)
-    {:ok, controller_pid} = GenServer.start(Torrent.Controller, hash)
+  defp build_choked_peer_configs(0), do: []
 
+  defp build_choked_peer_configs(choked_count) do
+    for i <- 1..choked_count do
+      [id: <<100 + i::160>>, choke_me: true, bitfield: :all]
+    end
+  end
+
+  defp register_pump_scenario_cleanup(controller_pid, hash, model_pid) do
     on_exit(fn ->
       # The controller may have queued another piece-pump message. Stop it
       # before the Model and Downloads processes that service that message.
@@ -171,8 +178,6 @@ defmodule TorrentControllerParallelTest do
 
       safe_stop(model_pid)
     end)
-
-    {hash, controller_pid}
   end
 
   defp drive_pump(controller_pid, hash, predicate, max_rounds \\ 24) do

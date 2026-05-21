@@ -487,34 +487,35 @@ defmodule Cycle2PureProtocolCoverageBatch2Test do
     pad_d = Keyword.get(opts, :pad_d, 0)
     {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listen)
-    parent = self()
-
-    server =
-      spawn_link(fn ->
-        {:ok, sock} = :gen_tcp.accept(listen, @timeout)
-        result = respond_with_select(sock, info_hash, ia, select, pad_d, @timeout)
-        send(parent, {:mse_server, result})
-
-        receive do
-          :close -> :gen_tcp.close(sock)
-        after
-          @timeout -> :gen_tcp.close(sock)
-        end
-      end)
-
+    server = spawn_custom_mse_responder(listen, info_hash, ia, select, pad_d, self())
     {:ok, client} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], @timeout)
     client_result = Handshake.initiate(client, info_hash, ia, @timeout)
-
-    server_result =
-      receive do
-        {:mse_server, result} -> result
-      after
-        @timeout -> flunk("custom MSE responder did not finish")
-      end
-
+    server_result = await_custom_mse_server_result(@timeout)
     :gen_tcp.close(listen)
     send(server, :close)
     {client, client_result, server_result}
+  end
+
+  defp spawn_custom_mse_responder(listen, info_hash, ia, select, pad_d, parent) do
+    spawn_link(fn ->
+      {:ok, sock} = :gen_tcp.accept(listen, @timeout)
+      result = respond_with_select(sock, info_hash, ia, select, pad_d, @timeout)
+      send(parent, {:mse_server, result})
+
+      receive do
+        :close -> :gen_tcp.close(sock)
+      after
+        @timeout -> :gen_tcp.close(sock)
+      end
+    end)
+  end
+
+  defp await_custom_mse_server_result(timeout) do
+    receive do
+      {:mse_server, result} -> result
+    after
+      timeout -> flunk("custom MSE responder did not finish")
+    end
   end
 
   defp respond_with_select(socket, info_hash, ia, select, pad_d, timeout) do
@@ -646,6 +647,15 @@ defmodule Cycle2PureProtocolCoverageBatch2Test do
   end
 
   defp loopback_pair do
+    listen = loopback_listen!()
+    {:ok, port} = :inet.port(listen)
+    spawn_loopback_acceptor(listen, self())
+    client = loopback_connect!(port)
+    server = await_loopback_server!(@timeout)
+    {client, server, listen}
+  end
+
+  defp loopback_listen! do
     {:ok, listen} =
       :gen_tcp.listen(0, [
         :binary,
@@ -655,9 +665,10 @@ defmodule Cycle2PureProtocolCoverageBatch2Test do
         ip: {127, 0, 0, 1}
       ])
 
-    {:ok, port} = :inet.port(listen)
-    parent = self()
+    listen
+  end
 
+  defp spawn_loopback_acceptor(listen, parent) do
     spawn(fn ->
       case :gen_tcp.accept(listen, @timeout) do
         {:ok, server} ->
@@ -668,15 +679,21 @@ defmodule Cycle2PureProtocolCoverageBatch2Test do
           send(parent, {:loopback_accept_error, error})
       end
     end)
+  end
 
+  defp loopback_connect!(port) do
     {:ok, client} =
       :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, packet: :raw], @timeout)
 
+    client
+  end
+
+  defp await_loopback_server!(timeout) do
     receive do
-      {:loopback_server, server} -> {client, server, listen}
+      {:loopback_server, server} -> server
       {:loopback_accept_error, error} -> flunk("accept failed: #{inspect(error)}")
     after
-      @timeout -> flunk("accept timed out")
+      timeout -> flunk("accept timed out")
     end
   end
 
