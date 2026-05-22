@@ -289,17 +289,19 @@ defmodule Peer.UtHolepunch do
           :inet.port_number()
         ) :: Peer.Controller.State.t()
   defp do_relay(state, target_key, target_ltep, target_ip, target_port) do
-    with {:ok, payloads} <- relay_connect_payloads(state, target_ip, target_port) do
-      handle_relay_send_result(
-        state,
-        target_key,
-        target_ltep,
-        target_ip,
-        target_port,
-        payloads
-      )
-    else
-      _ -> state
+    case relay_connect_payloads(state, target_ip, target_port) do
+      {:ok, payloads} ->
+        handle_relay_send_result(
+          state,
+          target_key,
+          target_ltep,
+          target_ip,
+          target_port,
+          payloads
+        )
+
+      _ ->
+        state
     end
   end
 

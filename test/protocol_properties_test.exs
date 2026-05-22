@@ -12,21 +12,7 @@ defmodule ProtocolPropertiesTest do
 
   defp utp_header_gen do
     gen all(fields <- utp_header_fields_gen()) do
-      {type, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr, sack?, sack_body,
-       payload} = fields
-
-      build_utp_header_sample(
-        type,
-        conn_id,
-        timestamp,
-        timestamp_diff,
-        wnd_size,
-        seq_nr,
-        ack_nr,
-        sack?,
-        sack_body,
-        payload
-      )
+      build_utp_header_sample(fields)
     end
   end
 
@@ -82,18 +68,10 @@ defmodule ProtocolPropertiesTest do
     end
   end
 
-  defp build_utp_header_sample(
-         type,
-         conn_id,
-         timestamp,
-         timestamp_diff,
-         wnd_size,
-         seq_nr,
-         ack_nr,
-         sack?,
-         sack_body,
-         payload
-       ) do
+  defp build_utp_header_sample(fields) do
+    {type, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr, sack?, sack_body,
+     payload} = fields
+
     header = %UTP.Packet{
       type: type,
       version: 1,

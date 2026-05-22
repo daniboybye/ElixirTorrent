@@ -335,12 +335,10 @@ defmodule Acceptor.Connection.Handshakes do
 
   @spec dial_peer_async_task(Peer.t(), Torrent.hash()) :: {Peer.t(), :ok | {:error, term()}}
   defp dial_peer_async_task(peer, hash) do
-    try do
-      {peer, do_send(peer, hash)}
-    catch
-      :exit, reason -> {peer, {:error, reason}}
-      kind, reason -> {peer, {:error, {kind, reason}}}
-    end
+    {peer, do_send(peer, hash)}
+  catch
+    :exit, reason -> {peer, {:error, reason}}
+    kind, reason -> {peer, {:error, {kind, reason}}}
   end
 
   @spec dial_peers_async_step(
@@ -797,12 +795,13 @@ defmodule Acceptor.Connection.Handshakes do
   defp do_recv_mse(socket, prefix) do
     resolver = Handshake.resolver(Torrents.list())
 
-    with {:ok, %{recv: r, send: s, leftover: ia}} <-
-           Handshake.respond(socket, resolver, @handshake_recv_timeout_ms, prefix),
-         mse_socket = Peer.Transport.wrap(socket, %{recv: r, send: s}) do
-      finalize_inbound_mse(socket, mse_socket, ia)
-    else
-      _ -> safe_close(socket)
+    case Handshake.respond(socket, resolver, @handshake_recv_timeout_ms, prefix) do
+      {:ok, %{recv: r, send: s, leftover: ia}} ->
+        mse_socket = Peer.Transport.wrap(socket, %{recv: r, send: s})
+        finalize_inbound_mse(socket, mse_socket, ia)
+
+      _ ->
+        safe_close(socket)
     end
   end
 
@@ -932,9 +931,8 @@ defmodule Acceptor.Connection.Handshakes do
          :ok <- register_endpoint(hash, endpoint, peer_supervisor),
          :ok <- transfer_controlling_process(socket, sender),
          :ok <- maybe_set_connection_origin(key, origin),
-         :ok <- start_peer_protocol(key),
-         :ok <- safe_activate(key) do
-      :ok
+         :ok <- start_peer_protocol(key) do
+      safe_activate(key)
     end
   end
 

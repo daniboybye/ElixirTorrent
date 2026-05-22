@@ -112,15 +112,8 @@ defmodule UTP.Packet do
          {:ok, extensions, payload} <- decode_extensions(extension, rest) do
       header =
         build_header(
-          type_ver,
-          extension,
+          {type_ver, extension, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr},
           version,
-          conn_id,
-          timestamp,
-          timestamp_diff,
-          wnd_size,
-          seq_nr,
-          ack_nr,
           extensions
         )
 
@@ -150,8 +143,7 @@ defmodule UTP.Packet do
     {type_ver, extension, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr, rest}
   end
 
-  @spec build_header(
-          byte(),
+  @type parsed_header :: {
           byte(),
           byte(),
           0..65_535,
@@ -159,19 +151,13 @@ defmodule UTP.Packet do
           0..4_294_967_295,
           0..4_294_967_295,
           0..65_535,
-          0..65_535,
-          [extension()]
-        ) :: t()
+          0..65_535
+        }
+
+  @spec build_header(parsed_header(), byte(), [extension()]) :: t()
   defp build_header(
-         type_ver,
-         extension,
+         {type_ver, extension, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr},
          version,
-         conn_id,
-         timestamp,
-         timestamp_diff,
-         wnd_size,
-         seq_nr,
-         ack_nr,
          extensions
        ) do
     %__MODULE__{

@@ -65,10 +65,12 @@ defmodule Torrent.HashServe do
 
   @spec do_serve(Torrent.hash(), HashWire.t()) :: response()
   defp do_serve(hash, req) do
-    with {:ok, ctx, file, piece_layer} <- validate_serve_request(hash, req) do
-      serve_file(ctx, file, req, piece_layer)
-    else
-      _ -> :reject
+    case validate_serve_request(hash, req) do
+      {:ok, ctx, file, piece_layer} ->
+        serve_file(ctx, file, req, piece_layer)
+
+      _ ->
+        :reject
     end
   catch
     _, _ -> :reject

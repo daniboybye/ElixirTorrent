@@ -112,16 +112,18 @@ defmodule Peer.Holepunch do
   @spec send_rendezvous(Torrent.hash(), Peer.key(), :inet.ip_address(), :inet.port_number()) ::
           :ok
   defp send_rendezvous(hash, relay_key, target_ip, target_port) do
-    with {:ok, id, payload} <- rendezvous_send_args(relay_key, hash, target_ip, target_port) do
-      log_rendezvous_send_result(
-        hash,
-        target_ip,
-        target_port,
-        relay_key,
-        Peer.LTEP.send_extended(relay_key, id, payload)
-      )
-    else
-      _ -> :ok
+    case rendezvous_send_args(relay_key, hash, target_ip, target_port) do
+      {:ok, id, payload} ->
+        log_rendezvous_send_result(
+          hash,
+          target_ip,
+          target_port,
+          relay_key,
+          Peer.LTEP.send_extended(relay_key, id, payload)
+        )
+
+      _ ->
+        :ok
     end
 
     :ok
