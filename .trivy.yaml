@@ -1,0 +1,23 @@
+# Block actionable dependency vulnerabilities and exposed secrets without
+# scanning generated artifacts, runtime state, or local agent worktrees.
+scan:
+  scanners:
+    - vuln
+    - secret
+  skip-dirs:
+    - .git
+    - .cache
+    - .claude
+    - .cursor
+    - .elixir_torrent
+    - _build
+    - cover
+    - deps
+    - doc
+severity:
+  - HIGH
+  - CRITICAL
+vulnerability:
+  ignore-unfixed: true
+exit-code: 1
+format: table
