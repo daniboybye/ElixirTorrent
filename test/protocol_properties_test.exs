@@ -148,6 +148,38 @@ defmodule ProtocolPropertiesTest do
         end
       end
     end
+
+    property "parse_selective_ack matches bin_to_list reference (byte order, LSB-first, wrap)" do
+      check all(
+              ack_nr <- integer(0..65_535),
+              bitmask <- binary(min_length: 0, max_length: 8),
+              max_runs: @property_max_runs
+            ) do
+        assert UTP.Packet.parse_selective_ack(ack_nr, bitmask) ==
+                 sack_reference(ack_nr, bitmask)
+      end
+    end
+  end
+
+  defp sack_reference(ack_nr, bitmask) do
+    bitmask
+    |> :binary.bin_to_list()
+    |> Enum.with_index()
+    |> Enum.flat_map(&sack_reference_byte(&1, ack_nr))
+  end
+
+  defp sack_reference_byte({byte, byte_idx}, ack_nr) do
+    Enum.flat_map(0..7, fn bit_idx ->
+      sack_reference_bit(byte, byte_idx, bit_idx, ack_nr)
+    end)
+  end
+
+  defp sack_reference_bit(byte, byte_idx, bit_idx, ack_nr) do
+    if Bitwise.band(byte, Bitwise.bsl(1, bit_idx)) != 0 do
+      [UTP.Packet.seq_add(ack_nr, 2 + byte_idx * 8 + bit_idx)]
+    else
+      []
+    end
   end
 
   defp pub4(n), do: {11, 0, 0, rem(n, 250)}

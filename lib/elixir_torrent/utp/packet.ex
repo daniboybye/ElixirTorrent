@@ -186,21 +186,30 @@ defmodule UTP.Packet do
   @spec parse_selective_ack(0..65_535, binary()) :: [0..65_535]
   def parse_selective_ack(ack_nr, bitmask) when is_binary(bitmask) do
     bitmask
-    |> :binary.bin_to_list()
-    |> Enum.with_index()
-    |> Enum.flat_map(fn {byte, byte_idx} ->
-      sack_byte_seqs(ack_nr, byte, byte_idx)
-    end)
+    |> parse_selective_ack_bytes(ack_nr, 0, [])
+    |> Enum.reverse()
   end
 
-  defp sack_byte_seqs(ack_nr, byte, byte_idx) do
-    Enum.flat_map(0..7, fn bit_idx ->
+  defp parse_selective_ack_bytes(<<>>, _ack_nr, _byte_idx, acc), do: acc
+
+  defp parse_selective_ack_bytes(<<byte, rest::binary>>, ack_nr, byte_idx, acc) do
+    acc = parse_selective_ack_bits(byte, ack_nr, byte_idx, 0, acc)
+    parse_selective_ack_bytes(rest, ack_nr, byte_idx + 1, acc)
+  end
+
+  # uTP SACK bitmask: bytes in order, bits LSB-first within each byte; offsets
+  # wrap at 16 bits via seq_add/2.
+  defp parse_selective_ack_bits(_byte, _ack_nr, _byte_idx, 8, acc), do: acc
+
+  defp parse_selective_ack_bits(byte, ack_nr, byte_idx, bit_idx, acc) do
+    acc =
       if Bitwise.band(byte, Bitwise.bsl(1, bit_idx)) != 0 do
-        [seq_add(ack_nr, 2 + byte_idx * 8 + bit_idx)]
+        [seq_add(ack_nr, 2 + byte_idx * 8 + bit_idx) | acc]
       else
-        []
+        acc
       end
-    end)
+
+    parse_selective_ack_bits(byte, ack_nr, byte_idx, bit_idx + 1, acc)
   end
 
   @spec seq_add(0..65_535, integer()) :: 0..65_535
