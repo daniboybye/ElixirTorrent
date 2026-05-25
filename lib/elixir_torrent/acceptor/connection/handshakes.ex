@@ -63,25 +63,7 @@ defmodule Acceptor.Connection.Handshakes do
 
   @doc false
   @spec recv_task(Peer.Transport.socket()) :: {:ok, pid()} | {:error, term()}
-  def recv_task(socket) do
-    case start_task(fn -> do_recv(socket) end) do
-      {:ok, pid} ->
-        case safe_controlling_process(socket, pid) do
-          :ok -> {:ok, pid}
-          error -> close_task_socket(socket, pid, error)
-        end
-
-      {:ok, pid, _} ->
-        case safe_controlling_process(socket, pid) do
-          :ok -> {:ok, pid}
-          error -> close_task_socket(socket, pid, error)
-        end
-
-      error ->
-        safe_close(socket)
-        {:error, error}
-    end
-  end
+  def recv_task(socket), do: start_recv_task(socket)
 
   defp close_task_socket(socket, pid, error) do
     safe_close(socket)
@@ -92,17 +74,50 @@ defmodule Acceptor.Connection.Handshakes do
   @doc false
   @spec recv_utp(UTP.Connection.socket_ref()) :: :ok
   def recv_utp(socket_ref) do
-    case start_task(fn -> do_recv(socket_ref) end) do
-      {:ok, pid} ->
-        case safe_controlling_process(socket_ref, pid) do
-          :ok -> :ok
-          _ -> safe_close(socket_ref)
-        end
-
-      _ ->
-        safe_close(socket_ref)
-        :ok
+    case start_recv_task(socket_ref) do
+      {:ok, _pid} -> :ok
+      {:error, _reason} -> :ok
     end
+  end
+
+  defp start_recv_task(socket) do
+    owner = self()
+    gate = make_ref()
+
+    case start_task(fn -> await_socket_ownership(socket, owner, gate) end) do
+      {:ok, pid} -> transfer_and_release(socket, pid, gate)
+      {:ok, pid, _info} -> transfer_and_release(socket, pid, gate)
+      error -> close_unowned_recv(socket, error)
+    end
+  end
+
+  defp transfer_and_release(socket, pid, gate) do
+    case safe_controlling_process(socket, pid) do
+      :ok ->
+        send(pid, {self(), gate, :recv})
+        {:ok, pid}
+
+      error ->
+        close_task_socket(socket, pid, error)
+    end
+  end
+
+  defp await_socket_ownership(socket, owner, gate) do
+    owner_monitor = Process.monitor(owner)
+
+    receive do
+      {^owner, ^gate, :recv} ->
+        Process.demonitor(owner_monitor, [:flush])
+        do_recv(socket)
+
+      {:DOWN, ^owner_monitor, :process, ^owner, _reason} ->
+        safe_close(socket)
+    end
+  end
+
+  defp close_unowned_recv(socket, error) do
+    safe_close(socket)
+    {:error, error}
   end
 
   @spec handshakes(list(Peer.t()), Torrent.hash()) :: :ok

@@ -215,6 +215,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
       hash = :crypto.strong_rand_bytes(20)
       bad_id = <<8::160>>
       :ok = Acceptor.malicious_peer(bad_id)
+      assert Acceptor.BlackList.member?(bad_id)
 
       with_torrent_stack(hash, fn _hash ->
         {:ok, listen, port, ip} = listen_on_loopback()

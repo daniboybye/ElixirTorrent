@@ -657,28 +657,30 @@ defmodule Cycle2PureProtocolCoverageTest do
 
   describe "Peer.Endpoints catch paths when the registry is down" do
     test "public API returns safe defaults if Endpoints is unavailable" do
-      case Process.whereis(Endpoints) do
-        nil ->
-          assert_catch_safe_endpoints()
+      pid = Process.whereis(Endpoints)
+      assert is_pid(pid)
+      supervisor = parent_supervisor(pid)
 
-        pid ->
-          :ok = :sys.suspend(pid)
-          ref = Process.monitor(pid)
-          Process.exit(pid, :kill)
-          TestSupport.Sync.await_down(ref, pid, @timeout)
+      on_exit(fn ->
+        case Supervisor.restart_child(supervisor, Endpoints) do
+          {:ok, _pid} -> :ok
+          {:ok, _pid, _info} -> :ok
+          {:error, :running} -> :ok
+        end
+      end)
 
-          on_exit(fn ->
-            unless Process.whereis(Endpoints) do
-              {:ok, _} = Endpoints.start_link([])
-            end
-          end)
+      assert :ok = Supervisor.terminate_child(supervisor, Endpoints)
+      refute Process.whereis(Endpoints)
+      assert_catch_safe_endpoints()
+    end
+  end
 
-          if Process.whereis(Endpoints) == nil do
-            assert_catch_safe_endpoints()
-          else
-            assert true
-          end
-      end
+  defp parent_supervisor(pid) do
+    {:dictionary, dictionary} = Process.info(pid, :dictionary)
+
+    case Keyword.fetch!(dictionary, :"$ancestors") do
+      [supervisor | _] when is_pid(supervisor) -> supervisor
+      [supervisor | _] when is_atom(supervisor) -> supervisor
     end
   end
 
