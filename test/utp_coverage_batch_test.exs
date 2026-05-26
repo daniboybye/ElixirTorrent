@@ -669,9 +669,7 @@ defmodule UTP.CoverageBatchTest do
       TestSupport.Sync.safe_stop(pid)
     end
 
-    # Running Application already binds DHT UDP; disabling env alone does not remove the socket.
-    @tag :skip
-    test "handle_call start_connect without UDP requires absent DHT socket (skip under running app)" do
+    test "handle_call start_connect returns no_udp_socket when DHT is disabled" do
       Application.put_env(:elixir_torrent, :dht, enabled: false)
 
       assert {:reply, {:error, :no_udp_socket}, %{}} =
