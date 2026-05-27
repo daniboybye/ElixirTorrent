@@ -391,6 +391,44 @@ defmodule Cycle2PureProtocolCoverageBatch2Test do
       assert :ok = Torrents.stop_and_serialize(:crypto.strong_rand_bytes(20))
     end
 
+    test "stop_and_serialize/1 persists the session while Model is alive", %{
+      download_dir: download_dir
+    } do
+      {path, hash, _} = write_torrent!("live-model.bin", 19)
+      assert {:ok, _} = Torrents.download(path, download_dir: download_dir, resume: :skip)
+      assert is_pid(model_pid(hash))
+
+      assert :ok = Torrents.stop_and_serialize(hash)
+      refute hash in Torrents.list()
+      assert {:ok, session} = Torrent.Session.load(hash)
+      assert session.left == 19
+    end
+
+    test "stop_and_serialize/1 exits with :noproc once Model is gone", %{
+      download_dir: download_dir
+    } do
+      {path, hash, _} = write_torrent!("dead-model.bin", 13)
+
+      assert {:ok, supervisor} =
+               Torrents.download(path, download_dir: download_dir, resume: :skip)
+
+      # Leaving a torrent behind whose Model is dead is exactly what breaks
+      # `stop_all_and_serialize/0` for *other* test modules, so this test owns
+      # its cleanup and stops the supervisor directly (no Model read involved).
+      on_exit(fn -> TestSupport.Sync.safe_stop(supervisor, 500) end)
+
+      # `Supervisor.terminate_child/2`, not `Process.exit/2`: Model is the FIRST
+      # child under `:rest_for_one` (Torrent.start_torrent/3), so killing it
+      # would restart Model *and* every child after it and the "Model is gone"
+      # state would never be observable. terminate_child/2 leaves it stopped.
+      assert :ok = Supervisor.terminate_child(supervisor, Torrent.Model)
+      refute model_pid(hash)
+
+      # persist_session/1 reads Model with a plain GenServer.call, so a dead
+      # Model propagates as an exit rather than an {:error, _} tuple.
+      assert {:noproc, _} = catch_exit(Torrents.stop_and_serialize(hash))
+    end
+
     test "stop_all_and_serialize/0 ignores non-pid DynamicSupervisor children", %{
       download_dir: download_dir
     } do
@@ -705,6 +743,10 @@ defmodule Cycle2PureProtocolCoverageBatch2Test do
         :error, _ -> :ok
       end
     end
+  end
+
+  defp model_pid(hash) do
+    GenServer.whereis({:via, Registry, {Registry, {hash, Torrent.Model}}})
   end
 
   defp write_torrent!(name, length) do

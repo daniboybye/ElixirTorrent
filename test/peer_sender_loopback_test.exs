@@ -806,7 +806,11 @@ defmodule PeerSenderLoopbackTest do
                  {:cancel, 0, 0, @piece_len}
                ])
 
-      assert_receive {:DOWN, ^ref, :process, ^sender_pid, :normal}, @timeout
+      # Both reasons are correct here: the sender may observe the already-closed
+      # socket before or after it processes the stop, so it exits :normal or
+      # tears the connection down with {:shutdown, :connection_closed}.
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, reason}, @timeout
+      assert reason in [:normal, {:shutdown, :connection_closed}]
     end
 
     test "abnormal terminate logs a warning" do

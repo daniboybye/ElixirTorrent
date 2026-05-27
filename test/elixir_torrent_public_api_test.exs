@@ -11,7 +11,6 @@ defmodule ElixirTorrent.PublicApiTest do
     File.cd!(tmp)
 
     on_exit(fn ->
-      ElixirTorrent.stop_all_and_serialize()
       File.cd!(previous_cwd)
       File.rm_rf(tmp)
     end)
@@ -19,10 +18,30 @@ defmodule ElixirTorrent.PublicApiTest do
     %{download_dir: download_dir}
   end
 
+  # Stop only the torrent this test created, and do it by stopping its
+  # supervisor rather than through `stop_and_serialize/1`. Two reasons:
+  #
+  #   * `stop_all_and_serialize/0` walks the *shared* `Torrents` supervisor, so
+  #     using it as a teardown makes this module's result depend on torrents
+  #     other modules left behind — one half-torn-down torrent there aborts the
+  #     whole `Enum.each` and fails every test in this file.
+  #   * `stop_and_serialize/1` reads `Torrent.Model`, which is already gone if
+  #     the test failed part-way through teardown. Stopping the supervisor
+  #     touches no Model and therefore cannot itself raise inside `on_exit`.
+  defp cleanup_torrent(hash) do
+    on_exit(fn ->
+      case Torrents.supervisor_pid(hash) do
+        {:ok, pid} -> TestSupport.Sync.safe_stop(pid, 500)
+        _ -> :ok
+      end
+    end)
+  end
+
   test "public API drives download, stats, persistence, resume, and removal", %{
     download_dir: download_dir
   } do
     {path, hash, name} = write_torrent!("public-api.bin", 42)
+    cleanup_torrent(hash)
 
     assert {:ok, supervisor} =
              ElixirTorrent.download(path, download_dir: download_dir, resume: :skip)
@@ -77,6 +96,8 @@ defmodule ElixirTorrent.PublicApiTest do
   test "stop_all_and_serialize persists every active torrent", %{download_dir: download_dir} do
     {path_a, hash_a, _} = write_torrent!("all-a.bin", 11)
     {path_b, hash_b, _} = write_torrent!("all-b.bin", 17)
+    cleanup_torrent(hash_a)
+    cleanup_torrent(hash_b)
 
     assert {:ok, _} = ElixirTorrent.download(path_a, download_dir: download_dir, resume: :skip)
     assert {:ok, _} = ElixirTorrent.download(path_b, download_dir: download_dir, resume: :skip)

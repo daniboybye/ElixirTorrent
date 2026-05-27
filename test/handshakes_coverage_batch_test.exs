@@ -544,10 +544,23 @@ defmodule HandshakesCoverageBatchTest do
            Torrents,
            HandshakesCoverageBatchTest.TorrentHashStub.child_spec(hash)
          ) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
+      {:ok, pid} -> stop_stub_on_exit(pid)
+      {:error, {:already_started, pid}} -> stop_stub_on_exit(pid)
       {:error, _} = err -> err
     end
+  end
+
+  # The stub is a child of the REAL `Torrents` supervisor, but the
+  # `Torrent.Model` behind it is owned by this test and stopped in
+  # `with_torrent_stack/3`'s `on_exit`. Left behind, the pair reads to
+  # `Torrents.stop_all_and_serialize/0` as a live torrent whose Model is dead:
+  # `persist_session/1` calls `Torrent.Model.get/1`, exits `:noproc`, and the
+  # surrounding `Enum.each` aborts — so a leak here fails unrelated tests in
+  # other modules. `AcceptorDialHandshakeCoverageBatchTest` already does this;
+  # this copy of the helper did not.
+  defp stop_stub_on_exit(pid) do
+    on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
+    :ok
   end
 
   defp start_swarm(hash) do
