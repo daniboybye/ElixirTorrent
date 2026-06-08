@@ -23,7 +23,7 @@ defmodule Torrent.FileHandle.Piece do
   end
 
   @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
-          (() -> {:ok, iodata()} | :error)
+          (-> {:ok, iodata()} | :error)
   def read(hash, index, begin, length),
     do: GenServer.call(vk(hash, index), {:read, begin, length})
 
@@ -80,7 +80,7 @@ defmodule Torrent.FileHandle.Piece do
 
   defp do_write(offset, [{pid, len} | files], bin) do
     k = min(byte_size(bin), len - offset)
-    <<bytes_for_writing::bytes-size(k), bin::binary>> = bin
+    <<bytes_for_writing::bytes-size(^k), bin::binary>> = bin
 
     :ok = :file.pwrite(pid, {:bof, offset}, bytes_for_writing)
     do_write(0, files, bin)

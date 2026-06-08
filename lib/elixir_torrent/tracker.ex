@@ -31,21 +31,21 @@ defmodule Tracker do
       Torrent.get(hash, [:uploaded, :downloaded, :left, :event])
 
     query =
-    %{
-      # "sha_ih" => :crypto.hash(:sha, torrent.hash)
-      "info_hash" => hash,
-      "peer_id" => Peer.id(),
-      # obfuscation
-      "port" => Acceptor.port(),
-      "compact" => 1,
-      "uploaded" => uploaded,
-      "downloaded" => downloaded,
-      "left" => left,
-      "event" => Torrent.event_to_string(event),
-      "numwant" => numwant(left),
-      "key" => Acceptor.key()
-    }
-    |> URI.encode_query()
+      %{
+        # "sha_ih" => :crypto.hash(:sha, torrent.hash)
+        "info_hash" => hash,
+        "peer_id" => Peer.id(),
+        # obfuscation
+        "port" => Acceptor.port(),
+        "compact" => 1,
+        "uploaded" => uploaded,
+        "downloaded" => downloaded,
+        "left" => left,
+        "event" => Torrent.event_to_string(event),
+        "numwant" => numwant(left),
+        "key" => Acceptor.key()
+      }
+      |> URI.encode_query()
 
     url = announce <> "?" <> query
 
@@ -176,7 +176,9 @@ defmodule Tracker do
 
   @spec extract_js_redirect(binary()) :: {:ok, binary()} | :error
   defp extract_js_redirect(body) do
-    case Regex.run(~r/window\\.location\\.href\\s*=\\s*\"([^\"]+)\"/, body, capture: :all_but_first) do
+    case Regex.run(~r/window\\.location\\.href\\s*=\\s*\"([^\"]+)\"/, body,
+           capture: :all_but_first
+         ) do
       [path] when is_binary(path) and byte_size(path) > 0 -> {:ok, path}
       _ -> :error
     end

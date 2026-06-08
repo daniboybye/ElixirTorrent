@@ -20,8 +20,6 @@ defmodule Torrent.Downloads.Piece.State do
     Model
   }
 
-  require Logger
-
   @type timer :: reference() | nil
   @type waiting() :: list(Request.subpiece())
 

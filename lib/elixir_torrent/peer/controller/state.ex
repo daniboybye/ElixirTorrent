@@ -2,7 +2,6 @@ defmodule Peer.Controller.State do
   alias Torrent.{Bitfield, PiecesStatistic, Uploader, Downloads}
   alias Peer.{Sender, Controller.FastExtension}
 
-  require Logger
   import Peer, only: [make_key: 2]
 
   @enforce_keys [:hash, :id, :fast_extension, :status, :pieces_count, :socket]
@@ -60,7 +59,7 @@ defmodule Peer.Controller.State do
 
   def has_index?(state, index) do
     case state.bitfield do
-      <<_::bits-size(index), 1::1, _::bits>> ->
+      <<_::bits-size(^index), 1::1, _::bits>> ->
         true
 
       _ ->
@@ -186,7 +185,7 @@ defmodule Peer.Controller.State do
       state
       |> Map.update!(
         :bitfield,
-        fn <<prefix::bits-size(index), _::1, postfix::bits>> ->
+        fn <<prefix::bits-size(^index), _::1, postfix::bits>> ->
           <<prefix::bits, 1::1, postfix::bits>>
         end
       )
@@ -316,9 +315,7 @@ defmodule Peer.Controller.State do
   end
 
   @spec send_allowed_fast(t()) :: t()
-  def send_allowed_fast(
-        %__MODULE__{fast_extension: %FastExtension{allowed_fast: set}} = state
-      ) do
+  def send_allowed_fast(%__MODULE__{fast_extension: %FastExtension{allowed_fast: set}} = state) do
     # Avoid re-sending if we already computed/sent it for this connection.
     if MapSet.size(set) > 0 do
       state

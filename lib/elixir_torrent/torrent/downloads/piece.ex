@@ -2,8 +2,6 @@ defmodule Torrent.Downloads.Piece do
   use GenServer
   use Via
 
-  require Logger
-
   alias __MODULE__.State
   alias Torrent.{FileHandle, PiecesStatistic}
 

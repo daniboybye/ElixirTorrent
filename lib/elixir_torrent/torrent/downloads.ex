@@ -17,7 +17,7 @@ defmodule Torrent.Downloads do
   @spec stop(Torrent.hash()) :: :ok
   def stop(hash), do: DynamicSupervisor.stop(via(hash))
 
-  @spec piece(Torrent.hash(), Torrent.index(), (() -> :ok), (() -> :ok)) :: :ok
+  @spec piece(Torrent.hash(), Torrent.index(), (-> :ok), (-> :ok)) :: :ok
   def piece(hash, index, downloaded, requests_are_dealt) do
     case DynamicSupervisor.start_child(via(hash), {Piece, [index]}) do
       {:ok, pid} ->

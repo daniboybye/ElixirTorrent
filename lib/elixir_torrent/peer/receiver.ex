@@ -2,8 +2,6 @@ defmodule Peer.Receiver do
   use Task, restart: :permanent
   use Peer.Const
 
-  require Logger
-
   import Peer.Controller
 
   @max_length Torrent.Downloads.piece_max_length()

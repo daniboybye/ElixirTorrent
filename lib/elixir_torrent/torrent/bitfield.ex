@@ -9,13 +9,13 @@ defmodule Torrent.Bitfield do
 
   @spec set(binary(), non_neg_integer(), 0 | 1) :: binary()
   def set(bitfield, index, x) do
-    <<prefix::bits-size(index), _::1, postfix::bits>> = bitfield
+    <<prefix::bits-size(^index), _::1, postfix::bits>> = bitfield
     <<prefix::bits, x::1, postfix::bits>>
   end
 
   @spec have?(binary(), non_neg_integer()) :: boolean()
   def have?(bitfield, index) do
-    <<_::bits-size(index), x::1, _::bits>> = bitfield
+    <<_::bits-size(^index), x::1, _::bits>> = bitfield
     x === 1
   end
 

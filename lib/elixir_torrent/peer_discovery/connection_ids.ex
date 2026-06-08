@@ -44,6 +44,7 @@ defmodule PeerDiscovery.ConnectionIds do
           )
 
         %State{} = state
+
         {:noreply,
          %{
            state
