@@ -100,4 +100,13 @@ defmodule ElixirTorrent do
     Torrent.get_hash(pid)
     |> Torrent.get(args)
   end
+
+  @doc """
+  Lists files in a torrent with per-file download progress.
+
+  Each entry is a `Torrent.Files.Entry` with `:name`, `:path`, `:length`,
+  `:downloaded`, `:progress`, and `:complete?`.
+  """
+  @spec list_files(Torrent.hash()) :: [Torrent.Files.Entry.t()]
+  defdelegate list_files(hash), to: Torrent, as: :list_files
 end

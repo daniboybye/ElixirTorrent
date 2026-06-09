@@ -22,6 +22,7 @@ defmodule Torrent do
     :left,
     :last_index,
     :last_piece_length,
+    :added_at,
     bitfield: nil,
     peer_status: nil,
     uploaded: 0,
@@ -42,6 +43,7 @@ defmodule Torrent do
           left: non_neg_integer(),
           last_index: index(),
           last_piece_length: length(),
+          added_at: DateTime.t() | nil,
           peer_status: Peer.status(),
           # The total amount uploaded 
           # (since the client sent the 'started' event to the tracker)"""
@@ -63,6 +65,7 @@ defmodule Torrent do
     FileHandle,
     Uploader,
     Downloads,
+    Files,
     Model
   }
 
@@ -107,6 +110,10 @@ defmodule Torrent do
   defdelegate get(hash, key), to: Model
 
   defdelegate downloaded?(hash), to: Model
+
+  defdelegate list_files(hash), to: Files, as: :list
+
+  defdelegate file_count(hash), to: Files, as: :count
 
   @spec get_hash(pid()) :: Torrent.hash() | nil
   def get_hash(pid) do

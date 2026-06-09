@@ -55,7 +55,7 @@ defmodule Torrent.Model do
       |> do_pieces_count
       |> Bitfield.make()
 
-    torrent = %{torrent | bitfield: bitfield}
+    torrent = %{torrent | bitfield: bitfield, added_at: DateTime.utc_now()}
 
     message_for_next_detection(torrent)
 
