@@ -57,7 +57,7 @@ defmodule ElixirTorrent.MixProject do
 
   @spec source_url() :: String.t()
   defp source_url do
-    "https://github.com/danielurumov/ElixirTorrent"
+    "https://github.com/daniboybye/ElixirTorrent"
   end
 
   @spec changelog_url() :: String.t()
