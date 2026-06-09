@@ -12,7 +12,27 @@ defmodule ElixirTorrent do
     * `download/1` - starts downloading a `.torrent` from disk
     * `stats/2` - fetches selected runtime stats for a torrent
     * `get/2` - low-level raw getter kept for compatibility
+    * `list_files/1` - lists files with per-file download progress
+    * `remove/2` - stops a torrent and optionally deletes its data
   """
+
+  @typedoc "20-byte torrent info hash."
+  @type info_hash :: binary()
+
+  @typedoc """
+  Per-file progress entry returned by `list_files/1`.
+
+  Keys: `:index`, `:path`, `:name`, `:length`, `:downloaded`, `:progress`, `:complete?`.
+  """
+  @type file_entry :: %{
+          index: non_neg_integer(),
+          path: String.t(),
+          name: String.t(),
+          length: non_neg_integer(),
+          downloaded: non_neg_integer(),
+          progress: float(),
+          complete?: boolean()
+        }
 
   @doc "Starts the CLI loop used by the escript entrypoint."
   def main(_), do: loop()
@@ -104,10 +124,9 @@ defmodule ElixirTorrent do
   @doc """
   Lists files in a torrent with per-file download progress.
 
-  Each entry is a `Torrent.Files.Entry` with `:name`, `:path`, `:length`,
-  `:downloaded`, `:progress`, and `:complete?`.
+  See `t:file_entry/0` for the shape of each returned entry.
   """
-  @spec list_files(Torrent.hash()) :: [Torrent.Files.Entry.t()]
+  @spec list_files(info_hash()) :: [file_entry()]
   defdelegate list_files(hash), to: Torrent, as: :list_files
 
   @doc """
@@ -115,6 +134,6 @@ defmodule ElixirTorrent do
 
   Pass `delete_data: true` to also delete downloaded files from disk.
   """
-  @spec remove(Torrent.hash(), keyword()) :: :ok | {:error, term()}
+  @spec remove(info_hash(), keyword()) :: :ok | {:error, term()}
   defdelegate remove(hash, opts \\ []), to: Torrents
 end

@@ -66,7 +66,7 @@ defmodule Torrents do
   When `:delete_data` is `true`, downloaded files are deleted from disk after
   the torrent process has been stopped.
   """
-  @spec remove(Torrent.hash(), keyword()) :: :ok | {:error, term()}
+  @spec remove(binary(), keyword()) :: :ok | {:error, term()}
   def remove(hash, opts \\ []) do
     delete_data? = Keyword.get(opts, :delete_data, false)
 
@@ -78,8 +78,8 @@ defmodule Torrents do
     end
   end
 
-  @spec find_pid(Torrent.hash()) :: {:ok, pid()} | {:error, :not_found}
-  def find_pid(hash) do
+  @spec find_pid(binary()) :: {:ok, pid()} | {:error, :not_found}
+  defp find_pid(hash) do
     case Enum.find_value(DynamicSupervisor.which_children(__MODULE__), fn
            {_id, pid, _type, _modules} when is_pid(pid) ->
              if Torrent.get_hash(pid) == hash, do: pid

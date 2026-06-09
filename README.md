@@ -2,6 +2,8 @@
 
 BitTorrent client **engine** written in Elixir.
 
+[Changelog](https://hexdocs.pm/elixir_torrent/changelog.html)
+
 ## Supported BEPs
 
 BEP 03 - The BitTorrent Protocol Specification  
@@ -18,7 +20,7 @@ BEP 31 - Failure Retry Extension
 ```elixir
 def deps do
   [
-    {:elixir_torrent, "~> 0.1.0"}
+    {:elixir_torrent, "~> 0.1.2"}
   ]
 end
 ```

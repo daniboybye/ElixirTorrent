@@ -4,7 +4,7 @@ defmodule ElixirTorrent.MixProject do
   def project do
     [
       app: :elixir_torrent,
-      version: "0.1.1",
+      version: "0.1.2",
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       elixirc_options: elixirc_options(),
@@ -60,17 +60,26 @@ defmodule ElixirTorrent.MixProject do
     "https://github.com/danielurumov/ElixirTorrent"
   end
 
+  @spec changelog_url() :: String.t()
+  defp changelog_url do
+    "https://hexdocs.pm/elixir_torrent/changelog.html"
+  end
+
   @spec package() :: keyword()
   defp package do
     [
       licenses: ["MIT"],
-      links: %{"GitHub" => source_url()},
+      links: %{
+        "GitHub" => source_url(),
+        "Changelog" => changelog_url()
+      },
       files: [
         "lib",
         "config",
         "mix.exs",
         "mix.lock",
         "README.md",
+        "CHANGELOG.md",
         "LICENSE",
         ".formatter.exs"
       ]
@@ -81,7 +90,11 @@ defmodule ElixirTorrent.MixProject do
   defp docs do
     [
       main: "ElixirTorrent",
-      extras: ["README.md"],
+      extras: ["README.md", "CHANGELOG.md"],
+      groups_for_extras: [
+        Introduction: ~r/README.md/,
+        Project: ~r/CHANGELOG.md/
+      ],
       filter_modules: fn module, _metadata ->
         module in [ElixirTorrent, Torrents]
       end
