@@ -109,4 +109,12 @@ defmodule ElixirTorrent do
   """
   @spec list_files(Torrent.hash()) :: [Torrent.Files.Entry.t()]
   defdelegate list_files(hash), to: Torrent, as: :list_files
+
+  @doc """
+  Stops a torrent and removes it from the active session.
+
+  Pass `delete_data: true` to also delete downloaded files from disk.
+  """
+  @spec remove(Torrent.hash(), keyword()) :: :ok | {:error, term()}
+  defdelegate remove(hash, opts \\ []), to: Torrents
 end
