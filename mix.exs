@@ -71,7 +71,8 @@ defmodule ElixirTorrent.MixProject do
       licenses: ["MIT"],
       links: %{
         "GitHub" => source_url(),
-        "Changelog" => changelog_url()
+        "Changelog" => changelog_url(),
+        "ElixirTorrent Web" => "https://github.com/daniboybye/ElixirTorrentWebUI"
       },
       files: [
         "lib",

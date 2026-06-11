@@ -4,6 +4,16 @@ BitTorrent client **engine** written in Elixir.
 
 [Changelog](https://hexdocs.pm/elixir_torrent/changelog.html)
 
+## ElixirTorrent Web (desktop app)
+
+Need a full client, not just the library? **[ElixirTorrent Web](https://github.com/daniboybye/ElixirTorrentWebUI)**
+is the official Phoenix LiveView UI for this engine, shipped as a native macOS desktop app.
+
+- **Repository:** [github.com/daniboybye/ElixirTorrentWebUI](https://github.com/daniboybye/ElixirTorrentWebUI)
+- **Download (macOS Apple Silicon):** [Release 0.1.0](https://github.com/daniboybye/ElixirTorrentWebUI/releases/tag/0.1.0)
+
+The sections below cover the **engine API** for Elixir developers embedding BitTorrent in their own apps.
+
 ## Supported BEPs
 
 BEP 03 - The BitTorrent Protocol Specification  
