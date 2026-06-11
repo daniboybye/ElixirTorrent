@@ -49,13 +49,22 @@ defmodule Torrent.Model do
   def set_peer_status(hash, status),
     do: GenServer.cast(via(hash), {:set_peer_status, status})
 
-  def init(%Torrent{} = torrent) do
-    bitfield =
-      torrent
-      |> do_pieces_count
-      |> Bitfield.make()
+  @spec set_event(Torrent.hash(), 0..3) :: :ok
+  def set_event(hash, event),
+    do: GenServer.cast(via(hash), {:set_event, event})
 
-    torrent = %{torrent | bitfield: bitfield, added_at: DateTime.utc_now()}
+  def init(%Torrent{} = torrent) do
+    torrent =
+      if torrent.bitfield do
+        torrent
+      else
+        bitfield =
+          torrent
+          |> do_pieces_count
+          |> Bitfield.make()
+
+        %{torrent | bitfield: bitfield, added_at: torrent.added_at || DateTime.utc_now()}
+      end
 
     message_for_next_detection(torrent)
 
@@ -101,6 +110,9 @@ defmodule Torrent.Model do
 
   def handle_cast({:set_peer_status, status}, %Torrent{} = torrent),
     do: {:noreply, %{torrent | peer_status: status}}
+
+  def handle_cast({:set_event, event}, %Torrent{} = torrent),
+    do: {:noreply, %{torrent | event: event}}
 
   def handle_cast(:update_event, %Torrent{event: @stopped} = torrent),
     do: {:noreply, torrent}

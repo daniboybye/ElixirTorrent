@@ -66,7 +66,9 @@ defmodule Torrent do
     Uploader,
     Downloads,
     Files,
-    Model
+    Model,
+    Resume,
+    Session
   }
 
   @spec start_link(Path.t()) :: Supervisor.on_start() | none()
@@ -131,6 +133,12 @@ defmodule Torrent do
   def init(path) do
     %Torrent{hash: hash} = torrent = parse_file!(path)
 
+    {torrent, resume_mode} =
+      case Session.load(hash) do
+        {:ok, session} -> {Session.apply(torrent, session), :verify_saved}
+        :error -> {torrent, :full_scan}
+      end
+
     PiecesStatistic.init(torrent)
 
     children = [
@@ -139,7 +147,8 @@ defmodule Torrent do
       {Uploader, hash},
       {Downloads, hash},
       {Swarm, hash},
-      {Controller, hash}
+      {Controller, hash},
+      Resume.child_spec({hash, resume_mode})
     ]
 
     opts = [strategy: :one_for_all, max_restarts: 3]

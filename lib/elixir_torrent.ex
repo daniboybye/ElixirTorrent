@@ -136,4 +136,22 @@ defmodule ElixirTorrent do
   """
   @spec remove(info_hash(), keyword()) :: :ok | {:error, term()}
   defdelegate remove(hash, opts \\ []), to: Torrents
+
+  @doc """
+  Returns info hashes for all active torrent processes.
+  """
+  @spec list() :: [info_hash()]
+  defdelegate list(), to: Torrents
+
+  @doc """
+  Stops a torrent and persists its session state to disk.
+  """
+  @spec stop_and_serialize(info_hash()) :: :ok | {:error, term()}
+  defdelegate stop_and_serialize(hash), to: Torrents
+
+  @doc """
+  Stops every active torrent and persists session state for each one.
+  """
+  @spec stop_all_and_serialize() :: :ok
+  defdelegate stop_all_and_serialize(), to: Torrents
 end

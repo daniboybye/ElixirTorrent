@@ -38,6 +38,16 @@ defmodule PeerDiscovery.Announce do
   def connecting_to_peers(hash),
     do: GenServer.cast(via(hash), :connecting_to_peers)
 
+  @spec stopped_announce(Torrent.hash()) :: :ok
+  def stopped_announce(hash) do
+    case GenServer.whereis(via(hash)) do
+      nil -> :ok
+      pid -> GenServer.call(pid, :stopped_announce, 15_000)
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
   def init([pid, torrent]) do
     Process.monitor(pid)
 
@@ -58,6 +68,18 @@ defmodule PeerDiscovery.Announce do
 
   def handle_call(:get, _, state),
     do: {:reply, peers(state), state}
+
+  def handle_call(:stopped_announce, _, %__MODULE__{hash: hash} = state) do
+    torrent = Model.get(hash)
+
+    torrent.metadata
+    |> extract_announce()
+    |> Enum.each(fn announce ->
+      _ = Tracker.request!(announce, hash)
+    end)
+
+    {:reply, :ok, state}
+  end
 
   def handle_cast(:connecting_to_peers, state) do
     Acceptor.handshakes(peers(state), state.hash)
