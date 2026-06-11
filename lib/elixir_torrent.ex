@@ -1,19 +1,38 @@
 defmodule ElixirTorrent do
   @moduledoc """
-  Public API for controlling torrent downloads.
+  Public API for the ElixirTorrent BitTorrent engine.
 
-  This is the entrypoint you should use from other applications.
-  Start a download with `download/1` and poll stats with `stats/2`.
+  Start the OTP application before calling any function:
+
+      Application.ensure_all_started(:elixir_torrent)
+
+  Then add torrents with `download/1`, poll progress with `stats/2`, and shut down
+  cleanly with `stop_and_serialize/1` when you need session state preserved on disk.
+
+  ## Session persistence
+
+  Session snapshots are written to `.elixir_torrent/state/{hex_info_hash}.term`
+  under `File.cwd!/0`. Calling `download/1` for a torrent with an existing session
+  loads the saved bitfield and verifies pieces on disk before resuming.
+
+  Use `stop_and_serialize/1` (or `stop_all_and_serialize/0`) before your app exits.
+  Use `remove/2` when you want to drop a torrent from the active session; pass
+  `delete_data: true` to also delete downloaded files.
 
   ## Public functions
 
-    * `main/1` - starts the CLI loop used by the escript
-    * `version/0` - returns this client's peer ID/version string
-    * `download/1` - starts downloading a `.torrent` from disk
-    * `stats/2` - fetches selected runtime stats for a torrent
-    * `get/2` - low-level raw getter kept for compatibility
-    * `list_files/1` - lists files with per-file download progress
-    * `remove/2` - stops a torrent and optionally deletes its data
+    * `download/1` — start a download from a local `.torrent` path
+    * `stats/2` — runtime stats as a map (preferred over `get/2`)
+    * `list/0` — info hashes for all active torrent processes
+    * `list_files/1` — per-file download progress
+    * `stop_and_serialize/1` — graceful stop and persist session
+    * `stop_all_and_serialize/0` — graceful stop and persist for every torrent
+    * `remove/2` — stop and remove from session; optional `delete_data: true`
+    * `get/2` — low-level field access
+    * `version/0` — peer ID prefix advertised to peers (BEP 20)
+    * `main/1` — escript CLI entrypoint
+
+  See the [README](readme.html) for a full quick-start guide.
   """
 
   @typedoc "20-byte torrent info hash."
@@ -37,8 +56,12 @@ defmodule ElixirTorrent do
   @doc "Starts the CLI loop used by the escript entrypoint."
   def main(_), do: loop()
 
-  @doc "Returns the peer ID/version string advertised by this client."
-  def version, do: "ET0-1-0"
+  @doc """
+  Returns the peer ID prefix advertised to other peers (BEP 20).
+
+  The full 20-byte peer ID is this prefix, a hyphen, and random bytes.
+  """
+  def version, do: "ET0-2-0"
 
   defp loop do
     parse(IO.read(:line))
@@ -77,10 +100,12 @@ defmodule ElixirTorrent do
   @doc """
   Starts downloading a `.torrent` file from the given local path.
 
-  Returns the same value as `Torrents.download/1`:
-  `{:ok, pid}` on success or `{:error, reason}`.
+  If a session file already exists for this torrent's info hash, progress is restored
+  after verifying pieces on disk.
 
-  Example:
+  Returns `{:ok, pid}` on success or `{:error, reason}` on failure.
+
+  ## Example
 
       {:ok, pid} = ElixirTorrent.download("/tmp/file.torrent")
   """
@@ -89,29 +114,21 @@ defmodule ElixirTorrent do
   @doc """
   Returns selected runtime stats for a running torrent process.
 
-  By default it returns:
-  `:name`, `:speed`, `:downloaded`, `:bytes_size`.
+  Default fields: `:name`, `:speed`, `:downloaded`, `:bytes_size`.
 
-  You can request custom fields, for example:
+  ## Example
 
       ElixirTorrent.stats(pid, [:name, :speed, :downloaded, :bytes_size])
+      #=> {:ok, %{name: "ubuntu.iso", speed: %{download: 1200, upload: 80}, ...}}
 
-  Result shape:
-
-      {:ok,
-       %{
-         name: "ubuntu.iso",
-         speed: %{download: 1200, upload: 80},
-         downloaded: 1048576,
-         bytes_size: 4294967296
-       }}
+  Returns `{:error, :torrent_not_found}` if the pid is not a live torrent process.
   """
   @spec stats(pid(), [atom()]) :: {:ok, map()} | {:error, :torrent_not_found}
   def stats(pid, fields \\ [:name, :speed, :downloaded, :bytes_size]),
     do: Torrents.stats(pid, fields)
 
   @doc """
-  Low-level getter that proxies to the internal torrent model getter through the torrent pid.
+  Low-level getter that reads fields from the internal torrent model.
 
   Prefer `stats/2` when you need runtime statistics as a map.
   """
@@ -132,7 +149,13 @@ defmodule ElixirTorrent do
   @doc """
   Stops a torrent and removes it from the active session.
 
-  Pass `delete_data: true` to also delete downloaded files from disk.
+  Deletes the on-disk session file. Pass `delete_data: true` to also remove
+  downloaded files from disk.
+
+  ## Example
+
+      ElixirTorrent.remove(hash)
+      ElixirTorrent.remove(hash, delete_data: true)
   """
   @spec remove(info_hash(), keyword()) :: :ok | {:error, term()}
   defdelegate remove(hash, opts \\ []), to: Torrents
@@ -144,13 +167,20 @@ defmodule ElixirTorrent do
   defdelegate list(), to: Torrents
 
   @doc """
-  Stops a torrent and persists its session state to disk.
+  Gracefully stops a torrent and persists its session state to disk.
+
+  Steps: stop downloads → disconnect peers → tracker `event=stopped` →
+  write `.elixir_torrent/state/{hash}.term` → stop the torrent process.
+
+  Returns `:ok` if the torrent is not running (already stopped).
   """
   @spec stop_and_serialize(info_hash()) :: :ok | {:error, term()}
   defdelegate stop_and_serialize(hash), to: Torrents
 
   @doc """
-  Stops every active torrent and persists session state for each one.
+  Gracefully stops every active torrent and persists session state for each one.
+
+  Same shutdown sequence as `stop_and_serialize/1`, applied to all running torrents.
   """
   @spec stop_all_and_serialize() :: :ok
   defdelegate stop_all_and_serialize(), to: Torrents

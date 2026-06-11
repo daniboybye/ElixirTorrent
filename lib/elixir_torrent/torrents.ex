@@ -1,8 +1,11 @@
 defmodule Torrents do
   @moduledoc """
-  Internal runtime facade used by `ElixirTorrent`.
+  Runtime supervisor and operations layer behind `ElixirTorrent`.
 
-  Use `ElixirTorrent` as the preferred public API.
+  Most callers should use `ElixirTorrent` directly. This module is published in
+  HexDocs for API completeness — it owns the dynamic supervisor that starts torrent
+  processes and implements `remove/2`, `stop_and_serialize/1`, and related lifecycle
+  helpers.
   """
 
   @default_stats_fields [:name, :speed, :downloaded, :bytes_size]
@@ -80,7 +83,17 @@ defmodule Torrents do
   end
 
   @doc """
-  Stops a torrent, sends tracker `stopped`, persists session state, then stops the process.
+  Gracefully stops a torrent and persists session state.
+
+  Order of operations:
+
+    1. Stop active piece downloads
+    2. Disconnect all peers (BEP 3 messages, then TCP close)
+    3. Tracker announce with `event=stopped`
+    4. Write session to `.elixir_torrent/state/{hash}.term`
+    5. Stop the torrent OTP process
+
+  Returns `:ok` when the torrent is not found (already stopped).
   """
   @spec stop_and_serialize(binary()) :: :ok | {:error, term()}
   def stop_and_serialize(hash) do

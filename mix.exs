@@ -1,10 +1,12 @@
 defmodule ElixirTorrent.MixProject do
   use Mix.Project
 
+  @version "0.2.0"
+
   def project do
     [
       app: :elixir_torrent,
-      version: "0.1.2",
+      version: @version,
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       elixirc_options: elixirc_options(),
@@ -52,12 +54,17 @@ defmodule ElixirTorrent.MixProject do
 
   @spec description() :: String.t()
   defp description do
-    "BitTorrent client engine written in Elixir."
+    "BitTorrent engine for Elixir — download, seed, session persistence, and a stable OTP public API."
   end
 
   @spec source_url() :: String.t()
   defp source_url do
     "https://github.com/daniboybye/ElixirTorrent"
+  end
+
+  @spec hexdocs_url() :: String.t()
+  defp hexdocs_url do
+    "https://hexdocs.pm/elixir_torrent"
   end
 
   @spec changelog_url() :: String.t()
@@ -71,6 +78,7 @@ defmodule ElixirTorrent.MixProject do
       licenses: ["MIT"],
       links: %{
         "GitHub" => source_url(),
+        "Documentation" => hexdocs_url(),
         "Changelog" => changelog_url(),
         "ElixirTorrent Web" => "https://github.com/daniboybye/ElixirTorrentWebUI"
       },
@@ -90,11 +98,16 @@ defmodule ElixirTorrent.MixProject do
   @spec docs() :: keyword()
   defp docs do
     [
-      main: "ElixirTorrent",
+      main: "readme",
+      name: "ElixirTorrent",
+      source_ref: "v#{@version}",
       extras: ["README.md", "CHANGELOG.md"],
       groups_for_extras: [
         Introduction: ~r/README.md/,
         Project: ~r/CHANGELOG.md/
+      ],
+      groups_for_modules: [
+        "Public API": [ElixirTorrent, Torrents]
       ],
       filter_modules: fn module, _metadata ->
         module in [ElixirTorrent, Torrents]

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0 - 2026-06-11
+
+### Session persistence
+
+- Saved session state under `.elixir_torrent/state/{info_hash}.term` (relative to `File.cwd!/0`)
+- On `download/1`, an existing session is loaded and the bitfield is verified against disk before resuming
+- `remove/2` deletes the session file; `delete_data: true` also removes downloaded files
+
+### Graceful shutdown API
+
+- `stop_and_serialize/1` — stop piece downloads, disconnect peers (BEP 3), send tracker `event=stopped`, persist session, then stop the torrent process
+- `stop_all_and_serialize/0` — same for every active torrent
+- `list/0` — returns info hashes for all running torrent processes
+
+### Peer disconnect
+
+- Peers receive BEP 3 cancel / not interested / choke before TCP connections close
+- Used during shutdown so peers are notified cleanly
+
 ## 0.1.2 - 2026-06-09
 
 - `ElixirTorrent.list_files/1` — file list with per-file download progress
@@ -32,3 +51,4 @@ First public release — BitTorrent client **engine** publishable as a Hex depen
 **Reliability**
 
 - Improved choke recovery, piece availability tracking, and tracker announce handling
+
