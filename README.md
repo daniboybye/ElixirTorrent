@@ -2,6 +2,10 @@
 
 BitTorrent client **engine** for Elixir/OTP — embed downloads in your own app with a small, stable public API.
 
+## About
+
+This is a **fully functional BitTorrent client** that actually downloads torrents — not a stub or protocol sketch. It started as a course project for **Functional Programming with Elixir** at **Sofia University**. After the course ended, development continued in spare time until it was ready to publish on Hex.
+
 | | |
 | --- | --- |
 | **Hex** | [`hex.pm/packages/elixir_torrent`](https://hex.pm/packages/elixir_torrent) |
