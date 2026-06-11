@@ -122,6 +122,11 @@ defmodule Peer do
     if key = get_key(pid), do: Controller.seed(key)
   end
 
+  @spec disconnect(pid()) :: :ok
+  def disconnect(pid) when is_pid(pid) do
+    if key = get_key(pid), do: Controller.disconnect(key), else: :ok
+  end
+
   @spec make_key(Torrent.hash(), id()) :: key()
   def make_key(hash, id), do: {id, hash}
 

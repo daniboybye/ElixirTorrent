@@ -66,6 +66,13 @@ defmodule Peer.Sender do
   def allowed_fast(key, index),
     do: GenServer.cast(via(key), {:allowed_fast, index})
 
+  @spec send_operations(Peer.key(), [term()]) :: :ok
+  def send_operations(key, operations) when is_list(operations) do
+    GenServer.call(via(key), {:send_operations, operations}, 5_000)
+  catch
+    :exit, _ -> :ok
+  end
+
   def init(socket), do: {:ok, socket, @timeout}
 
   def handle_cast(:choke, socket), do: do_send(socket, @choke_id)
@@ -111,10 +118,26 @@ defmodule Peer.Sender do
   def handle_cast({:allowed_fast, index}, socket),
     do: do_send(socket, [@allowed_fast_id, <<index::32>>])
 
+  def handle_call({:send_operations, operations}, _, socket) do
+    socket =
+      Enum.reduce(operations, socket, fn
+        :choke, sock -> do_send_sync(sock, @choke_id)
+        :not_interested, sock -> do_send_sync(sock, @not_interested_id)
+        {:cancel, index, begin, len}, sock -> do_send_sync(sock, [@cancel_id, <<index::32>>, <<begin::32>>, <<len::32>>])
+      end)
+
+    {:reply, :ok, socket, @timeout}
+  end
+
   def handle_info(:timeout, socket), do: do_send(socket, [])
 
   defp do_send(socket, msg) do
     :ok = :gen_tcp.send(socket, [<<IO.iodata_length(msg)::32>>, msg])
     {:noreply, socket, @timeout}
+  end
+
+  defp do_send_sync(socket, msg) do
+    :ok = :gen_tcp.send(socket, [<<IO.iodata_length(msg)::32>>, msg])
+    socket
   end
 end

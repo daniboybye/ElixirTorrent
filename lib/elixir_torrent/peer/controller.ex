@@ -5,7 +5,7 @@ defmodule Peer.Controller do
   require Logger
 
   alias __MODULE__.{State, FastExtension}
-  # alias Peer.Sender
+  alias Peer.Sender
   alias Torrent.{Uploader, Downloads}
 
   import Peer, only: [make_key: 2, key_to_id: 1, key_to_hash: 1]
@@ -70,6 +70,18 @@ defmodule Peer.Controller do
   @spec handle_not_interested(Peer.key()) :: :ok
   def handle_not_interested(key),
     do: GenServer.cast(via(key), {:handle_not_interested, []})
+
+  @doc """
+  Gracefully disconnects from a peer before shutdown.
+
+  Sends cancel / not interested / choke per BEP 3, shuts down the TCP socket, then stops.
+  """
+  @spec disconnect(Peer.key()) :: :ok
+  def disconnect(key) do
+    GenServer.call(via(key), :disconnect, 5_000)
+  catch
+    :exit, _ -> :ok
+  end
 
   @spec handle_have(Peer.key(), Torrent.index()) :: :ok
   def handle_have(key, index),
@@ -160,6 +172,22 @@ defmodule Peer.Controller do
   end
 
   def handle_call(:rank, _, state), do: {:reply, State.rank(state), state}
+
+  def handle_call(:disconnect, _, %State{} = state) do
+    {operations, state} = State.disconnect_operations(state)
+    key = State.key(state)
+    :ok = Sender.send_operations(key, operations)
+    close_socket(state.socket)
+    {:stop, :normal, state}
+  end
+
+  defp close_socket(socket) when is_port(socket) do
+    _ = :gen_tcp.shutdown(socket, :write)
+    _ = :gen_tcp.close(socket)
+    :ok
+  end
+
+  defp close_socket(_), do: :ok
 
   def handle_cast({message, _}, %State{fast_extension: nil} = state)
       when message in [

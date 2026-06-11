@@ -65,6 +65,10 @@ defmodule Torrent.Swarm do
   @spec count(Torrent.hash()) :: non_neg_integer()
   def count(hash), do: DynamicSupervisor.count_children(via(hash)).active
 
+  @doc false
+  @spec disconnect_all(Torrent.hash()) :: :ok
+  def disconnect_all(hash), do: Torrent.Swarm.Disconnect.all(hash)
+
   defp each_childred(hash, fun) do
     via(hash)
     |> DynamicSupervisor.which_children()

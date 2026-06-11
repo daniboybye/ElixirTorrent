@@ -133,6 +133,35 @@ defmodule Peer.Controller.State do
     %__MODULE__{state | bitfield: nil, status: :seed, interested: false}
   end
 
+  @doc """
+  Builds peer-wire messages for a protocol-correct shutdown.
+
+  Per BEP 3:
+  - cancel in-flight block requests (especially during endgame)
+  - send `not interested` when we no longer want data
+  - choke so we stop uploading to interested peers
+
+  See also common client behaviour: flush cancels before closing the socket.
+  """
+  @spec disconnect_operations(t()) :: {[atom() | tuple()], t()}
+  def disconnect_operations(%__MODULE__{} = state) do
+    cancels =
+      Enum.map(state.requests, fn {index, begin, length} ->
+        {:cancel, index, begin, length}
+      end)
+
+    interest = if state.interested, do: [:not_interested], else: []
+    chokes = if state.choke, do: [], else: [:choke]
+
+    state =
+      Enum.reduce(state.requests, state, fn {index, begin, length}, acc ->
+        Downloads.reject(acc.hash, index, acc.id, begin, length)
+        delete_request(acc, index, begin, length)
+      end)
+
+    {cancels ++ interest ++ chokes, state}
+  end
+
   @spec upload(t(), Torrent.length()) :: t()
   def upload(%__MODULE__{status: :seed} = state, n) do
     Map.update!(state, :rank, &(&1 + n))
