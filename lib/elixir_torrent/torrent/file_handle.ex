@@ -3,7 +3,7 @@ defmodule Torrent.FileHandle do
   use Via
 
   alias __MODULE__.Piece
-  alias Torrent.Model
+  alias Torrent.{Model, PathLayout}
 
   @doc """
   FileHandle controls File.io_device() 
@@ -59,19 +59,22 @@ defmodule Torrent.FileHandle do
     Supervisor.child_spec({Piece, {piece, name}}, id: index)
   end
 
-  defp init_files(%{"files" => files}) do
+  defp init_files(%{"files" => files} = info) do
     files
     |> Enum.map(&Map.fetch!(&1, "length"))
     |> Enum.scan(&(&1 + &2))
-    |> Enum.zip(Enum.map(files, &open_file/1))
+    |> Enum.zip(Enum.map(files, &open_file(info, &1)))
   end
 
-  defp init_files(%{"length" => length, "name" => name}) do
-    [{length, open_file(%{"length" => length, "path" => [name]})}]
+  defp init_files(%{"length" => length, "name" => name} = info) do
+    [{length, open_file(info, %{"length" => length, "path" => [name]})}]
   end
 
-  defp open_file(%{"length" => length, "path" => path}) do
-    name = Path.join([File.cwd!() | path])
+  defp open_file(info, %{"length" => length, "path" => path}) do
+    name =
+      info
+      |> PathLayout.layout_path(path)
+      |> then(&Path.join([File.cwd!() | &1]))
 
     pid =
       case File.stat(name) do

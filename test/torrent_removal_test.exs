@@ -19,9 +19,10 @@ defmodule Torrent.RemovalTest do
     assert Removal.disk_paths(torrent) == [Path.join(File.cwd!(), "ubuntu.iso")]
   end
 
-  test "disk_paths for multi-file torrent" do
+  test "disk_paths for multi-file torrent with shared folder" do
     torrent =
       sample_torrent(%{
+        "name" => "ignored",
         "files" => [
           %{"length" => 100, "path" => ["dir", "a.bin"]},
           %{"length" => 200, "path" => ["dir", "b.bin"]}
@@ -33,6 +34,24 @@ defmodule Torrent.RemovalTest do
     assert Removal.disk_paths(torrent) == [
              Path.join([cwd, "dir", "a.bin"]),
              Path.join([cwd, "dir", "b.bin"])
+           ]
+  end
+
+  test "disk_paths for multi-file torrent with loose files wraps in info.name" do
+    torrent =
+      sample_torrent(%{
+        "name" => "My Album",
+        "files" => [
+          %{"length" => 100, "path" => ["a.bin"]},
+          %{"length" => 200, "path" => ["b.bin"]}
+        ]
+      })
+
+    cwd = File.cwd!()
+
+    assert Removal.disk_paths(torrent) == [
+             Path.join([cwd, "My Album", "a.bin"]),
+             Path.join([cwd, "My Album", "b.bin"])
            ]
   end
 

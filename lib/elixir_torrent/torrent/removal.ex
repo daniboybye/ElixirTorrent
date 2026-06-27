@@ -1,7 +1,7 @@
 defmodule Torrent.Removal do
   @moduledoc false
 
-  alias Torrent.Model
+  alias Torrent.{Model, PathLayout}
 
   @spec data_paths(Torrent.hash()) :: [Path.t()]
   def data_paths(hash) do
@@ -12,17 +12,7 @@ defmodule Torrent.Removal do
 
   @spec disk_paths(Torrent.t()) :: [Path.t()]
   def disk_paths(%Torrent{metadata: %{"info" => info}}) do
-    cwd = File.cwd!()
-
-    case info do
-      %{"length" => _, "name" => name} ->
-        [Path.join(cwd, name)]
-
-      %{"files" => files} ->
-        Enum.map(files, fn %{"path" => path} ->
-          Path.join([cwd | path])
-        end)
-    end
+    PathLayout.disk_paths(info)
   end
 
   @spec delete_data!(Torrent.hash()) :: :ok

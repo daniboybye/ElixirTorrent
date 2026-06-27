@@ -9,6 +9,7 @@ defmodule Torrent.Files do
 
   alias Torrent.Bitfield
   alias Torrent.Model
+  alias Torrent.PathLayout
 
   defmodule Entry do
     @enforce_keys [:index, :path, :name, :length, :downloaded, :progress, :complete?]
@@ -82,13 +83,14 @@ defmodule Torrent.Files do
           %{offset: non_neg_integer(), length: pos_integer(), path: String.t(), name: String.t()}
         ]
   defp normalize_files(%{"length" => length, "name" => name}) do
-    [%{offset: 0, length: length, path: name, name: name}]
+    sanitized = PathLayout.sanitize_name(name)
+    [%{offset: 0, length: length, path: sanitized, name: sanitized}]
   end
 
-  defp normalize_files(%{"files" => files}) do
+  defp normalize_files(%{"files" => files} = info) do
     {_, entries} =
       Enum.reduce(files, {0, []}, fn %{"length" => length, "path" => path}, {offset, acc} ->
-        path_str = Path.join(path)
+        path_str = PathLayout.relative_path(info, path)
         name = List.last(path)
         entry = %{offset: offset, length: length, path: path_str, name: name}
         {offset + length, [entry | acc]}
