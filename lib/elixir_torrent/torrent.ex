@@ -23,6 +23,7 @@ defmodule Torrent do
     :last_index,
     :last_piece_length,
     :added_at,
+    :download_dir,
     bitfield: nil,
     peer_status: nil,
     uploaded: 0,
@@ -71,9 +72,12 @@ defmodule Torrent do
     Session
   }
 
-  @spec start_link(Path.t()) :: Supervisor.on_start() | none()
-  def start_link(path),
-    do: Supervisor.start_link(__MODULE__, path)
+  @spec start_link(Path.t() | {Path.t(), keyword()}) :: Supervisor.on_start() | none()
+  def start_link({path, opts}) when is_binary(path) and is_list(opts),
+    do: Supervisor.start_link(__MODULE__, {path, opts})
+
+  def start_link(path) when is_binary(path),
+    do: start_link({path, []})
 
   @compile {:inline, empty: 0, started: 0, completed: 0, stopped: 0, event_to_string: 1}
 
@@ -130,8 +134,15 @@ defmodule Torrent do
 
   defdelegate stop(pid), to: Supervisor
 
-  def init(path) do
-    %Torrent{hash: hash} = torrent = parse_file!(path)
+  def init({path, opts}) when is_binary(path) and is_list(opts) do
+    download_dir = normalize_download_dir(Keyword.get(opts, :download_dir))
+    %Torrent{hash: hash} = torrent = parse_file!(path) |> Map.put(:download_dir, download_dir)
+    start_torrent(torrent, hash)
+  end
+
+  def init(path) when is_binary(path), do: init({path, []})
+
+  defp start_torrent(%Torrent{hash: hash} = torrent, hash) do
 
     {torrent, resume_mode} =
       case Session.load(hash) do
@@ -159,6 +170,15 @@ defmodule Torrent do
     PeerDiscovery.register(self(), torrent)
 
     return
+  end
+
+  @spec normalize_download_dir(nil | Path.t()) :: Path.t()
+  defp normalize_download_dir(nil), do: File.cwd!()
+
+  defp normalize_download_dir(dir) when is_binary(dir) do
+    dir = Path.expand(dir)
+    File.mkdir_p!(dir)
+    dir
   end
 
   @spec parse_file!(Path.t()) :: t() | no_return()

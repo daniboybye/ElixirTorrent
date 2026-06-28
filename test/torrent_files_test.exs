@@ -52,9 +52,9 @@ defmodule Torrent.FilesTest do
 
     [readme, clip] = Files.build_entries(torrent)
 
-    assert readme.path == "readme.txt"
+    assert readme.path == Path.join(["folder", "readme.txt"])
     assert readme.complete?
-    assert clip.path == Path.join(["video", "clip.mp4"])
+    assert clip.path == Path.join(["folder", "video", "clip.mp4"])
     assert clip.complete?
   end
 end

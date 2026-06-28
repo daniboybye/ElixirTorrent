@@ -103,13 +103,19 @@ defmodule ElixirTorrent do
   If a session file already exists for this torrent's info hash, progress is restored
   after verifying pieces on disk.
 
+  Options:
+
+    * `:download_dir` — base directory for downloaded files (defaults to `File.cwd!/0`)
+
   Returns `{:ok, pid}` on success or `{:error, reason}` on failure.
 
   ## Example
 
       {:ok, pid} = ElixirTorrent.download("/tmp/file.torrent")
+      {:ok, pid} = ElixirTorrent.download("/tmp/file.torrent", download_dir: "/Downloads")
   """
-  defdelegate download(path), to: Torrents
+  @spec download(Path.t(), keyword()) :: DynamicSupervisor.on_start_child()
+  defdelegate download(path, opts \\ []), to: Torrents
 
   @doc """
   Returns selected runtime stats for a running torrent process.

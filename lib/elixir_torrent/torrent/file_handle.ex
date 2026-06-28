@@ -21,10 +21,12 @@ defmodule Torrent.FileHandle do
   defdelegate write(hash, index, begin, block), to: Piece
 
   def init(hash) do
-    [metadata, last_index, last_piece_length] =
-      Model.get(hash, [:metadata, :last_index, :last_piece_length])
+    [metadata, last_index, last_piece_length, download_dir] =
+      Model.get(hash, [:metadata, :last_index, :last_piece_length, :download_dir])
 
-    all_files = init_files(metadata["info"])
+    download_dir = download_dir || File.cwd!()
+
+    all_files = init_files(metadata["info"], download_dir)
     length = metadata["info"]["piece length"]
     pieces_hash = metadata["info"]["pieces"]
 
@@ -59,22 +61,22 @@ defmodule Torrent.FileHandle do
     Supervisor.child_spec({Piece, {piece, name}}, id: index)
   end
 
-  defp init_files(%{"files" => files} = info) do
+  defp init_files(%{"files" => files} = info, download_dir) do
     files
     |> Enum.map(&Map.fetch!(&1, "length"))
     |> Enum.scan(&(&1 + &2))
-    |> Enum.zip(Enum.map(files, &open_file(info, &1)))
+    |> Enum.zip(Enum.map(files, &open_file(info, &1, download_dir)))
   end
 
-  defp init_files(%{"length" => length, "name" => name} = info) do
-    [{length, open_file(info, %{"length" => length, "path" => [name]})}]
+  defp init_files(%{"length" => length, "name" => name} = info, download_dir) do
+    [{length, open_file(info, %{"length" => length, "path" => [name]}, download_dir)}]
   end
 
-  defp open_file(info, %{"length" => length, "path" => path}) do
+  defp open_file(info, %{"length" => length, "path" => path}, download_dir) do
     name =
       info
       |> PathLayout.layout_path(path)
-      |> then(&Path.join([File.cwd!() | &1]))
+      |> then(&Path.join([download_dir | &1]))
 
     pid =
       case File.stat(name) do

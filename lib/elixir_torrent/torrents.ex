@@ -22,16 +22,20 @@ defmodule Torrents do
     }
   end
 
-  @spec download(Path.t()) :: DynamicSupervisor.on_start_child()
+  @spec download(Path.t(), keyword()) :: DynamicSupervisor.on_start_child()
   @doc """
   Starts a new torrent download from a local `.torrent` path.
 
+  Options:
+
+    * `:download_dir` — base directory for downloaded files (defaults to `File.cwd!/0`)
+
   Returns `{:ok, pid}` on success.
   """
-  def download(path) do
+  def download(path, opts \\ []) when is_list(opts) do
     DynamicSupervisor.start_child(
       __MODULE__,
-      {Torrent, path}
+      {Torrent, {path, opts}}
     )
   end
 
@@ -75,9 +79,11 @@ defmodule Torrents do
 
     with {:ok, pid} <- find_pid(hash),
          paths <- if(delete_data?, do: Torrent.Removal.data_paths(hash), else: []),
+         download_root <-
+           if(delete_data?, do: Torrent.Removal.download_root(hash), else: File.cwd!()),
          :ok <- stop_pid(pid),
          :ok <- Torrent.Session.delete(hash),
-         :ok <- maybe_delete_data(paths, delete_data?) do
+         :ok <- maybe_delete_data(paths, download_root, delete_data?) do
       :ok
     end
   end
@@ -172,9 +178,9 @@ defmodule Torrents do
     end
   end
 
-  @spec maybe_delete_data([Path.t()], boolean()) :: :ok
-  defp maybe_delete_data(_paths, false), do: :ok
-  defp maybe_delete_data(paths, true), do: Torrent.Removal.delete_paths!(paths)
+  @spec maybe_delete_data([Path.t()], Path.t(), boolean()) :: :ok
+  defp maybe_delete_data(_paths, _root, false), do: :ok
+  defp maybe_delete_data(paths, root, true), do: Torrent.Removal.delete_paths!(paths, root)
 
   @spec announce_stopped(binary()) :: :ok
   defp announce_stopped(hash) do
