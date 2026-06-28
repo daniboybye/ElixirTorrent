@@ -30,7 +30,7 @@ Add `elixir_torrent` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:elixir_torrent, "~> 0.2.0"}
+    {:elixir_torrent, "~> 0.3.0"}
   ]
 end
 ```
@@ -55,6 +55,9 @@ Application.ensure_all_started(:elixir_torrent)
 
 {:ok, pid} = ElixirTorrent.download("/path/to/file.torrent")
 [hash] = ElixirTorrent.list()
+
+# Optional: write files under a specific directory (session state still uses File.cwd!/0)
+{:ok, pid} = ElixirTorrent.download("/path/to/file.torrent", download_dir: "/Downloads")
 
 {:ok, stats} =
   ElixirTorrent.stats(pid, [:name, :speed, :downloaded, :bytes_size])
@@ -115,7 +118,7 @@ Full reference: [`hexdocs.pm/elixir_torrent/ElixirTorrent.html`](https://hexdocs
 
 | Function | Description |
 | --- | --- |
-| `download/1` | Start a download from a local `.torrent` path; returns `{:ok, pid}` |
+| `download/2` | Start a download from a local `.torrent` path; optional `download_dir:` |
 | `stats/2` | Runtime stats map (`:name`, `:speed`, `:downloaded`, `:bytes_size`, …) |
 | `list/0` | Info hashes for all active torrent processes |
 | `list_files/1` | Per-file paths and download progress |
@@ -123,7 +126,7 @@ Full reference: [`hexdocs.pm/elixir_torrent/ElixirTorrent.html`](https://hexdocs
 | `stop_all_and_serialize/0` | Graceful stop + persist for every torrent |
 | `remove/2` | Stop and drop from session; optional `delete_data: true` |
 | `get/2` | Low-level field access (prefer `stats/2`) |
-| `version/0` | Client peer ID prefix (`ET0-2-0`, BEP 20) |
+| `version/0` | Client peer ID prefix (`ET0-3-0`, BEP 20) |
 
 ## Supported BEPs
 

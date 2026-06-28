@@ -1,7 +1,7 @@
 defmodule ElixirTorrent.MixProject do
   use Mix.Project
 
-  @version "0.2.0"
+  @version "0.3.0"
 
   def project do
     [
@@ -100,7 +100,7 @@ defmodule ElixirTorrent.MixProject do
     [
       main: "readme",
       name: "ElixirTorrent",
-      source_ref: "v#{@version}",
+      source_ref: "#{@version}",
       extras: ["README.md", "CHANGELOG.md"],
       groups_for_extras: [
         Introduction: ~r/README.md/,

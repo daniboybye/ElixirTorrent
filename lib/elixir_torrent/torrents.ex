@@ -30,6 +30,9 @@ defmodule Torrents do
 
     * `:download_dir` — base directory for downloaded files (defaults to `File.cwd!/0`)
 
+  Multi-file torrents with loose top-level files are written under a folder named
+  after the torrent; torrents that already share a root folder keep their original paths.
+
   Returns `{:ok, pid}` on success.
   """
   def download(path, opts \\ []) when is_list(opts) do

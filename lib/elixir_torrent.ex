@@ -6,14 +6,16 @@ defmodule ElixirTorrent do
 
       Application.ensure_all_started(:elixir_torrent)
 
-  Then add torrents with `download/1`, poll progress with `stats/2`, and shut down
-  cleanly with `stop_and_serialize/1` when you need session state preserved on disk.
+  Then add torrents with `download/1` (or `download/2` with options), poll progress
+  with `stats/2`, and shut down cleanly with `stop_and_serialize/1` when you need
+  session state preserved on disk.
 
   ## Session persistence
 
   Session snapshots are written to `.elixir_torrent/state/{hex_info_hash}.term`
-  under `File.cwd!/0`. Calling `download/1` for a torrent with an existing session
-  loads the saved bitfield and verifies pieces on disk before resuming.
+  under `File.cwd!/0` (independent of `:download_dir`). Calling `download/1` for a
+  torrent with an existing session loads the saved bitfield and verifies pieces on
+  disk before resuming.
 
   Use `stop_and_serialize/1` (or `stop_all_and_serialize/0`) before your app exits.
   Use `remove/2` when you want to drop a torrent from the active session; pass
@@ -21,7 +23,7 @@ defmodule ElixirTorrent do
 
   ## Public functions
 
-    * `download/1` — start a download from a local `.torrent` path
+    * `download/2` — start a download from a local `.torrent` path; optional `:download_dir`
     * `stats/2` — runtime stats as a map (preferred over `get/2`)
     * `list/0` — info hashes for all active torrent processes
     * `list_files/1` — per-file download progress
@@ -61,7 +63,7 @@ defmodule ElixirTorrent do
 
   The full 20-byte peer ID is this prefix, a hyphen, and random bytes.
   """
-  def version, do: "ET0-2-0"
+  def version, do: "ET0-3-0"
 
   defp loop do
     parse(IO.read(:line))
@@ -106,6 +108,11 @@ defmodule ElixirTorrent do
   Options:
 
     * `:download_dir` — base directory for downloaded files (defaults to `File.cwd!/0`)
+
+  Session snapshots remain under `{File.cwd!()}/.elixir_torrent/state/` regardless of
+  `:download_dir`. Multi-file torrents with loose top-level files are written under a
+  folder named after the torrent; torrents that already share a root folder keep their
+  original paths.
 
   Returns `{:ok, pid}` on success or `{:error, reason}` on failure.
 

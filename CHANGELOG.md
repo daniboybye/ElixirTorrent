@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0 - 2026-06-28
+
+### Download location
+
+- `ElixirTorrent.download/2` accepts an optional `:download_dir` keyword — base directory for downloaded files (defaults to `File.cwd!/0`)
+- Session snapshots remain under `{File.cwd!()}/.elixir_torrent/state/` regardless of `:download_dir`
+- `remove/2` with `delete_data: true` removes files from the torrent's download directory
+
+### File layout
+
+- Multi-file torrents whose files share no common top-level folder are written under a directory named after the torrent (sanitized `info.name`)
+- Multi-file torrents that already use a shared root folder (e.g. `dir/a.bin`, `dir/b.bin`) keep their original paths
+- Single-file torrents are written directly into the download root
+
+### Docs
+
+- README About section with project background
+
 ## 0.2.0 - 2026-06-11
 
 ### Session persistence

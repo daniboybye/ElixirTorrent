@@ -22,3 +22,6 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 bittorrent-*.tar
 
+# Local session state and downloaded data (engine default layout).
+/.elixir_torrent/
+
