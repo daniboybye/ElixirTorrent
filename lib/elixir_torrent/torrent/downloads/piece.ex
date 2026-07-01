@@ -5,6 +5,8 @@ defmodule Torrent.Downloads.Piece do
   alias __MODULE__.State
   alias Torrent.{FileHandle, PiecesStatistic}
 
+  require Logger
+
   @type mode :: :endgame | nil
   @type callback_peer_request :: (Torrent.index(), Torrent.begin(), Torrent.length() -> any())
 
@@ -63,10 +65,8 @@ defmodule Torrent.Downloads.Piece do
   end
 
   def handle_info(:timeout, state) do
-    # Logger.info("timeout piece")
-    state.requests_are_dealt.()
     PiecesStatistic.set(state.hash, state.index, nil)
-    {:noreply, state}
+    {:stop, {:shutdown, :timeout}, state}
   end
 
   def handle_info({:DOWN, ref, :process, _, _}, state) do
@@ -78,11 +78,19 @@ defmodule Torrent.Downloads.Piece do
   end
 
   defp is_complete(%State{requests: [], waiting: []} = state) do
+    hash_hex = Torrent.hex_encoded_hash(state.hash)
+
+    Logger.info(
+      "[piece_download] hash=#{hash_hex} index=#{state.index} blocks_complete verifying"
+    )
+
     reason =
       if FileHandle.check?(state.hash, state.index) do
+        Logger.info("[piece_download] hash=#{hash_hex} index=#{state.index} verified complete")
         state.downloaded.()
         :normal
       else
+        Logger.info("[piece_download] hash=#{hash_hex} index=#{state.index} verify_failed")
         {:shutdown, :wrong_subpiece}
       end
 

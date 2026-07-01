@@ -8,6 +8,8 @@ defmodule Torrent.FileHandle.Piece do
 
   alias Torrent.{PiecesStatistic, Model}
 
+  require Logger
+
   @timeout_hibernate 30 * 1_000
 
   def start_link({_, key} = arg),
@@ -61,7 +63,7 @@ defmodule Torrent.FileHandle.Piece do
 
   defp do_read(offset, length, files, data \\ [])
 
-  defp do_read(_, 0, _, data), do: {:ok, data}
+  defp do_read(_, 0, _, data), do: {:ok, IO.iodata_to_binary(data)}
 
   defp do_read(_, _, [], _), do: :error
 
@@ -90,10 +92,18 @@ defmodule Torrent.FileHandle.Piece do
     {:ok, block} = do_read(piece.offset, piece.length, piece.files)
     res = piece.hash === :crypto.hash(:sha, block)
 
+    hash_hex = Torrent.hex_encoded_hash(torrent_hash)
+
     if res do
+      Logger.info("[piece_verify] hash=#{hash_hex} index=#{index} result=ok")
+
       Model.downloaded_piece(torrent_hash, index)
       PiecesStatistic.set(torrent_hash, index, :complete)
     else
+      Logger.info(
+        "[piece_verify] hash=#{hash_hex} index=#{index} result=fail expected_len=#{piece.length} read_bytes=#{byte_size(block)}"
+      )
+
       Model.hash_check_failure(torrent_hash, index)
       PiecesStatistic.set(torrent_hash, index, nil)
     end

@@ -6,20 +6,31 @@ defmodule Torrent.PiecesStatistic do
 
   @spec init(Torrent.t()) :: :ok
   def init(%Torrent{hash: hash, last_index: count}) do
-    # file_name = hash <> ".bin"
+    case Registry.lookup(Registry, key(hash)) do
+      [{_pid, ref}] when is_reference(ref) ->
+        :ok
 
-    # if File.exists?(file_name) do
-    #   {:ok, ref} = :ets.file2tab(file_name) 
-    # else
-    ref = :ets.new(nil, [:set, :public, keypos: 1, write_concurrency: true])
-    true = :ets.insert(ref, Enum.map(0..count, &{&1, 0, nil}))
-    # end
-    {:ok, _} = Registry.register(Registry, key(hash), ref)
-    :ok
+      [] ->
+        ref = :ets.new(nil, [:set, :public, keypos: 1, write_concurrency: true])
+        true = :ets.insert(ref, Enum.map(0..count, &{&1, 0, nil}))
+
+        case Registry.register(Registry, key(hash), ref) do
+          {:ok, _} ->
+            :ok
+
+          {:error, {:already_registered, _pid}} ->
+            :ets.delete(ref)
+            :ok
+        end
+    end
   end
 
-  @spec choice_piece(Torrent.hash(), :random | :rare) :: index()
-  def choice_piece(hash, :random) do
+  @spec choice_piece(Torrent.hash(), :random | :rare, keyword()) :: index()
+  def choice_piece(hash, strategy, opts \\ [])
+
+  def choice_piece(hash, :random, opts) do
+    exclude = MapSet.new(Keyword.get(opts, :exclude, []))
+
     table_ref(hash)
     |> :ets.select([
       {{:"$0", :"$1", :"$2"},
@@ -28,19 +39,51 @@ defmodule Torrent.PiecesStatistic do
           {:orelse, {:"=:=", :"$2", nil}, {:"=:=", :"$2", :allowed_fast}}}
        ], [:"$0"]}
     ])
-    |> (&unless(Enum.empty?(&1), do: Enum.random(&1))).()
+    |> Enum.reject(&MapSet.member?(exclude, &1))
+    |> case do
+      [] -> nil
+      indices -> Enum.random(indices)
+    end
   end
 
-  def choice_piece(hash, :rare) do
+  def choice_piece(hash, :rare, opts) do
+    exclude = MapSet.new(Keyword.get(opts, :exclude, []))
+
     case :ets.foldl(&choice_rare/2, nil, table_ref(hash)) do
       nil ->
         nil
 
       list ->
         list
-        |> Enum.random()
-        |> elem(0)
+        |> Enum.reject(fn {index, _} -> MapSet.member?(exclude, index) end)
+        |> case do
+          [] -> nil
+          filtered -> filtered |> Enum.random() |> elem(0)
+        end
     end
+  end
+
+  @doc """
+  Clears stale `:processing` marks left when a piece worker exited without finishing.
+  """
+  @spec reconcile_stale_statuses(Torrent.hash(), (Torrent.index() -> boolean())) :: non_neg_integer()
+  def reconcile_stale_statuses(hash, piece_active?) when is_function(piece_active?, 1) do
+    [count] = Torrent.get(hash, [:pieces_count])
+
+    Enum.reduce(0..(count - 1), 0, fn index, cleared ->
+      if get_status(hash, index) == :processing and not piece_active?.(index) do
+        set(hash, index, nil)
+        cleared + 1
+      else
+        cleared
+      end
+    end)
+  end
+
+  @spec reset_availability(Torrent.hash(), Torrent.index()) :: :ok
+  def reset_availability(hash, index) do
+    true = :ets.update_element(table_ref(hash), index, {2, 0})
+    :ok
   end
 
   @spec set(Torrent.hash(), Torrent.index(), status()) :: :ok
@@ -89,6 +132,13 @@ defmodule Torrent.PiecesStatistic do
 
   def remove_peer(hash, bitfield, pieces_count) when is_binary(bitfield) do
     indices_dec(bitfield, pieces_count, table_ref(hash))
+  end
+
+  @spec availability(Torrent.hash(), Torrent.index()) :: non_neg_integer()
+  def availability(hash, index) do
+    :ets.lookup_element(table_ref(hash), index, 2)
+  catch
+    :exit, _ -> 0
   end
 
   def get_status(hash, index),

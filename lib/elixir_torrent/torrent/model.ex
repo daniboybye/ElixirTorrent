@@ -2,7 +2,9 @@ defmodule Torrent.Model do
   use GenServer
   use Via
 
-  alias Torrent.Bitfield
+  alias Torrent.{Bitfield, Session}
+
+  require Logger
 
   @timeout_detect_the_speed 5 * 1_000
   @until_endgame 4
@@ -49,6 +51,14 @@ defmodule Torrent.Model do
   def set_peer_status(hash, status),
     do: GenServer.cast(via(hash), {:set_peer_status, status})
 
+  @spec sync_progress(Torrent.hash()) :: :ok
+  def sync_progress(hash),
+    do: GenServer.cast(via(hash), :sync_progress)
+
+  @spec sync_progress!(Torrent.hash()) :: :ok
+  def sync_progress!(hash),
+    do: GenServer.call(via(hash), :sync_progress)
+
   @spec set_event(Torrent.hash(), 0..3) :: :ok
   def set_event(hash, event),
     do: GenServer.cast(via(hash), {:set_event, event})
@@ -66,6 +76,7 @@ defmodule Torrent.Model do
         %{torrent | bitfield: bitfield, added_at: torrent.added_at || DateTime.utc_now()}
       end
 
+    torrent = reconcile_progress(torrent)
     message_for_next_detection(torrent)
 
     {:ok, torrent}
@@ -85,6 +96,11 @@ defmodule Torrent.Model do
 
   def handle_call(:downloaded?, _, torrent),
     do: {:reply, torrent.left === 0, torrent}
+
+  def handle_call(:sync_progress, _, torrent) do
+    torrent = reconcile_progress(torrent)
+    {:reply, :ok, torrent}
+  end
 
   def handle_cast({:downloaded_piece, index}, torrent) do
     if Bitfield.have?(torrent.bitfield, index) do
@@ -110,6 +126,9 @@ defmodule Torrent.Model do
 
   def handle_cast({:set_peer_status, status}, %Torrent{} = torrent),
     do: {:noreply, %{torrent | peer_status: status}}
+
+  def handle_cast(:sync_progress, %Torrent{} = torrent),
+    do: {:noreply, reconcile_progress(torrent)}
 
   def handle_cast({:set_event, event}, %Torrent{} = torrent),
     do: {:noreply, %{torrent | event: event}}
@@ -192,9 +211,51 @@ defmodule Torrent.Model do
   end
 
   defp if_downloaded(%Torrent{left: 0} = torrent) do
-    IO.puts("downloaded #{do_name(torrent)}")
-    %Torrent{torrent | event: Torrent.completed(), peer_status: :seed}
+    torrent = %{torrent | event: Torrent.completed(), peer_status: :seed}
+
+    Logger.info(
+      "download complete hash=#{Torrent.hex_encoded_hash(torrent.hash)} name=#{do_name(torrent)}"
+    )
+
+    :ok = Session.save(torrent.hash, torrent)
+    torrent
   end
 
   defp if_downloaded(torrent), do: torrent
+
+  @doc false
+  @spec reconcile_progress(Torrent.t()) :: Torrent.t()
+  def reconcile_progress(%Torrent{bitfield: nil} = torrent), do: torrent
+
+  def reconcile_progress(%Torrent{} = torrent) do
+    total = total_bytes(torrent)
+    downloaded = downloaded_bytes(torrent)
+    left = max(total - downloaded, 0)
+
+    torrent = %{torrent | downloaded: downloaded, left: left}
+
+    if left == 0 and total > 0 do
+      %{torrent | event: Torrent.completed(), peer_status: :seed}
+    else
+      torrent
+    end
+  end
+
+  defp total_bytes(%Torrent{metadata: %{"info" => %{"length" => length}}}), do: length
+
+  defp total_bytes(%Torrent{metadata: %{"info" => %{"files" => files}}}) do
+    Enum.reduce(files, 0, fn %{"length" => length}, acc -> acc + length end)
+  end
+
+  defp total_bytes(%Torrent{downloaded: downloaded, left: left}), do: downloaded + left
+
+  defp downloaded_bytes(%Torrent{} = torrent) do
+    Enum.reduce(0..torrent.last_index, 0, fn index, acc ->
+      if Bitfield.have?(torrent.bitfield, index) do
+        acc + do_piece_length(index, torrent)
+      else
+        acc
+      end
+    end)
+  end
 end

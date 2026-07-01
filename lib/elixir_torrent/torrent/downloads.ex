@@ -15,7 +15,11 @@ defmodule Torrent.Downloads do
   end
 
   @spec stop(Torrent.hash()) :: :ok
-  def stop(hash), do: DynamicSupervisor.stop(via(hash))
+  def stop(hash) do
+    DynamicSupervisor.stop(via(hash))
+  catch
+    :exit, _ -> :ok
+  end
 
   @spec piece(Torrent.hash(), Torrent.index(), (-> :ok), (-> :ok)) :: :ok
   def piece(hash, index, downloaded, requests_are_dealt) do
@@ -39,4 +43,29 @@ defmodule Torrent.Downloads do
   defdelegate response(hash, index, peer_id, begin, block), to: Piece
 
   defdelegate reject(hash, index, peer_id, begin, length), to: Piece
+
+  @spec active_indices(Torrent.hash()) :: [Torrent.index()]
+  def active_indices(hash) do
+    case GenServer.whereis(via(hash)) do
+      nil ->
+        []
+
+      _ ->
+        via(hash)
+        |> DynamicSupervisor.which_children()
+        |> Enum.flat_map(fn
+          {_id, pid, _, _} when is_pid(pid) ->
+            case Registry.keys(Registry, pid) do
+              [{{index, ^hash}, Piece}] when is_integer(index) -> [index]
+              _ -> []
+            end
+
+          _ ->
+            []
+        end)
+    end
+  end
+
+  @spec piece_active?(Torrent.hash(), Torrent.index()) :: boolean()
+  def piece_active?(hash, index), do: index in active_indices(hash)
 end
