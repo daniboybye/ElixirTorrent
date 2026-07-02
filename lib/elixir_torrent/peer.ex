@@ -135,4 +135,23 @@ defmodule Peer do
 
   @spec key_to_hash(key()) :: Torrent.hash()
   def key_to_hash({_, hash}), do: hash
+
+  @doc """
+  Renders a peer id for logs. BitTorrent peer ids are opaque 20-byte blobs and are
+  often invalid UTF-8; interpolating them into Logger messages breaks the default
+  formatter with `FORMATTER ERROR: bad return value`.
+  """
+  @spec log_id(id() | nil) :: String.t()
+  def log_id(nil), do: "?"
+
+  def log_id(id) when is_binary(id) do
+    if String.valid?(id) do
+      id
+    else
+      Base.encode16(id, case: :lower)
+    end
+  end
+
+  @spec log_key(key()) :: String.t()
+  def log_key(key), do: log_id(key_to_id(key))
 end

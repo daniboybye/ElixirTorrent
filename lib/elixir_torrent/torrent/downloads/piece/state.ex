@@ -20,6 +20,8 @@ defmodule Torrent.Downloads.Piece.State do
     Model
   }
 
+  require Logger
+
   @type timer :: reference() | nil
   @type waiting() :: list(Request.subpiece())
 
@@ -50,13 +52,23 @@ defmodule Torrent.Downloads.Piece.State do
     }
   end
 
-  def download(%__MODULE__{waiting: []} = state, _, _) do
-    IO.inspect(PiecesStatistic.get_status(state.hash, state.index),
-      label: "choosing processing piece"
-    )
-
+  def download(%__MODULE__{waiting: [], requests: []} = state, _, _) do
     state.requests_are_dealt.()
     state
+  end
+
+  # A prior attempt moved every subpiece into in-flight requests but never finished.
+  # Re-queue them instead of telling the controller the piece is done.
+  def download(%__MODULE__{waiting: [], requests: requests} = state, downloaded, requests_are_dealt)
+      when requests != [] do
+    waiting = Enum.map(requests, & &1.subpiece)
+    Enum.each(requests, &cancel_request/1)
+
+    download(
+      %__MODULE__{state | waiting: waiting, requests: [], timer: nil},
+      downloaded,
+      requests_are_dealt
+    )
   end
 
   def download(%__MODULE__{} = state, downloaded, requests_are_dealt) do
@@ -156,6 +168,16 @@ defmodule Torrent.Downloads.Piece.State do
     length = byte_size(block)
     subpiece = {begin, length}
 
+    unless valid_subpiece?(state, begin, length) do
+      state
+    else
+      do_response(state, peer_id, begin, block, subpiece)
+    end
+  end
+
+  defp do_response(%__MODULE__{} = state, peer_id, begin, block, subpiece) do
+    length = byte_size(block)
+
     {list, requests} = Enum.split_with(state.requests, &(&1.subpiece == subpiece))
 
     if Enum.empty?(list) and not Enum.member?(state.waiting, subpiece) do
@@ -184,6 +206,12 @@ defmodule Torrent.Downloads.Piece.State do
     end
   end
 
+  @spec valid_subpiece?(t(), Torrent.begin(), Torrent.length()) :: boolean()
+  defp valid_subpiece?(state, begin, length) do
+    piece_len = Model.piece_length(state.hash, state.index)
+    begin >= 0 and length > 0 and begin + length <= piece_len
+  end
+
   @spec reject(t(), Peer.id(), Torrent.begin(), Torrent.length()) :: t()
   def reject(%__MODULE__{} = state, peer_id, begin, length) do
     {list, requests} =
@@ -195,6 +223,10 @@ defmodule Torrent.Downloads.Piece.State do
 
   @spec timeout(t(), Peer.id()) :: t()
   def timeout(%__MODULE__{} = state, peer_id) do
+    Logger.debug(
+      "[piece_download] hash=#{Torrent.hex_encoded_hash(state.hash)} index=#{state.index} peer=#{Peer.log_id(peer_id)} request_timeout"
+    )
+
     {list, requests} = Enum.split_with(state.requests, &(&1.peer_id == peer_id))
 
     %__MODULE__{state | requests: requests}
