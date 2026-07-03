@@ -55,7 +55,7 @@ defmodule Peer.Controller.State do
   def reset_rank(%__MODULE__{} = state), do: %__MODULE__{state | rank: 0}
 
   @spec has_index?(t(), Torrent.index()) :: boolean()
-  def has_index?(%__MODULE__{bitfield: :all}), do: true
+  def has_index?(%__MODULE__{bitfield: :all}, _index), do: true
 
   def has_index?(state, index) do
     case state.bitfield do

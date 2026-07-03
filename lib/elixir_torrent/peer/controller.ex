@@ -54,6 +54,19 @@ defmodule Peer.Controller do
   @spec rank(Peer.key()) :: State.rank()
   def rank(key), do: GenServer.call(via(key), :rank)
 
+  @spec has_index?(Peer.key(), Torrent.index()) :: boolean()
+  def has_index?(key, index), do: GenServer.call(via(key), {:has_index?, index})
+
+  @spec download_piece(Peer.key()) :: Torrent.index() | nil
+  def download_piece(key) do
+    GenServer.call(via(key), :download_piece)
+  catch
+    :exit, _ -> nil
+  end
+
+  @spec has_all?(Peer.key()) :: boolean()
+  def has_all?(key), do: GenServer.call(via(key), :has_all?)
+
   @spec reset_rank(Peer.key()) :: :ok
   def reset_rank(key), do: GenServer.cast(via(key), {:reset_rank, []})
 
@@ -172,6 +185,22 @@ defmodule Peer.Controller do
   end
 
   def handle_call(:rank, _, state), do: {:reply, State.rank(state), state}
+
+  def handle_call({:has_index?, index}, _, state),
+    do: {:reply, State.has_index?(state, index), state}
+
+  def handle_call(:download_piece, _, state) do
+    piece =
+      case state.status do
+        idx when is_integer(idx) -> idx
+        _ -> nil
+      end
+
+    {:reply, piece, state}
+  end
+
+  def handle_call(:has_all?, _, state),
+    do: {:reply, match?(%State{bitfield: :all}, state), state}
 
   def handle_call(:disconnect, _, %State{} = state) do
     {operations, state} = State.disconnect_operations(state)

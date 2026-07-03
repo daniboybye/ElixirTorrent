@@ -70,7 +70,7 @@ defmodule Peer do
   end
 
   @spec get_key(pid()) :: Peer.key() | nil
-  defp get_key(pid) do
+  def get_key(pid) do
     case Registry.keys(Registry, pid) do
       [{key, _} | _] ->
         key

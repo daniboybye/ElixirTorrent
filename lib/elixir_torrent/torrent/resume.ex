@@ -3,7 +3,9 @@ defmodule Torrent.Resume do
 
   use GenServer
 
-  alias Torrent.{Bitfield, FileHandle, Model}
+  alias Torrent.{Bitfield, FileHandle, Model, Controller}
+
+  require Logger
 
   @spec child_spec({Torrent.hash(), :full_scan | :verify_saved}) :: Supervisor.child_spec()
   def child_spec({hash, mode}) do
@@ -42,10 +44,24 @@ defmodule Torrent.Resume do
       FileHandle.check?(hash, index)
     end)
 
+    Model.sync_progress!(hash)
+
+    verified =
+      Enum.count(indices, fn index -> Torrent.have?(hash, index) end)
+
+    failed = length(indices) - verified
+
+    Logger.info(
+      "[resume] hash=#{Torrent.hex_encoded_hash(hash)} mode=#{mode} checked=#{length(indices)} ok=#{verified} failed=#{failed} downloaded=#{Model.get(hash, :downloaded)} left=#{Model.get(hash, :left)}"
+    )
+
     if Model.downloaded?(hash) do
       Model.set_peer_status(hash, :seed)
       Model.set_event(hash, Torrent.completed())
+      :ok = Torrent.Session.save(hash, Model.get(hash))
     end
+
+    :ok = Controller.resume_ready(hash)
 
     {:stop, :normal, {hash, mode}}
   end
