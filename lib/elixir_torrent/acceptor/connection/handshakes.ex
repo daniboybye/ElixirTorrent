@@ -9,15 +9,40 @@ defmodule Acceptor.Connection.Handshakes do
     }
   end
 
+  @handshake_recv_timeout_ms 30_000
+
   def recv(socket) do
     case start_task(fn -> do_recv(socket) end) do
       {:ok, pid} ->
-        :ok = :gen_tcp.controlling_process(socket, pid)
+        case safe_controlling_process(socket, pid) do
+          :ok -> :ok
+          _ -> safe_close(socket)
+        end
 
       {:ok, pid, _} ->
-        :ok = :gen_tcp.controlling_process(socket, pid)
+        case safe_controlling_process(socket, pid) do
+          :ok -> :ok
+          _ -> safe_close(socket)
+        end
 
       _ ->
+        safe_close(socket)
+        :ok
+    end
+  end
+
+  @doc false
+  @spec recv_utp(UTP.Connection.socket_ref()) :: :ok
+  def recv_utp(socket_ref) do
+    case start_task(fn -> do_recv(socket_ref) end) do
+      {:ok, pid} ->
+        case safe_controlling_process(socket_ref, pid) do
+          :ok -> :ok
+          _ -> safe_close(socket_ref)
+        end
+
+      _ ->
+        safe_close(socket_ref)
         :ok
     end
   end
@@ -53,23 +78,26 @@ defmodule Acceptor.Connection.Handshakes do
   defp family_for_ip({_, _, _, _}), do: :inet
   defp family_for_ip({_, _, _, _, _, _, _, _}), do: :inet6
 
-  @spec do_recv(port()) :: :ok | any()
+  @spec do_recv(Peer.Transport.socket()) :: :ok | any()
   defp do_recv(socket) do
     with {hash, peer_id, reserved} <- recv_msg(socket),
          false <- BlackList.member?(peer_id),
          true <- Torrent.has_hash?(hash),
          :ok <- send_msg(socket, hash),
-         :ok <- add_peer(hash, peer_id, reserved, socket),
-         do: :ok
+         :ok <- add_peer(hash, peer_id, reserved, socket) do
+      :ok
+    else
+      _ -> safe_close(socket)
+    end
   end
 
   defp add_peer(hash, peer_id, reserved, socket) do
     case Torrent.add_peer(hash, peer_id, reserved, socket) do
       {:ok, pid} ->
-        :gen_tcp.controlling_process(socket, pid)
+        safe_controlling_process(socket, pid)
 
       {:ok, pid, _} ->
-        :gen_tcp.controlling_process(socket, pid)
+        safe_controlling_process(socket, pid)
 
       _ ->
         :ok
@@ -78,13 +106,51 @@ defmodule Acceptor.Connection.Handshakes do
 
   defp send_msg(socket, hash) do
     msg = [@pstrlen, @pstr, Peer.reserved(), hash, Peer.id()]
-    :gen_tcp.send(socket, msg)
+
+    case Peer.Transport.send(socket, msg) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp recv_msg(socket) do
-    with {:ok,
-          <<@pstrlen, @pstr, reserved::bytes-size(8), hash::bytes-size(20),
-            peer_id::bytes-size(20)>>} <- :gen_tcp.recv(socket, @msg_length, @timeout),
-         do: {hash, peer_id, reserved}
+    case Peer.Transport.recv(socket, @msg_length, @handshake_recv_timeout_ms) do
+      {:ok,
+       <<@pstrlen, @pstr, reserved::bytes-size(8), hash::bytes-size(20), peer_id::bytes-size(20)>>} ->
+        {hash, peer_id, reserved}
+
+      {:error, _} = error ->
+        error
+
+      _ ->
+        {:error, :invalid_handshake}
+    end
+  end
+
+  @spec safe_controlling_process(Peer.Transport.socket(), pid()) :: :ok | {:error, term()}
+  defp safe_controlling_process(socket, pid) do
+    case Peer.Transport.controlling_process(socket, pid) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  @spec safe_close(Peer.Transport.socket()) :: :ok
+  defp safe_close({:utp, _} = socket) do
+    Peer.Transport.close(socket)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp safe_close(socket) when is_port(socket) do
+    :gen_tcp.close(socket)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 end

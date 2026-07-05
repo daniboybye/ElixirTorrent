@@ -141,6 +141,7 @@ Full reference: [`hexdocs.pm/elixir_torrent/ElixirTorrent.html`](https://hexdocs
 | [BEP 20](https://www.bittorrent.org/beps/bep_0020.html) | Peer ID conventions |
 | [BEP 23](https://www.bittorrent.org/beps/bep_0023.html) | Compact peer lists |
 | [BEP 24](https://www.bittorrent.org/beps/bep_0024.html) | Tracker returns external IP |
+| [BEP 29](https://www.bittorrent.org/beps/bep_0029.html) | Micro Transport Protocol (uTP) |
 | [BEP 31](https://www.bittorrent.org/beps/bep_0031.html) | Failure retry extension |
 
 ## CLI (escript)
