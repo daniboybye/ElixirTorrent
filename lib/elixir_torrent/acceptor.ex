@@ -17,12 +17,40 @@ defmodule Acceptor do
 
   defdelegate handshakes(peers, hash), to: Handshakes
 
+  @tcp_performance [nodelay: true, recbuf: 262_144, sndbuf: 262_144]
+  @tcp_connect_fallback [nodelay: true]
+
   @spec socket_options() :: list()
   def socket_options(), do: [:binary, active: false, reuseaddr: true]
+
+  @spec tcp_socket_options() :: list()
+  def tcp_socket_options(), do: socket_options() ++ @tcp_performance
+
+  @spec apply_tcp_performance(:gen_tcp.socket()) :: :ok
+  def apply_tcp_performance(socket) when is_port(socket) do
+    case :inet.setopts(socket, @tcp_performance) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("[acceptor] tcp_performance partial reason=#{inspect(reason)}")
+
+        case :inet.setopts(socket, @tcp_connect_fallback) do
+          :ok -> :ok
+          {:error, _} -> :ok
+        end
+    end
+  catch
+    :exit, _ -> :ok
+  end
 
   @spec socket_options(:inet | :inet6) :: list()
   def socket_options(:inet), do: socket_options() ++ [:inet]
   def socket_options(:inet6), do: socket_options() ++ [:inet6, ipv6_v6only: false]
+
+  @spec tcp_socket_options(:inet | :inet6) :: list()
+  def tcp_socket_options(:inet), do: tcp_socket_options() ++ [:inet]
+  def tcp_socket_options(:inet6), do: tcp_socket_options() ++ [:inet6, ipv6_v6only: false]
 
   @spec port_range() :: Range.t()
   def port_range(), do: 6881..9999

@@ -14,6 +14,8 @@ defmodule Acceptor.Connection.Handler do
 
   def init(_) do
     with {:ok, socket} <- open_listen_socket({:stop, :no_free_port}) do
+      {:ok, port} = :inet.port(socket)
+      Logger.info("[acceptor] listening proto=tcp port=#{port}")
       {:ok, _} = Task.start_link(fn -> loop(socket) end)
       {:ok, socket}
     end
@@ -25,9 +27,23 @@ defmodule Acceptor.Connection.Handler do
   end
 
   defp loop(socket) do
-    {:ok, client} = :gen_tcp.accept(socket)
-    Logger.info("new client")
-    Handshakes.recv(client)
+    case :gen_tcp.accept(socket) do
+      {:ok, client} ->
+        case :inet.peername(client) do
+          {:ok, {ip, port}} ->
+            Logger.info("[acceptor] inbound from=#{inspect({ip, port})}")
+
+          _ ->
+            Logger.info("[acceptor] inbound client")
+        end
+
+        Handshakes.recv(client)
+
+      {:error, reason} ->
+        Logger.warning("acceptor accept failed reason=#{inspect(reason)}")
+        Process.sleep(100)
+    end
+
     loop(socket)
   end
 
@@ -36,12 +52,12 @@ defmodule Acceptor.Connection.Handler do
       Acceptor.port_range(),
       default,
       fn number ->
-        case :gen_tcp.listen(number, Acceptor.socket_options(:inet6)) do
+        case :gen_tcp.listen(number, Acceptor.tcp_socket_options(:inet6)) do
           {:ok, _socket} = ok ->
             ok
 
           {:error, _} ->
-            case :gen_tcp.listen(number, Acceptor.socket_options(:inet)) do
+            case :gen_tcp.listen(number, Acceptor.tcp_socket_options(:inet)) do
               {:ok, _socket} = ok -> ok
               {:error, _} -> nil
             end

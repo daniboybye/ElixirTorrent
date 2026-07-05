@@ -9,7 +9,7 @@ defmodule Peer do
 
   use Via
 
-  alias __MODULE__.{Sender, Controller, Receiver}
+  alias __MODULE__.{Sender, Controller}
 
   import ElixirTorrent, only: [version: 0]
 
@@ -25,8 +25,7 @@ defmodule Peer do
   def start_link(hash, id, socket, reserved) do
     children = [
       {Sender, [hash, id, socket]},
-      {Controller, [hash, id, socket, reserved]},
-      {Receiver, [hash, id, socket]}
+      {Controller, [hash, id, socket, reserved]}
     ]
 
     opts = [name: vm(hash, id), strategy: :one_for_all, max_restarts: 0]
@@ -120,6 +119,31 @@ defmodule Peer do
   @spec seed(pid()) :: :ok | nil
   def seed(pid) do
     if key = get_key(pid), do: Controller.seed(key)
+  end
+
+
+  @doc false
+  @spec sender_pid(pid()) :: pid() | nil
+  def sender_pid(supervisor_pid) when is_pid(supervisor_pid) do
+    child_pid(supervisor_pid, Peer.Sender)
+  end
+
+  @spec child_pid(pid(), module()) :: pid() | nil
+  defp child_pid(supervisor_pid, module) when is_pid(supervisor_pid) do
+    if Process.alive?(supervisor_pid) do
+      try do
+        supervisor_pid
+        |> Supervisor.which_children()
+        |> Enum.find_value(fn
+          {^module, pid, _, _} when is_pid(pid) -> pid
+          _ -> nil
+        end)
+      catch
+        :exit, _ -> nil
+      end
+    else
+      nil
+    end
   end
 
   @spec disconnect(pid()) :: :ok
