@@ -727,7 +727,16 @@ defmodule UTP.Connection do
   @spec send_udp_direct(port(), :inet.ip_address(), :inet.port_number(), iodata()) ::
           :ok | {:error, term()}
   defp send_udp_direct(udp_socket, ip, port, data) do
-    UTP.Dispatcher.send_udp(udp_socket, ip, port, data)
+    case DHT.send_udp(ip, port, data) do
+      :ok ->
+        :ok
+
+      {:error, :disabled} when is_port(udp_socket) ->
+        :gen_udp.send(udp_socket, ip, port, data)
+
+      other ->
+        other
+    end
   end
 
   @impl true

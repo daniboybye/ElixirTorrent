@@ -1,9 +1,8 @@
 defmodule UTP.Dispatcher do
   @moduledoc """
-  uTP UDP demultiplexer (BEP 29).
+  uTP UDP demultiplexer — shares the DHT UDP socket (BEP 29 / common client practice).
 
   Incoming uTP packets are routed by `{peer_ip, peer_port, conn_id}` to a `UTP.Connection`.
-  Uses a dedicated UDP socket until DHT integration lands in a later commit.
   """
   use GenServer
   require Logger
@@ -50,10 +49,13 @@ defmodule UTP.Dispatcher do
     :ok
   end
 
-  @spec send_udp(port(), :inet.ip_address(), :inet.port_number(), iodata()) ::
-          :ok | {:error, term()}
-  def send_udp(udp_socket, ip, port, data) when is_port(udp_socket) do
-    :gen_udp.send(udp_socket, ip, port, data)
+  @spec send_udp(port(), :inet.ip_address(), :inet.port_number(), iodata()) :: :ok
+  def send_udp(udp_socket, ip, port, data) do
+    case DHT.send_udp(ip, port, data) do
+      :ok -> :ok
+      {:error, :disabled} when is_port(udp_socket) -> :gen_udp.send(udp_socket, ip, port, data)
+      other -> other
+    end
   end
 
   @default_connect_timeout 5_000
@@ -118,25 +120,18 @@ defmodule UTP.Dispatcher do
   @impl true
   def init(_opts) do
     :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
-
-    udp =
-      case Acceptor.open_udp() do
-        {:ok, socket} -> socket
-        :error -> nil
-      end
-
-    {:ok, %{udp: udp}}
+    {:ok, %{}}
   end
 
   @impl true
-  def handle_call({:start_connect, ip, port, opts}, _from, state) do
+  def handle_call({:start_connect, ip, port, opts}, _from, _state) do
     reply =
-      with {:ok, udp_socket} <- udp_socket(state),
+      with {:ok, udp_socket} <- udp_socket(),
            {:ok, socket_ref} <- UTP.Connection.start_client(udp_socket, ip, port, opts) do
         {:ok, socket_ref}
       end
 
-    {:reply, reply, state}
+    {:reply, reply, %{}}
   end
 
   @impl true
@@ -194,6 +189,10 @@ defmodule UTP.Dispatcher do
 
   defp conn_key(ip, port, conn_id), do: {ip, port, conn_id}
 
-  defp udp_socket(%{udp: socket}) when is_port(socket), do: {:ok, socket}
-  defp udp_socket(_), do: {:error, :no_udp_socket}
+  defp udp_socket do
+    case DHT.udp_socket() do
+      nil -> {:error, :no_udp_socket}
+      socket -> {:ok, socket}
+    end
+  end
 end

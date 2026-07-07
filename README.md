@@ -134,6 +134,7 @@ Full reference: [`hexdocs.pm/elixir_torrent/ElixirTorrent.html`](https://hexdocs
 | --- | --- |
 | [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) | BitTorrent protocol |
 | [BEP 4](https://www.bittorrent.org/beps/bep_0004.html) | Known number allocations |
+| [BEP 5](https://www.bittorrent.org/beps/bep_0005.html) | Mainline DHT |
 | [BEP 6](https://www.bittorrent.org/beps/bep_0006.html) | Fast extension |
 | [BEP 7](https://www.bittorrent.org/beps/bep_0007.html) | IPv6 tracker extension |
 | [BEP 12](https://www.bittorrent.org/beps/bep_0012.html) | Multitracker metadata |
