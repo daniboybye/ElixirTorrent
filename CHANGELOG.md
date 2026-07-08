@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.0 - 2026-07-08
+
+### Added
+
+- **BEP 29 (uTP):** `Peer.Transport` over TCP and uTP; uTP packet stack with LEDBAT; connection lifecycle and dispatcher; dial backoff and endpoint registry; outbound TCP-first dial with uTP fallback; inbound uTP handshake entry
+- **BEP 5 (DHT):** Mainline DHT KRPC node (ping, find_node, get_peers, announce_peer); k-bucket routing table with bootstrap routers; iterative lookup and announce token workflow; DHT and uTP share one UDP socket via `DHT.send_udp/3`
+- README: BEP 5 (Mainline DHT) row in Supported BEPs table
+
+### Changed
+
+- **Peer I/O:** `Peer.Sender` is the sole socket owner over `Peer.Transport`; `Peer.Receiver` removed; post-handshake socket handoff uses `Sender.activate/1`
+
+### Fixed
+
+- Torrent progress and `downloaded`/`left` counters reconciled with the on-disk bitfield
+- Piece pipeline: idempotent piece statistics init, stale `:processing` cleanup, exclude-aware picker
+- In-flight piece download recovery when subpiece requests stall (`waiting: []` no longer finishes early)
+- Incoming piece block bounds validation; `Peer.log_id/1` for safe timeout logging
+- Download scheduler: parallel piece picking with availability checks, resume handoff before controller scheduling, per-piece interested peer assignment
+
+### Notes
+
+- uTP (BEP 29) and DHT (BEP 5) are implemented and compiled in, but runtime activation (supervision wiring) is deferred to a future release; the default peer-acquisition/download path remains TCP + tracker-based.
+
+
 ## 0.3.0 - 2026-06-28
 
 ### Download location
