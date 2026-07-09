@@ -388,6 +388,9 @@ defmodule Peer.Sender do
   defp parse(<<@allowed_fast_id, index::32>>, key),
     do: handle_allowed_fast(key, index)
 
+  defp parse(<<@extended_id, extended_id::8, payload::binary>>, key),
+    do: handle_extended(key, extended_id, payload)
+
   defp parse(_, _), do: :protocol_error
 
   defp do_send(%__MODULE__{socket: socket} = state, msg) do

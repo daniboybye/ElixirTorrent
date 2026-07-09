@@ -125,6 +125,33 @@ defmodule ElixirTorrent do
   defdelegate download(path, opts \\ []), to: Torrents
 
   @doc """
+  Starts downloading from a magnet link.
+
+  Parses the URI, discovers peers via magnet `tr=` trackers, fetches the `info`
+  dictionary with BEP 9 (`ut_metadata`), materializes a `.torrent` file, then
+  starts a normal session via `download/1`.
+
+  Requires at least one tracker URL in the magnet unless **BEP 5 DHT** is enabled.
+  Trackerless magnets use DHT peer discovery when enabled; otherwise
+  `{:error, :missing_trackers}`.
+
+  ## Example
+
+      {:ok, pid} =
+        ElixirTorrent.download_magnet(
+          "magnet:?xt=urn:btih:abc...&tr=udp%3A%2F%2Ftracker.example.com%3A80%2Fannounce"
+        )
+  """
+  @spec download_magnet(String.t()) :: {:ok, pid()} | {:error, term()}
+  def download_magnet(magnet_uri) when is_binary(magnet_uri) do
+    case Torrents.download_magnet(magnet_uri) do
+      {:ok, pid} -> {:ok, pid}
+      other -> other
+    end
+  end
+
+
+  @doc """
   Returns selected runtime stats for a running torrent process.
 
   Default fields: `:name`, `:speed`, `:downloaded`, `:bytes_size`.

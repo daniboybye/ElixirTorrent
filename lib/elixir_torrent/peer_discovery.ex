@@ -37,4 +37,6 @@ defmodule PeerDiscovery do
   defdelegate stopped_announce(hash), to: Announce
 
   defdelegate connection_id(socket, ip, port), to: ConnectionIds, as: :get
+
+  defdelegate invalidate_connection_id(socket, ip, port), to: ConnectionIds, as: :invalidate
 end

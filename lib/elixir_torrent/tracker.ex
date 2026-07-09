@@ -1,41 +1,69 @@
 defmodule Tracker do
   require Logger
 
-  alias __MODULE__.{Error, Response}
+  alias __MODULE__.{Error, Response, UDP}
 
   @type connection_id :: <<_::64>>
   @type announce :: binary()
+  @type stats :: :auto | keyword()
+  @type scrape_stats :: UDP.scrape_stats()
 
-  @udp_connect_timeout 15 * trunc(:math.pow(2, 8))
-  @udp_protocol_id <<0x41727101980::64>>
-  @connect <<0::32>>
-  @announce <<1::32>>
-  # @scrape <<2::32>>
-  @error <<3::32>>
   @bento_nil Bento.encode!(nil)
   @timeout 5 * 60 * 1_000
-
-  # in miliseconds
-  @spec udp_connect_timeout() :: pos_integer()
-  def udp_connect_timeout(), do: @udp_connect_timeout
+  @udp_max_backoff_attempt UDP.max_backoff_attempt()
 
   # in seconds
   @spec default_interval() :: pos_integer()
   def default_interval(), do: 30 * 60
 
-  @spec request!(binary(), Torrent.hash()) :: Response.t() | Error.t() | none()
-  def request!(<<"http", _::binary>> = announce, hash) do
-    # http: and https: clauce
-    # obfuscation = Keyword.get(options, :obfuscation, true)
-    [uploaded, downloaded, left, event] =
-      Torrent.get(hash, [:uploaded, :downloaded, :left, :event])
+  @type request_opts :: [
+          max_udp_attempts: 0..8,
+          http_timeout_ms: pos_integer()
+        ]
 
+  @spec request!(binary(), Torrent.hash(), stats() | :auto, request_opts()) ::
+          Response.t() | Error.t() | none()
+  def request!(announce, hash, stats \\ :auto, opts \\ [])
+
+  def request!(<<"http", _::binary>> = announce, hash, stats, opts) do
+    with {:ok, {uploaded, downloaded, left, event}} <- resolve_stats(hash, stats) do
+      do_http_request!(announce, hash, uploaded, downloaded, left, event, opts)
+    else
+      :skip ->
+        Logger.debug(
+          "[tracker_announce] deferred hash=#{Torrent.hex_encoded_hash(hash)} reason=model_not_ready"
+        )
+
+        nil
+    end
+  end
+
+  def request!(<<"udp:", _::binary>> = announce, hash, stats, opts) do
+    # BEP 15: optional path after host:port is ignored for UDP trackers.
+    %URI{port: port, host: host} =
+      announce
+      |> URI.parse()
+      |> Map.update!(:port, &if(&1, do: &1, else: 6969))
+
+    case resolve_host(host) do
+      {:ok, ip, family} ->
+        {:ok, socket} = Acceptor.open_udp(family)
+
+        with_connection_id(socket, ip, port, fn id ->
+          udp_announce(socket, ip, port, id, hash, stats, family, opts)
+        end)
+
+      {:error, reason} ->
+        Logger.warning("UDP tracker DNS resolution failed host=#{host} reason=#{inspect(reason)}")
+        %Error{reason: {:dns, host, reason}, retry_in: "never"}
+    end
+  end
+
+  defp do_http_request!(announce, hash, uploaded, downloaded, left, event, opts) do
     query =
       %{
-        # "sha_ih" => :crypto.hash(:sha, torrent.hash)
         "info_hash" => hash,
         "peer_id" => Peer.id(),
-        # obfuscation
         "port" => Acceptor.port(),
         "compact" => 1,
         "uploaded" => uploaded,
@@ -49,65 +77,145 @@ defmodule Tracker do
 
     url = announce <> "?" <> query
 
-    # Simple BEP 7 multi-homed announce: if we have a usable IPv4 and IPv6 locally,
-    # announce once per address family by binding the source IP for the tracker connection.
     %{inet: ip4, inet6: ip6} = Acceptor.primary_ips()
 
     responses =
       []
-      |> maybe_http_announce(url, :inet, ip4)
-      |> maybe_http_announce(url, :inet6, ip6)
+      |> maybe_http_announce(url, :inet, ip4, opts)
+      |> maybe_http_announce(url, :inet6, ip6, opts)
 
     merge_http_announces(responses)
   end
 
-  def request!(<<"udp:", _::binary>> = announce, hash) do
-    %URI{port: port, host: host} =
-      announce
-      |> URI.parse()
-      |> Map.update!(:port, &if(&1, do: &1, else: 6969))
+  @spec with_connection_id(
+          port(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          (connection_id() -> term())
+        ) :: term()
+  defp with_connection_id(socket, ip, port, fun) when is_function(fun, 1) do
+    case safe_connection_id(socket, ip, port) do
+      {:ok, id} ->
+        retry_on_expired_connection_id(socket, ip, port, fun, fun.(id))
 
-    case resolve_host(host) do
-      {:ok, ip, family} ->
-        {:ok, socket} = Acceptor.open_udp(family)
+      %Error{} = error ->
+        error
 
-        with {:ok, id} <- PeerDiscovery.connection_id(socket, ip, port),
-             do: udp_announce(socket, ip, port, id, hash)
-
-      {:error, reason} ->
-        Logger.warning("UDP tracker DNS resolution failed host=#{host} reason=#{inspect(reason)}")
-        %Error{reason: {:dns, host, reason}, retry_in: "never"}
+      :error ->
+        %Error{reason: :connection_id_unavailable}
     end
   end
 
-  @spec maybe_http_announce(list(Response.t() | Error.t()), binary(), :inet | :inet6, any()) ::
-          list(Response.t() | Error.t())
-  defp maybe_http_announce(acc, _url, _family, nil), do: acc
-
-  defp maybe_http_announce(acc, url, family, ip) do
-    [http_announce(url, family, ip) | acc]
+  defp safe_connection_id(socket, ip, port) do
+    PeerDiscovery.connection_id(socket, ip, port)
+  catch
+    :exit, reason ->
+      %Error{reason: connection_id_exit_reason(reason), retry_in: 60}
   end
 
-  @spec http_announce(binary(), :inet | :inet6, :inet.ip_address()) :: Response.t() | Error.t()
-  defp http_announce(url, family, ip) do
-    opts = [
-      timeout: @timeout,
-      recv_timeout: @timeout,
-      hackney: [connect_options: [{:ip, ip}, family]]
+  defp connection_id_exit_reason(:timeout), do: :timeout
+  defp connection_id_exit_reason({:timeout, _}), do: :timeout
+  defp connection_id_exit_reason(reason), do: reason
+
+  # BEP 15 § UDP connections — stale connection_id yields tracker error; invalidate and retry once.
+  @spec retry_on_expired_connection_id(
+          port(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          (connection_id() -> term()),
+          term()
+        ) :: term()
+  defp retry_on_expired_connection_id(_socket, _ip, _port, _fun, result)
+       when not is_struct(result, Error),
+       do: result
+
+  defp retry_on_expired_connection_id(socket, ip, port, fun, %Error{reason: reason} = error) do
+    if connection_id_expired?(reason) do
+      :ok = PeerDiscovery.invalidate_connection_id(socket, ip, port)
+
+      case safe_connection_id(socket, ip, port) do
+        {:ok, id} -> fun.(id)
+        other -> other
+      end
+    else
+      error
+    end
+  end
+
+  @spec connection_id_expired?(term()) :: boolean()
+  defp connection_id_expired?(reason) when is_binary(reason) do
+    down = String.downcase(reason)
+    String.contains?(down, "connection id") or String.contains?(down, "expired")
+  end
+
+  defp connection_id_expired?(_), do: false
+
+  @spec maybe_http_announce(
+          list(Response.t() | Error.t()),
+          binary(),
+          :inet | :inet6,
+          any(),
+          request_opts()
+        ) ::
+          list(Response.t() | Error.t())
+  defp maybe_http_announce(acc, _url, _family, nil, _opts), do: acc
+
+  defp maybe_http_announce(acc, url, family, ip, opts) do
+    [http_announce(url, family, ip, opts) | acc]
+  end
+
+  @spec http_announce(binary(), :inet | :inet6, :inet.ip_address(), request_opts()) ::
+          Response.t() | Error.t()
+  defp http_announce(url, family, ip, opts) do
+    timeout_ms = Keyword.get(opts, :http_timeout_ms, @timeout)
+
+    http_opts = [
+      timeout: timeout_ms,
+      recv_timeout: timeout_ms,
+      hackney: http_hackney_opts(family, ip)
     ]
 
-    case HTTPoison.get(url, [], opts) do
-      {:ok, %HTTPoison.Response{status_code: code, body: body, headers: headers}}
-      when code in 200..299 ->
-        decode_tracker_body(body, url, family, ip, headers, opts, 0)
+    try do
+      case HTTPoison.get(url, [], http_opts) do
+        {:ok, %HTTPoison.Response{status_code: code, body: body, headers: headers}}
+        when code in 200..299 ->
+          decode_tracker_body(body, url, family, ip, headers, http_opts, 0)
 
-      {:ok, %HTTPoison.Response{status_code: code}} ->
-        %Error{reason: {:http_status, code}}
+        {:ok, %HTTPoison.Response{status_code: code}} ->
+          %Error{reason: {:http_status, code}}
 
-      {:error, %HTTPoison.Error{reason: reason}} ->
+        {:error, %HTTPoison.Error{reason: reason}} ->
+          %Error{reason: reason}
+
+        other ->
+          %Error{reason: other}
+      end
+    rescue
+      e in CaseClauseError ->
+        if badarg_clause?(e) do
+          %Error{reason: :badarg}
+        else
+          reraise e, __STACKTRACE__
+        end
+    catch
+      :exit, reason ->
         %Error{reason: reason}
+
+      :error, :badarg ->
+        %Error{reason: :badarg}
     end
   end
+
+  # Bind outbound HTTP to the chosen local address on IPv4. Hackney/HTTPoison raise
+  # CaseClauseError on bare :badarg when given an IPv6 tuple in connect_options, so IPv6
+  # announces use the :inet6 socket family and the OS default route instead (BEP 7).
+  @spec http_hackney_opts(:inet | :inet6, :inet.ip_address()) :: keyword()
+  defp http_hackney_opts(:inet, ip), do: [connect_options: [{:ip, ip}]]
+  defp http_hackney_opts(:inet6, _ip), do: [connect_options: [:inet6]]
+
+  @spec badarg_clause?(CaseClauseError.t()) :: boolean()
+  defp badarg_clause?(%CaseClauseError{term: :badarg}), do: true
+  defp badarg_clause?(_), do: false
 
   @spec decode_tracker_body(
           binary(),
@@ -206,6 +314,7 @@ defmodule Tracker do
 
     %Response{
       interval: Map.get(map, "interval", default_interval()),
+      min_interval: Map.get(map, "min interval"),
       complete: Map.get(map, "complete", 0),
       incomplete: Map.get(map, "incomplete", 0),
       external_ip: Map.get(map, "external ip", @bento_nil) |> Bento.decode!(),
@@ -244,43 +353,67 @@ defmodule Tracker do
     }
   end
 
+  @doc """
+  BEP 15 § Connect — obtain a connection_id with exponential backoff retransmission.
+
+  Sends action=0 with magic `protocol_id`, validates action/transaction_id on response,
+  and returns `%Tracker.Error{}` (including `reason: :timeout`) instead of raising.
+  """
   @spec udp_connect(port(), :inet.ip_address(), :inet.port_number()) ::
-          connection_id() | Error.t() | no_return()
+          connection_id() | Error.t()
   def udp_connect(socket, ip, port) do
-    generate_transaction_id()
-    |> do_udp_connect(socket, ip, port, 15)
+    transaction_id = generate_transaction_id()
+    packet = UDP.encode_connect(transaction_id)
+    do_udp_request(socket, ip, port, packet, transaction_id, expected: :connect, attempt: 0)
   end
 
-  @spec do_udp_connect(
-          <<_::32>>,
+  @doc """
+  BEP 15 § Scrape — query seeders/completed/leechers for up to 74 info_hashes per request.
+
+  Multiple hashes are chunked automatically. Returns a map of hash => stats or `%Tracker.Error{}`.
+  """
+  @spec udp_scrape(port(), :inet.ip_address(), :inet.port_number(), [Torrent.hash()]) ::
+          %{Torrent.hash() => scrape_stats()} | Error.t()
+  def udp_scrape(_socket, _ip, _port, []), do: %{}
+
+  def udp_scrape(socket, ip, port, hashes) do
+    with_connection_id(socket, ip, port, fn connection_id ->
+      hashes
+      |> Enum.chunk_every(UDP.max_scrape_hashes())
+      |> Enum.reduce_while(%{}, fn chunk, acc ->
+        case do_udp_scrape(socket, ip, port, connection_id, chunk) do
+          {:ok, chunk_map} -> {:cont, Map.merge(acc, chunk_map)}
+          %Error{} = error -> {:halt, error}
+        end
+      end)
+      |> case do
+        %Error{} = error -> error
+        map -> map
+      end
+    end)
+  end
+
+  @spec do_udp_scrape(
           port(),
           :inet.ip_address(),
-          non_neg_integer(),
-          pos_integer()
-        ) :: connection_id() | Error.t() | no_return()
-  defp do_udp_connect(_, _, _, _, timeout) when timeout > @udp_connect_timeout do
-    %Error{reason: :timeout}
-  end
+          :inet.port_number(),
+          connection_id(),
+          [Torrent.hash()]
+        ) :: {:ok, %{Torrent.hash() => scrape_stats()}} | Error.t()
+  defp do_udp_scrape(socket, ip, port, connection_id, hashes) do
+    transaction_id = generate_transaction_id()
+    packet = UDP.encode_scrape(connection_id, transaction_id, hashes)
 
-  defp do_udp_connect(transaction_id, socket, ip, port, timeout) do
-    :ok =
-      :gen_udp.send(
-        socket,
-        ip,
-        port,
-        [@udp_protocol_id, @connect, transaction_id]
-      )
+    case do_udp_request(socket, ip, port, packet, transaction_id,
+           expected: :scrape,
+           hash_count: length(hashes),
+           attempt: 0
+         ) do
+      stats_list when is_list(stats_list) ->
+        {:ok, Map.new(Enum.zip(hashes, stats_list))}
 
-    case :gen_udp.recv(socket, 0, timeout * 1_000) do
-      {:ok,
-       {^ip, ^port, <<@connect, ^transaction_id::bytes-size(4), connection_id::bytes-size(8)>>}} ->
-        connection_id
-
-      {:ok, {^ip, ^port, <<@error, ^transaction_id::bytes-size(4), reason::binary>>}} ->
-        %Error{reason: reason}
-
-      {:error, :timeout} ->
-        do_udp_connect(transaction_id, socket, ip, port, timeout * 2)
+      %Error{} = error ->
+        error
     end
   end
 
@@ -289,104 +422,161 @@ defmodule Tracker do
           :inet.ip_address(),
           :inet.port_number(),
           connection_id(),
-          Torrent.hash()
-        ) :: Response.t() | no_return()
-  defp udp_announce(socket, ip, port, connection_id, hash) do
-    transaction_id = generate_transaction_id()
+          Torrent.hash(),
+          stats(),
+          :inet | :inet6,
+          request_opts()
+        ) :: Response.t() | Error.t()
+  defp udp_announce(socket, ip, port, connection_id, hash, stats, family, opts) do
+    case resolve_stats(hash, stats) do
+      :skip ->
+        %Error{reason: :model_not_ready, retry_in: "short"}
 
-    message = make_msg_udp_request(connection_id, transaction_id, hash)
-
-    :ok = :gen_udp.send(socket, ip, port, message)
-
-    case :gen_udp.recv(socket, 0, @timeout) do
-      {:ok, {^ip, ^port, <<@error, ^transaction_id::bytes-size(4), reason::binary>>}} ->
-        %Error{reason: reason}
-
-      {:ok,
-       {^ip, ^port,
-        <<@announce, ^transaction_id::bytes-size(4), interval::32, leechers::32, seeders::32,
-          peers::binary>>}} ->
-        %Response{
-          interval: interval,
-          complete: seeders,
-          incomplete: leechers,
-          peers: to_peers_v4(peers)
-        }
+      {:ok, announce_stats} ->
+        do_udp_announce(socket, ip, port, connection_id, hash, announce_stats, family, opts)
     end
   end
 
-  @moduledoc """
-    scrape request:
-    Offset          Size            Name            Value
-    0               64-bit integer  connection_id
-    8               32-bit integer  action          2 // scrape
-    12              32-bit integer  transaction_id
-    16 + 20 * n     20-byte string  info_hash
-    16 + 20 * N
+  defp do_udp_announce(socket, ip, port, connection_id, hash, announce_stats, family, opts) do
+    transaction_id = generate_transaction_id()
+    packet = encode_udp_announce(connection_id, transaction_id, hash, announce_stats)
+    max_attempts = Keyword.get(opts, :max_udp_attempts, @udp_max_backoff_attempt)
 
-    scrape response:
-    Offset      Size            Name            Value
-    0           32-bit integer  action          2 // scrape
-    4           32-bit integer  transaction_id
-    8 + 12 * n  32-bit integer  seeders
-    12 + 12 * n 32-bit integer  completed
-    16 + 12 * n 32-bit integer  leechers
-    8 + 12 * N
-    
+    case do_udp_request(socket, ip, port, packet, transaction_id,
+           expected: :announce,
+           family: family,
+           attempt: 0,
+           max_udp_attempts: max_attempts
+         ) do
+      %Response{} = response -> response
+      %Error{} = error -> error
+      {:error, reason} -> %Error{reason: reason}
+      other -> %Error{reason: other}
+    end
+  end
 
-    def udp_scrape(socket, ip, port, connection_id, list) do
-      transaction_id = generate_transaction_id()
+  @spec do_udp_request(
+          port(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          iodata(),
+          <<_::32>>,
+          keyword()
+        ) :: connection_id() | Response.t() | [scrape_stats()] | Error.t()
+  defp do_udp_request(socket, ip, port, packet, transaction_id, opts) do
+    attempt = Keyword.fetch!(opts, :attempt)
+    max_attempts = Keyword.get(opts, :max_udp_attempts, @udp_max_backoff_attempt)
 
-      :ok =
-        :gen_udp.send(
-          socket,
-          ip,
-          port,
-          :binary.list_to_bin([connection_id, @scrape, transaction_id | list])
-        )
+    if attempt > max_attempts do
+      %Error{reason: :timeout}
+    else
+      :ok = :gen_udp.send(socket, ip, port, packet)
+      timeout_ms = udp_backoff_ms(attempt)
 
-      case :gen_udp.recv(socket, 0, @timeout) do
-        {:ok, {^ip, ^port, <<@error::bytes-size(4), ^transaction_id::bytes-size(4), reason::binary>>}} ->
+      case udp_recv_until(socket, ip, port, transaction_id, timeout_ms, opts) do
+        {:ok, result} ->
+          result
+
+        {:error, :timeout} ->
+          do_udp_request(
+            socket,
+            ip,
+            port,
+            packet,
+            transaction_id,
+            Keyword.merge(opts, attempt: attempt + 1, max_udp_attempts: max_attempts)
+          )
+
+        {:error, reason} when is_binary(reason) ->
           %Error{reason: reason}
 
-        {:ok, {^ip, ^port, <<@scrape::bytes-size(4), ^transaction_id::bytes-size(4), _::binary>>}} ->
-          # TODO
-          :ok
+        {:error, reason} ->
+          %Error{reason: reason}
       end
     end
-  """
+  end
+
+  @spec udp_recv_until(
+          port(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          <<_::32>>,
+          non_neg_integer(),
+          keyword()
+        ) :: {:ok, term()} | {:error, term()}
+  defp udp_recv_until(socket, ip, port, transaction_id, timeout_ms, opts) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    recv_loop(socket, ip, port, transaction_id, deadline_ms, opts)
+  end
+
+  defp recv_loop(socket, ip, port, transaction_id, deadline_ms, opts) do
+    remaining_ms = deadline_ms - System.monotonic_time(:millisecond)
+
+    if remaining_ms <= 0 do
+      {:error, :timeout}
+    else
+      do_recv_loop(remaining_ms, deadline_ms, socket, ip, port, transaction_id, opts)
+    end
+  end
+
+  defp do_recv_loop(remaining_ms, deadline_ms, socket, ip, port, transaction_id, opts) do
+    case :gen_udp.recv(socket, 0, remaining_ms) do
+      {:ok, {^ip, ^port, body}} ->
+        case UDP.classify_response(body, transaction_id, opts) do
+          :ignore ->
+            recv_loop(socket, ip, port, transaction_id, deadline_ms, opts)
+
+          {:ok, result} ->
+            {:ok, result}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:error, :timeout} ->
+        {:error, :timeout}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec encode_udp_announce(
+          connection_id(),
+          <<_::32>>,
+          Torrent.hash(),
+          {non_neg_integer(), non_neg_integer(), non_neg_integer(), 0..3}
+        ) :: iodata()
+  defp encode_udp_announce(connection_id, transaction_id, hash, {uploaded, downloaded, left, event}) do
+
+    ip = Acceptor.ip_binary()
+
+    # BEP 15 § Announce / IPv6 — IP address field is 32 bits and must be 0 under IPv6.
+    ip_field = if byte_size(ip) === 4, do: ip, else: <<0::32>>
+
+    UDP.encode_announce(connection_id, transaction_id, hash, Peer.id(),
+      uploaded: uploaded,
+      downloaded: downloaded,
+      left: left,
+      event: event,
+      ip_field: ip_field,
+      key: Acceptor.key(),
+      num_want: numwant(left),
+      port: Acceptor.port()
+    )
+  end
 
   # HTTP trackers typically return:
   # - "peers": compact IPv4 peers (6-byte entries) when compact=1 (BEP 23)
   # - "peers6": compact IPv6 peers (18-byte entries) (BEP 7, widely deployed)
   @spec to_peers_v4(binary() | list()) :: list(Peer.t())
-  defp to_peers_v4(bin) when is_binary(bin), do: parse_compact_ipv4([], bin)
+  defp to_peers_v4(bin) when is_binary(bin), do: UDP.parse_compact_peers(bin, :inet)
   defp to_peers_v4(list) when is_list(list), do: parse_peer_dicts(list)
 
   @spec to_peers_v6(binary() | list() | any()) :: list(Peer.t())
-  defp to_peers_v6(bin) when is_binary(bin), do: parse_compact_ipv6([], bin)
+  defp to_peers_v6(bin) when is_binary(bin), do: UDP.parse_compact_peers(bin, :inet6)
   defp to_peers_v6(list) when is_list(list), do: parse_peer_dicts(list)
   defp to_peers_v6(_), do: []
-
-  @spec parse_compact_ipv4(list(Peer.t()), binary()) :: list(Peer.t())
-  defp parse_compact_ipv4(res, <<>>), do: res
-
-  defp parse_compact_ipv4(res, <<a, b, c, d, port::16, rest::binary>>) do
-    [%Peer{ip: {a, b, c, d}, port: port} | res]
-    |> parse_compact_ipv4(rest)
-  end
-
-  @spec parse_compact_ipv6(list(Peer.t()), binary()) :: list(Peer.t())
-  defp parse_compact_ipv6(res, <<>>), do: res
-
-  defp parse_compact_ipv6(
-         res,
-         <<s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16, port::16,
-           rest::binary>>
-       ) do
-    [%Peer{ip: {s1, s2, s3, s4, s5, s6, s7, s8}, port: port} | res]
-    |> parse_compact_ipv6(rest)
-  end
 
   @spec parse_peer_dicts(list(map())) :: list(Peer.t())
   defp parse_peer_dicts(list) do
@@ -425,9 +615,7 @@ defmodule Tracker do
   defp resolve_host(host) do
     char_host = String.to_charlist(host)
 
-    # Pragmatic choice: prefer IPv4 for UDP trackers (BEP 15), because many trackers
-    # either don't support IPv6 reliably or have broken AAAA records. We still support
-    # IPv6 where it works by falling back to :inet6.
+    # BEP 15 is IPv4-focused; prefer A records, fall back to AAAA (18-byte peer stride in response).
     case :inet.getaddr(char_host, :inet) do
       {:ok, ip} ->
         {:ok, ip, :inet}
@@ -440,35 +628,53 @@ defmodule Tracker do
     end
   end
 
-  defp make_msg_udp_request(connection_id, transaction_id, hash) do
-    [downloaded, left, uploaded, event] =
-      Torrent.get(hash, [:downloaded, :left, :uploaded, :event])
+  @spec resolve_stats(Torrent.hash(), :auto | keyword()) ::
+          {:ok, {non_neg_integer(), non_neg_integer(), non_neg_integer(), 0..3}} | :skip
+  defp resolve_stats(hash, :auto) do
+    if Torrent.Model.has_hash?(hash) do
+      try do
+        [uploaded, downloaded, left, event] =
+          Torrent.get(hash, [:uploaded, :downloaded, :left, :event])
 
-    ip = Acceptor.ip_binary()
-    ip_field = if byte_size(ip) === 4, do: ip, else: <<0::32>>
+        {:ok, {uploaded, downloaded, left, event}}
+      catch
+        :exit, _ -> :skip
+      end
+    else
+      :skip
+    end
+  end
 
-    [
-      connection_id,
-      @announce,
-      transaction_id,
-      hash,
-      Peer.id(),
-      <<downloaded::64>>,
-      <<left::64>>,
-      <<uploaded::64>>,
-      <<event::32>>,
-      ip_field,
-      Acceptor.key(),
-      <<numwant(left)::32>>,
-      <<Acceptor.port()::16>>
-    ]
+  defp resolve_stats(_hash, stats) when is_list(stats) do
+    uploaded = Keyword.get(stats, :uploaded, 0)
+    downloaded = Keyword.get(stats, :downloaded, 0)
+    left = Keyword.get(stats, :left, Magnet.metadata_left())
+    event = Keyword.get(stats, :event, Torrent.started())
+    {:ok, {uploaded, downloaded, left, event}}
   end
 
   @spec generate_transaction_id() :: <<_::32>>
   defp generate_transaction_id(),
     do: :crypto.strong_rand_bytes(4)
 
+  # BEP 15 § Time outs — overridable in test via `:udp_backoff_ms` application env.
+  @spec udp_backoff_ms(0..8) :: pos_integer()
+  defp udp_backoff_ms(attempt) do
+    case Application.get_env(:elixir_torrent, :udp_backoff_ms) do
+      fun when is_function(fun, 1) -> fun.(attempt)
+      _ -> UDP.backoff_timeout_seconds(attempt) * 1_000
+    end
+  end
+
+  @doc false
+  @spec udp_exhausted?(non_neg_integer()) :: boolean()
+  def udp_exhausted?(attempt) when is_integer(attempt), do: attempt > @udp_max_backoff_attempt
+
+  @doc false
+  @spec udp_backoff_ms_for_test(non_neg_integer()) :: pos_integer()
+  def udp_backoff_ms_for_test(attempt), do: udp_backoff_ms(attempt)
+
   defp numwant(0), do: 0
 
-  defp numwant(_), do: 60
+  defp numwant(_), do: 200
 end

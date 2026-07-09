@@ -22,6 +22,13 @@ defmodule Torrents do
     }
   end
 
+
+  @doc """
+  Returns the torrent supervisor pid for `hash`, if it is running.
+  """
+  @spec supervisor_pid(Torrent.hash()) :: {:ok, pid()} | {:error, :not_found}
+  def supervisor_pid(hash), do: find_pid(hash)
+
   @spec download(Path.t(), keyword()) :: DynamicSupervisor.on_start_child()
   @doc """
   Starts a new torrent download from a local `.torrent` path.
@@ -69,6 +76,26 @@ defmodule Torrents do
         {:ok, Enum.zip(fields, values) |> Map.new()}
     end
   end
+
+  @doc """
+  Starts a download from a magnet URI.
+
+  Fetches metadata over BEP 9 (`ut_metadata`) from peers discovered via magnet
+  `tr=` tracker URLs (BEP 3/7/15/23), writes a `.torrent` file, then starts a
+  normal torrent session.
+
+  Trackerless magnets (no `tr=` and no DHT) return `{:error, :missing_trackers}`.
+  """
+  @spec download_magnet(String.t()) :: DynamicSupervisor.on_start_child() | {:error, term()}
+  def download_magnet(magnet_uri) when is_binary(magnet_uri) do
+    with {:ok, %Magnet{} = magnet} <- Magnet.parse(magnet_uri),
+         {:ok, ref} <- Magnet.Fetcher.run(magnet),
+         {:ok, path} <- Magnet.Fetcher.await(ref),
+         result <- download(path) do
+      result
+    end
+  end
+
 
   @doc """
   Stops a running torrent and removes it from the active list.

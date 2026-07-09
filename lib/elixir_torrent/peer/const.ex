@@ -22,9 +22,9 @@ defmodule Peer.Const do
       @reject_request_id <<0x10>>
       @allowed_fast_id <<0x11>>
 
-      # Additional IDs used in deployed clients: 
-      # @LTEP_Handshake_id 0x14
-      # (implemented in libtorrent, uTorrent,...)
+      # BEP 10 Extension Protocol (LTEP) — wire message id 20, not a single-byte id here.
+      # Extended payloads are framed in Peer.LTEP (handshake extended id 0).
+      @extended_id <<20>>
 
       # Hash Transfer Protocol
       # @hash_request_id 0x15

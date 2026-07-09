@@ -29,7 +29,8 @@ defmodule Torrent do
     uploaded: 0,
     downloaded: 0,
     event: @started,
-    speed: %{download: 0, upload: 0}
+    speed: %{download: 0, upload: 0},
+    private?: false
   ]
 
   @type t :: %__MODULE__{
@@ -55,7 +56,8 @@ defmodule Torrent do
           # "started" | "empty" | "completed" | "stopped"
           event: 0..3,
           speed: speed(),
-          bitfield: bitfield() | nil
+          bitfield: bitfield() | nil,
+          private?: boolean()
         }
 
   alias __MODULE__.{
@@ -181,6 +183,12 @@ defmodule Torrent do
     dir
   end
 
+  @doc false
+  @spec private?(t() | map()) :: boolean()
+  def private?(%__MODULE__{metadata: metadata}), do: private?(metadata)
+  def private?(%{"info" => info}) when is_map(info), do: Magnet.private?(info)
+  def private?(_), do: false
+
   @spec parse_file!(Path.t()) :: t() | no_return()
   def parse_file!(path) do
     metadata =
@@ -201,6 +209,7 @@ defmodule Torrent do
       left: bytes,
       last_piece_length: bytes - last_index * metadata["info"]["piece length"],
       metadata: metadata,
+      private?: private?(metadata),
       last_index: last_index
     }
   end

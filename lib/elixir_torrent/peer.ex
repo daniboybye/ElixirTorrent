@@ -39,7 +39,8 @@ defmodule Peer do
   @type key :: {id(), Torrent.hash()}
   @type status :: nil | :seed | :connecting_to_peers | Torrent.index()
 
-  @reserved <<0, 0, 0, 0, 0, 0, 0, 4>>
+  # BEP 10 LTEP (byte 5: 0x10), BEP 5 DHT + BEP 6 Fast (byte 7: 0x05)
+  @reserved <<0, 0, 0, 0, 0, 0x10, 0, 5>>
   @id_length 20
   @id version() <> "-" <> :crypto.strong_rand_bytes(@id_length - byte_size(version()) - 1)
 
@@ -63,20 +64,12 @@ defmodule Peer do
   @spec fast_extension?(reserved()) :: boolean()
   def fast_extension?(<<_::61, x::1, _::2>>), do: x == 1
 
+  @spec extension_protocol?(reserved()) :: boolean()
+  defdelegate extension_protocol?(reserved), to: Peer.LTEP
+
   @spec get_id(pid()) :: Peer.id() | nil
   def get_id(pid) do
     if key = get_key(pid), do: key_to_id(key)
-  end
-
-  @spec get_key(pid()) :: Peer.key() | nil
-  def get_key(pid) do
-    case Registry.keys(Registry, pid) do
-      [{key, _} | _] ->
-        key
-
-      [] ->
-        nil
-    end
   end
 
   @spec exists?(t(), Torrent.hash()) :: boolean()
@@ -122,10 +115,23 @@ defmodule Peer do
   end
 
 
+  @spec disconnect(pid()) :: :ok
+  def disconnect(pid) when is_pid(pid) do
+    if key = get_key(pid), do: Controller.disconnect(key), else: :ok
+  end
+
   @doc false
   @spec sender_pid(pid()) :: pid() | nil
   def sender_pid(supervisor_pid) when is_pid(supervisor_pid) do
     child_pid(supervisor_pid, Peer.Sender)
+  end
+
+  @spec get_key(pid()) :: key() | nil
+  def get_key(pid) do
+    case Registry.keys(Registry, pid) do
+      [{key, Peer}] -> key
+      [] -> nil
+    end
   end
 
   @spec child_pid(pid(), module()) :: pid() | nil
@@ -146,9 +152,16 @@ defmodule Peer do
     end
   end
 
-  @spec disconnect(pid()) :: :ok
-  def disconnect(pid) when is_pid(pid) do
-    if key = get_key(pid), do: Controller.disconnect(key), else: :ok
+  @doc false
+  @spec start_protocol(pid()) :: :ok | {:error, term()}
+  def start_protocol(supervisor_pid) when is_pid(supervisor_pid) do
+    if key = get_key(supervisor_pid) do
+      Peer.Controller.start_protocol(key)
+    else
+      {:error, :peer_not_registered}
+    end
+  catch
+    :exit, reason -> {:error, reason}
   end
 
   @spec make_key(Torrent.hash(), id()) :: key()

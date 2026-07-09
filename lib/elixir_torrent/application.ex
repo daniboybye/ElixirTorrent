@@ -6,7 +6,10 @@ defmodule ElixirTorrentApplication do
       {Registry, keys: :unique, name: Registry},
       Torrents,
       PeerDiscovery,
-      Acceptor
+      Acceptor,
+      Magnet.Fetcher.Supervisor,
+      Magnet.Fetcher.ConnectionLimit,
+      Magnet.Bootstrap.Supervisor
     ]
     |> Supervisor.start_link(strategy: :one_for_all)
   end

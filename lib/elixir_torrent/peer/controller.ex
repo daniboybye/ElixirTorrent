@@ -2,8 +2,6 @@ defmodule Peer.Controller do
   use GenServer
   use Via
 
-  require Logger
-
   alias __MODULE__.{State, FastExtension}
   alias Peer.Sender
   alias Torrent.{Uploader, Downloads}
@@ -96,6 +94,26 @@ defmodule Peer.Controller do
     :exit, _ -> :ok
   end
 
+  @doc false
+  @spec start_protocol(Peer.key()) :: :ok
+  def start_protocol(key), do: GenServer.call(via(key), :start_protocol, 60_000)
+
+  @doc false
+  @spec metadata_session(Peer.key()) :: {:ok, map()} | :error
+  def metadata_session(key) do
+    GenServer.call(via(key), :metadata_session)
+  catch
+    :exit, _ -> :error
+  end
+
+  @doc false
+  @spec metadata_capable(Peer.key()) :: {:ok, map()} | :error
+  def metadata_capable(key) do
+    GenServer.call(via(key), :metadata_capable)
+  catch
+    :exit, _ -> :error
+  end
+
   @spec handle_have(Peer.key(), Torrent.index()) :: :ok
   def handle_have(key, index),
     do: GenServer.cast(via(key), {:handle_have, [index]})
@@ -111,8 +129,32 @@ defmodule Peer.Controller do
 
   @spec handle_piece(Peer.key(), Torrent.index(), Torrent.begin(), Torrent.block()) :: :ok
   def handle_piece(key, index, begin, block) do
-    Downloads.response(key_to_hash(key), index, key_to_id(key), begin, block)
-    GenServer.cast(via(key), {:handle_piece, [index, begin, byte_size(block)]})
+    hash = key_to_hash(key)
+
+    if valid_piece_block?(hash, index, begin, block) do
+      Downloads.response(hash, index, key_to_id(key), begin, block)
+      GenServer.cast(via(key), {:handle_piece, [index, begin, byte_size(block)]})
+    else
+      GenServer.stop(via(key), {:shutdown, :protocol_error})
+    end
+  end
+
+  @spec valid_piece_block?(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.block()) ::
+          boolean()
+  defp valid_piece_block?(hash, index, begin, block) when is_binary(block) do
+    block_size = byte_size(block)
+    max = Torrent.Downloads.piece_max_length()
+
+    with true <- block_size > 0,
+         true <- block_size <= max,
+         pieces_count when is_integer(pieces_count) <- Torrent.get(hash, :pieces_count),
+         true <- index >= 0 and index < pieces_count,
+         piece_len when is_integer(piece_len) <- Torrent.Model.piece_length(hash, index),
+         true <- begin >= 0 and begin + block_size <= piece_len do
+      true
+    else
+      _ -> false
+    end
   end
 
   @spec handle_cancel(Peer.key(), Torrent.index(), Torrent.begin(), Torrent.length()) :: :ok
@@ -145,33 +187,26 @@ defmodule Peer.Controller do
   def handle_allowed_fast(key, index),
     do: GenServer.cast(via(key), {:handle_allowed_fast, [index]})
 
+  @spec handle_extended(Peer.key(), non_neg_integer(), binary()) :: :ok
+  def handle_extended(key, extended_id, payload),
+    do: GenServer.cast(via(key), {:handle_extended, [extended_id, payload]})
+
+
   def init([hash, id, socket, reserved]) do
     [status, count, downloaded, _piece_length] =
       Torrent.get(hash, [:peer_status, :pieces_count, :downloaded, :piece_length])
 
-    state = %State{
-      hash: hash,
-      id: id,
-      socket: socket,
-      fast_extension: FastExtension.make(reserved),
-      status: status,
-      pieces_count: count
-    }
-
-    State.first_message(state, downloaded)
-
-    state =
-      case state do
-        %State{status: :seed, fast_extension: %FastExtension{}} ->
-          # BEP 6: proactively send allowed_fast set to a connected leecher so it can
-          # request those pieces even while choked.
-          State.send_allowed_fast(state)
-
-        _ ->
-          state
-      end
-
-    {:ok, state}
+    {:ok,
+     %State{
+       hash: hash,
+       id: id,
+       socket: socket,
+       fast_extension: FastExtension.make(reserved),
+       status: status,
+       pieces_count: count,
+       peer_reserved: reserved,
+       downloaded_at_connect: downloaded
+     }}
   end
 
   def terminate({:shutdown, :protocol_error}, state) do
@@ -179,7 +214,15 @@ defmodule Peer.Controller do
     Acceptor.malicious_peer(state.id)
   end
 
-  def terminate(_, %State{} = state) do
+  def terminate(reason, %State{} = state) do
+    unless reason == :normal do
+      require Logger
+
+      Logger.info(
+        "[peer_upload] peer=#{Peer.log_id(state.id)} hash=#{Torrent.hex_encoded_hash(state.hash)} disconnect reason=#{inspect(reason)} interested_of_me=#{state.interested_of_me} choked=#{state.choke}"
+      )
+    end
+
     Torrent.PiecesStatistic.remove_peer(state.hash, state.bitfield, state.pieces_count)
     :ok
   end
@@ -210,34 +253,218 @@ defmodule Peer.Controller do
     {:stop, :normal, state}
   end
 
+  def handle_call(:start_protocol, _, %State{} = state) do
+    state =
+      state
+      |> apply_protocol_startup(state.downloaded_at_connect, state.peer_reserved)
+      |> Map.put(:downloaded_at_connect, nil)
+      |> Map.put(:peer_reserved, nil)
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call(:metadata_session, _, %State{ltep: ltep} = state) when not is_nil(ltep) do
+    ut = Magnet.UtMetadata.extension_name()
+
+    reply =
+      if Peer.LTEP.Session.peer_supports?(ltep, ut) do
+        metadata_size =
+          case Peer.LTEP.Session.peer_handshake(ltep).metadata_size do
+            size when is_integer(size) and size > 0 -> size
+            _ -> nil
+          end
+
+        peer_seeder? =
+          match?(%State{bitfield: :all}, state) or complete_bitfield?(state)
+
+        if peer_seeder? or peer_has_metadata?(metadata_size) do
+          {:ok,
+           %{
+             ltep: ltep,
+             metadata_size: metadata_size,
+             unchoked?: not state.choke_me,
+             seeder?: true
+           }}
+        else
+          :error
+        end
+      else
+        :error
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(:metadata_session, _, state), do: {:reply, :error, state}
+
+  def handle_call(:metadata_capable, _, %State{ltep: ltep} = state) when not is_nil(ltep) do
+    ut = Magnet.UtMetadata.extension_name()
+
+    reply =
+      if Peer.LTEP.Session.peer_supports?(ltep, ut) do
+        metadata_size =
+          case Peer.LTEP.Session.peer_handshake(ltep).metadata_size do
+            size when is_integer(size) and size > 0 -> size
+            _ -> nil
+          end
+
+        peer_seeder? =
+          match?(%State{bitfield: :all}, state) or complete_bitfield?(state)
+
+        {:ok,
+         %{
+           ltep: ltep,
+           metadata_size: metadata_size,
+           unchoked?: not state.choke_me,
+           seeder?: peer_seeder? or peer_has_metadata?(metadata_size)
+         }}
+      else
+        :error
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(:metadata_capable, _, state), do: {:reply, :error, state}
+
   defp close_socket(socket) when is_port(socket) do
     _ = :gen_tcp.shutdown(socket, :write)
     _ = :gen_tcp.close(socket)
     :ok
   end
 
+  defp close_socket({:utp, _} = socket) do
+    Peer.Transport.close(socket)
+    :ok
+  end
+
   defp close_socket(_), do: :ok
 
-  def handle_cast({message, _}, %State{fast_extension: nil} = state)
+  @spec apply_protocol_startup(State.t(), non_neg_integer(), Peer.reserved()) :: State.t()
+  defp apply_protocol_startup(state, downloaded, reserved) do
+    # BEP 10: extension handshake must be the first post-handshake message when LTEP is used.
+    {state, ltep_exts} =
+      if Peer.extension_protocol?(reserved) do
+        state = State.start_ltep(state)
+        exts = ltep_extension_names(state)
+        {state, exts}
+      else
+        {state, []}
+      end
+
+    state = maybe_send_dht_port(state, reserved)
+
+    state =
+      cond do
+        metadata_leech_peer?(state.hash) ->
+          leech_startup(state)
+
+        true ->
+          state
+          |> maybe_leech_startup(downloaded)
+          |> State.first_message(downloaded)
+      end
+
+    if ltep_exts != [] do
+      require Logger
+
+      Logger.info(
+        "[ltep] peer=#{Peer.log_key(State.key(state))} hash=#{Torrent.hex_encoded_hash(state.hash)} extensions=#{inspect(ltep_exts)}"
+      )
+    end
+
+    case state do
+      %State{status: :seed, fast_extension: %FastExtension{}} ->
+        State.send_allowed_fast(state)
+
+      _ ->
+        state
+    end
+  end
+
+  @spec leech_startup(State.t()) :: State.t()
+  defp leech_startup(state) do
+    :ok = Sender.interested(make_key(state.hash, state.id))
+    State.unchoke(state)
+  end
+
+  @spec maybe_leech_startup(State.t(), non_neg_integer()) :: State.t()
+  defp maybe_leech_startup(state, downloaded) do
+    if download_leech_startup?(state, downloaded), do: leech_startup(state), else: state
+  end
+
+  @spec download_leech_startup?(State.t(), non_neg_integer()) :: boolean()
+  defp download_leech_startup?(state, downloaded) do
+    downloaded == 0 and leeching?(state.hash) and state.status != :seed
+  end
+
+  @spec leeching?(Torrent.hash()) :: boolean()
+  defp leeching?(hash) do
+    case Torrent.get(hash, :left) do
+      left when is_integer(left) and left > 0 -> true
+      _ -> false
+    end
+  catch
+    :exit, _ -> false
+  end
+
+  @spec metadata_leech_peer?(Torrent.hash()) :: boolean()
+  defp metadata_leech_peer?(hash) do
+    Magnet.Bootstrap.active?(hash) and metadata_stub?(hash)
+  end
+
+  @spec metadata_stub?(Torrent.hash()) :: boolean()
+  defp metadata_stub?(hash) do
+    case Torrent.get(hash, [:last_index]) do
+      [0] -> true
+      _ -> false
+    end
+  catch
+    :exit, _ -> false
+  end
+
+  @spec ltep_extension_names(State.t()) :: [String.t()]
+  defp ltep_extension_names(%State{ltep: nil}), do: []
+
+  defp ltep_extension_names(%State{ltep: ltep}) do
+    if Peer.LTEP.Session.peer_supports?(ltep, Magnet.UtMetadata.extension_name()) do
+      [Magnet.UtMetadata.extension_name()]
+    else
+      []
+    end
+  end
+
+  # BEP 5 § BitTorrent Protocol Extension — tell DHT-capable peers our UDP port.
+  @spec maybe_send_dht_port(State.t(), Peer.reserved()) :: State.t()
+  defp maybe_send_dht_port(state, reserved) do
+    if Peer.dht?(reserved) do
+      case DHT.port() do
+        port when is_integer(port) ->
+          :ok = Sender.port(State.key(state), port)
+          state
+
+        _ ->
+          state
+      end
+    else
+      state
+    end
+  end
+
+  def handle_cast({message, _}, %State{hash: hash, fast_extension: nil} = state)
       when message in [
-             :handle_have_all,
-             :handle_have_none,
              :handle_suggest_piece,
              :handle_allowed_fast,
              :handle_reject
            ] do
-    {:stop, {:shutdown, :protocol_error}, state}
+    if Magnet.Bootstrap.active?(hash) do
+      {:noreply, state}
+    else
+      {:stop, {:shutdown, :protocol_error}, state}
+    end
   end
 
   def handle_cast({fun, args}, state) do
-    case fun do
-      :handle_suggest_piece ->
-        Logger.info("suggest piece")
-
-      _ ->
-        :ok
-    end
-
     case apply(State, fun, [state | args]) do
       {:error, reason, state} ->
         {:stop, {:shutdown, reason}, state}
@@ -246,4 +473,17 @@ defmodule Peer.Controller do
         {:noreply, state}
     end
   end
+
+  @spec complete_bitfield?(State.t()) :: boolean()
+  defp complete_bitfield?(%State{bitfield: bitfield, pieces_count: count})
+       when is_binary(bitfield) and is_integer(count) and count > 0 do
+    Torrent.Bitfield.valid?(bitfield, count) and
+      Torrent.Bitfield.count(bitfield, count) == count
+  end
+
+  defp complete_bitfield?(_), do: false
+
+  @spec peer_has_metadata?(pos_integer() | nil) :: boolean()
+  defp peer_has_metadata?(size) when is_integer(size) and size > 0, do: true
+  defp peer_has_metadata?(_), do: false
 end

@@ -345,6 +345,33 @@ defmodule Acceptor.Connection.Handshakes do
     :exit, reason -> {:error, reason}
   end
 
+
+  @spec start_peer_protocol(Peer.key()) :: :ok | {:error, term()}
+  defp start_peer_protocol(key, attempts \\ 8)
+
+  defp start_peer_protocol(_key, 0), do: {:error, :noproc}
+
+  defp start_peer_protocol(key, attempts) when is_tuple(key) do
+    Peer.Controller.start_protocol(key)
+    :ok
+  catch
+    :exit, reason ->
+      if retryable_start_protocol?(reason) and attempts > 1 do
+        Process.sleep(25)
+        start_peer_protocol(key, attempts - 1)
+      else
+        {:error, reason}
+      end
+  end
+
+  defp retryable_start_protocol?(:noproc), do: true
+  defp retryable_start_protocol?(:normal), do: true
+  defp retryable_start_protocol?(:peer_not_registered), do: true
+  defp retryable_start_protocol?({:noproc, _}), do: true
+  defp retryable_start_protocol?({:normal, _}), do: true
+  defp retryable_start_protocol?({:shutdown, _}), do: true
+  defp retryable_start_protocol?(_), do: false
+
   defp add_peer(hash, peer_id, reserved, socket, %Peer{} = peer) do
     add_peer(hash, peer_id, reserved, socket, peer_endpoint(peer, socket))
   end
@@ -374,6 +401,7 @@ defmodule Acceptor.Connection.Handshakes do
          key when is_tuple(key) <- Peer.get_key(peer_supervisor),
          :ok <- register_endpoint(hash, endpoint, peer_supervisor),
          :ok <- transfer_controlling_process(socket, sender),
+         :ok <- start_peer_protocol(key),
          :ok <- safe_activate(key) do
       Logger.info(
         "[peer_handoff] ok hash=#{Torrent.hex_encoded_hash(hash)} endpoint=#{inspect(endpoint)}"
