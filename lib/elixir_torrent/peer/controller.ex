@@ -191,6 +191,9 @@ defmodule Peer.Controller do
   def handle_extended(key, extended_id, payload),
     do: GenServer.cast(via(key), {:handle_extended, [extended_id, payload]})
 
+  @spec send_pex(Peer.key(), binary()) :: :ok
+  def send_pex(key, payload) when is_binary(payload),
+    do: GenServer.cast(via(key), {:send_pex, [payload]})
 
   def init([hash, id, socket, reserved]) do
     [status, count, downloaded, _piece_length] =
@@ -427,11 +430,16 @@ defmodule Peer.Controller do
   defp ltep_extension_names(%State{ltep: nil}), do: []
 
   defp ltep_extension_names(%State{ltep: ltep}) do
-    if Peer.LTEP.Session.peer_supports?(ltep, Magnet.UtMetadata.extension_name()) do
-      [Magnet.UtMetadata.extension_name()]
-    else
-      []
-    end
+    Peer.UtPex.extension_name()
+    |> then(fn ut_pex ->
+      names = if Peer.LTEP.Session.peer_supports?(ltep, ut_pex), do: [ut_pex], else: []
+
+      if Peer.LTEP.Session.peer_supports?(ltep, Magnet.UtMetadata.extension_name()) do
+        [Magnet.UtMetadata.extension_name() | names]
+      else
+        names
+      end
+    end)
   end
 
   # BEP 5 § BitTorrent Protocol Extension — tell DHT-capable peers our UDP port.

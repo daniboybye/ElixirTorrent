@@ -114,6 +114,10 @@ defmodule Peer do
     if key = get_key(pid), do: Controller.seed(key)
   end
 
+  @spec send_pex(pid(), binary()) :: :ok | nil
+  def send_pex(pid, payload) when is_pid(pid) and is_binary(payload) do
+    if key = get_key(pid), do: Controller.send_pex(key, payload)
+  end
 
   @spec disconnect(pid()) :: :ok
   def disconnect(pid) when is_pid(pid) do

@@ -165,6 +165,10 @@ defmodule Peer.Controller.State do
       ut_metadata?(state, extended_id) ->
         respond_ut_metadata(state, payload)
 
+      ut_pex?(state, extended_id) ->
+        :ok = Peer.UtPex.ingest(state.hash, payload)
+        state
+
       true ->
         state
     end
@@ -174,6 +178,26 @@ defmodule Peer.Controller.State do
   defp ut_metadata?(state, extended_id) do
     Peer.LTEP.Session.local_extension_id(state.ltep, Magnet.UtMetadata.extension_name()) ==
       extended_id
+  end
+
+
+  @spec ut_pex?(t(), non_neg_integer()) :: boolean()
+  defp ut_pex?(state, extended_id) do
+    Peer.LTEP.Session.local_extension_id(state.ltep, Peer.UtPex.extension_name()) == extended_id
+  end
+
+  @spec send_pex(t(), binary()) :: t()
+  def send_pex(%__MODULE__{ltep: nil} = state, _), do: state
+
+  def send_pex(%__MODULE__{} = state, payload) when is_binary(payload) do
+    ut_id = Peer.LTEP.Session.peer_extension_id(state.ltep, Peer.UtPex.extension_name())
+
+    if is_integer(ut_id) and ut_id > 0 and
+         Peer.LTEP.Session.peer_supports?(state.ltep, Peer.UtPex.extension_name()) do
+      _ = Peer.LTEP.send_extended(key(state), ut_id, payload)
+    end
+
+    state
   end
 
   @spec respond_ut_metadata(t(), binary()) :: t()
