@@ -137,6 +137,9 @@ Full reference: [`hexdocs.pm/elixir_torrent/ElixirTorrent.html`](https://hexdocs
 | [BEP 5](https://www.bittorrent.org/beps/bep_0005.html) | Mainline DHT |
 | [BEP 6](https://www.bittorrent.org/beps/bep_0006.html) | Fast extension |
 | [BEP 7](https://www.bittorrent.org/beps/bep_0007.html) | IPv6 tracker extension |
+| [BEP 9](https://www.bittorrent.org/beps/bep_0009.html) | Extension for peers to send metadata files (ut_metadata) |
+| [BEP 10](https://www.bittorrent.org/beps/bep_0010.html) | Extension protocol (LTEP) |
+| [BEP 11](https://www.bittorrent.org/beps/bep_0011.html) | Peer exchange (ut_pex) |
 | [BEP 12](https://www.bittorrent.org/beps/bep_0012.html) | Multitracker metadata |
 | [BEP 15](https://www.bittorrent.org/beps/bep_0015.html) | UDP tracker protocol |
 | [BEP 20](https://www.bittorrent.org/beps/bep_0020.html) | Peer ID conventions |

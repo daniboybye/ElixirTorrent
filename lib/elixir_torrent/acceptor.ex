@@ -143,4 +143,28 @@ defmodule Acceptor do
         <<s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16>>
     end
   end
+
+  @doc false
+  @spec ipv6_binary(:inet.ip6_address()) :: <<_::128>>
+  def ipv6_binary({s1, s2, s3, s4, s5, s6, s7, s8}) do
+    <<s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16>>
+  end
+
+  @doc false
+  @spec ipv4_binary() :: <<_::32>> | nil
+  def ipv4_binary() do
+    case primary_ips().inet do
+      {a, b, c, d} -> <<a, b, c, d>>
+      _ -> nil
+    end
+  end
+
+  @doc false
+  @spec ipv6_binary() :: <<_::128>> | nil
+  def ipv6_binary() do
+    case primary_ips().inet6 do
+      ip when is_tuple(ip) -> ipv6_binary(ip)
+      _ -> nil
+    end
+  end
 end

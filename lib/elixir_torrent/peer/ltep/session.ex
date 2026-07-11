@@ -50,9 +50,29 @@ defmodule Peer.LTEP.Session do
       |> Enum.reduce(%{}, &Map.merge/2)
       |> Map.merge(Keyword.get(opts, :extra_fields, %{}))
 
-    base = Handshake.to_map(%Handshake{m: session.local_m, v: client_version})
-    base |> Map.merge(extra_fields) |> Handshake.from_map() |> Handshake.encode()
+    base =
+      %Handshake{m: session.local_m, v: client_version}
+      |> Handshake.to_map()
+      |> Map.merge(address_fields())
+      |> Map.merge(extra_fields)
+
+    base |> Handshake.from_map() |> Handshake.encode()
   end
+
+  @doc false
+  @spec address_fields() :: map()
+  def address_fields do
+    port = Acceptor.port()
+
+    %{}
+    |> maybe_address("p", port, is_integer(port))
+    |> maybe_address("ipv4", Acceptor.ipv4_binary(), is_binary(Acceptor.ipv4_binary()))
+    |> maybe_address("ipv6", Acceptor.ipv6_binary(), is_binary(Acceptor.ipv6_binary()))
+  end
+
+  @spec maybe_address(map(), String.t(), term(), boolean()) :: map()
+  defp maybe_address(map, _key, _value, false), do: map
+  defp maybe_address(map, key, value, true), do: Map.put(map, key, value)
 
   @doc """
   Applies a peer handshake dictionary, merging on re-handshake (BEP 10).
