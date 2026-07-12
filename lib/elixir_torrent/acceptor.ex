@@ -83,8 +83,17 @@ defmodule Acceptor do
 
   @spec primary_ips() :: %{inet: :inet.ip4_address() | nil, inet6: :inet.ip6_address() | nil}
   def primary_ips() do
-    # Minimal multi-homed support: pick one "best" IPv4 and one "best" IPv6 address.
-    # BEP 7 full support would announce *each* local address we intend to listen on.
+    %{inet: v4, inet6: v6} = all_global_ips()
+    %{inet: v4, inet6: v6}
+  end
+
+  @doc false
+  @spec all_global_ips() :: %{
+          inet: :inet.ip4_address() | nil,
+          inet6: :inet.ip6_address() | nil,
+          inet6_all: [:inet.ip6_address()]
+        }
+  def all_global_ips() do
     case :inet.getifaddrs() do
       {:ok, ifs} ->
         ips =
@@ -95,14 +104,17 @@ defmodule Acceptor do
             |> Enum.filter(&is_tuple/1)
           end)
 
+        v6_all = Enum.filter(ips, &global_ipv6?/1)
+
         %{
           inet: Enum.find(ips, &global_ipv4?/1),
-          inet6: Enum.find(ips, &global_ipv6?/1)
+          inet6: List.first(v6_all),
+          inet6_all: v6_all
         }
 
       {:error, reason} ->
         Logger.warning("getifaddrs failed: #{inspect(reason)}")
-        %{inet: nil, inet6: nil}
+        %{inet: nil, inet6: nil, inet6_all: []}
     end
   end
 
@@ -166,5 +178,20 @@ defmodule Acceptor do
       ip when is_tuple(ip) -> ipv6_binary(ip)
       _ -> nil
     end
+  end
+
+  @doc false
+  @spec announcable_ipv6() :: [:inet.ip6_address()]
+  def announcable_ipv6() do
+    case all_global_ips() do
+      %{inet6: nil} -> []
+      %{inet6: ip} -> [ip]
+    end
+  end
+
+  @doc false
+  @spec format_ip(:inet.ip_address()) :: String.t()
+  def format_ip(ip) do
+    ip |> :inet.ntoa() |> List.to_string()
   end
 end
