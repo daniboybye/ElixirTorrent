@@ -183,10 +183,14 @@ defmodule DHT.RoutingTable do
     Enum.map(entries, fn %{id: id, ip: ip, port: port} -> %{id: id, ip: ip, port: port} end)
   end
 
-  @spec all_entries(t()) :: [entry()]
-  defp all_entries(%__MODULE__{buckets: buckets}) do
+  @doc "Every node entry across all buckets (order unspecified)."
+  @spec entries(t()) :: [entry()]
+  def entries(%__MODULE__{buckets: buckets}) do
     buckets |> Enum.flat_map(& &1.nodes)
   end
+
+  @spec all_entries(t()) :: [entry()]
+  defp all_entries(table), do: entries(table)
 
   @spec insert_into_bucket(t(), non_neg_integer(), entry(), non_neg_integer()) :: t()
   defp insert_into_bucket(%__MODULE__{buckets: buckets} = table, id_int, entry, now) do
