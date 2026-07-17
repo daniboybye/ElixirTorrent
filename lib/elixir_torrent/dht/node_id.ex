@@ -8,28 +8,37 @@ defmodule DHT.NodeId do
   """
 
   @id_bits 160
-  @path Path.join([File.cwd!(), ".elixir_torrent", "dht_node_id.bin"])
+  @filename "dht_node_id.bin"
 
   @type t :: <<_::160>>
 
   @doc "Load persisted node id or create and persist a new random id."
   @spec get() :: t()
   def get do
-    case File.read(@path) do
+    file = path()
+
+    case File.read(file) do
       {:ok, <<id::binary-size(20)>>} ->
         id
 
       _ ->
         id = :crypto.strong_rand_bytes(20)
-        File.mkdir_p!(Path.dirname(@path))
-        :ok = File.write(@path, id)
+        File.mkdir_p!(Path.dirname(file))
+        :ok = File.write(file, id)
         id
     end
   end
 
-  @doc "Return the persistence path (for tests)."
+  @doc """
+  Persistence path, resolved at RUNTIME against the current working directory.
+
+  This must be a function, not a compile-time module attribute: a `@path` set to
+  `File.cwd!()` captures the *build* machine's directory, so on any other host
+  the id file is never found and a fresh id is generated every launch (and on the
+  build machine it silently writes into the source tree).
+  """
   @spec path() :: Path.t()
-  def path, do: @path
+  def path, do: Path.join([File.cwd!(), ".elixir_torrent", @filename])
 
   @doc false
   @spec id_bits() :: pos_integer()
