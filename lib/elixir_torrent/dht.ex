@@ -23,13 +23,16 @@ defmodule DHT do
     Lookup,
     NodeId,
     PeerStore,
+    RoutingStore,
     RoutingTable,
+    RoutingTables,
     Token
   }
 
   @version Config.version_string()
   @token_rotate_ms 5 * 60 * 1_000
   @refresh_ms 15 * 60 * 1_000
+  @persist_ms 5 * 60 * 1_000
   @bootstrap_after_ms 1_000
   @bootstrap_lookup_waits 12
   @bootstrap_lookup_wait_ms 500
@@ -39,10 +42,11 @@ defmodule DHT do
   @reannounce_interval_ms 15 * 60 * 1_000
 
   defstruct [
-    :socket,
+    :socket_v4,
+    :socket_v6,
     :node_id,
     :port,
-    routing_table: nil,
+    routing_tables: nil,
     tokens: nil,
     peer_store: %{},
     pending: %{},
@@ -84,9 +88,9 @@ defmodule DHT do
   end
 
   @doc false
-  @spec udp_socket() :: port() | nil
-  def udp_socket do
-    if enabled?(), do: GenServer.call(__MODULE__, :udp_socket, 5_000)
+  @spec udp_socket(:inet | :inet6) :: port() | nil
+  def udp_socket(family \\ :inet) do
+    if enabled?(), do: GenServer.call(__MODULE__, {:udp_socket, family}, 5_000)
   catch
     :exit, _ -> nil
   end
@@ -155,24 +159,46 @@ defmodule DHT do
 
   @impl true
   def init(_opts) do
+    # Trap exits so the supervisor's shutdown signal runs terminate/2 (which
+    # persists the routing table). A plain GenServer would be killed outright by
+    # exit(:shutdown) without terminate ever firing.
+    Process.flag(:trap_exit, true)
     node_id = NodeId.get()
 
-    with {:ok, socket, port} <- open_socket(),
-         :ok <- bind_socket(socket) do
-      table = RoutingTable.new(node_id)
+    with {:ok, socket_v4, socket_v6, port} <- open_sockets(),
+         :ok <- bind_socket(socket_v4),
+         :ok <- maybe_bind_socket(socket_v6) do
+      tables = RoutingStore.load(RoutingTables.new(node_id))
       tokens = Token.new()
 
       schedule_bootstrap()
       schedule_token_rotate(@token_rotate_ms)
       schedule_refresh(@refresh_ms)
-      :ok = :inet.setopts(socket, active: :once)
+      schedule_persist(@persist_ms)
+      :ok = :inet.setopts(socket_v4, active: :once)
+      if socket_v6, do: :inet.setopts(socket_v6, active: :once)
+
+      %{inet: ip4, inet6: ip6} = Acceptor.primary_ips()
+
+      Logger.info(
+        "[dht] socket family=inet port=#{port} bind=#{if ip4, do: Acceptor.format_ip(ip4), else: "any"} want=#{inspect(dht_want())}"
+      )
+
+      if socket_v6 && ip6 do
+        Logger.info("[dht] socket family=inet6 port=#{port} bind=#{Acceptor.format_ip(ip6)} v6only=true")
+      end
+
+      Logger.info(
+        "[dht] listening port=#{port} ipv4=#{if ip4, do: Acceptor.format_ip(ip4), else: "none"} ipv6=#{if ip6, do: Acceptor.format_ip(ip6), else: "none"} routing_v4=#{RoutingTable.node_count(tables.v4)} routing_v6=#{RoutingTable.node_count(tables.v6)}"
+      )
 
       {:ok,
        %__MODULE__{
-         socket: socket,
+         socket_v4: socket_v4,
+         socket_v6: socket_v6,
          node_id: node_id,
          port: port,
-         routing_table: table,
+         routing_tables: tables,
          tokens: tokens
        }}
     else
@@ -183,12 +209,25 @@ defmodule DHT do
   end
 
   @impl true
+  def terminate(_reason, %__MODULE__{routing_tables: tables}) when is_map(tables) do
+    # Persist on clean shutdown so a quit-then-relaunch keeps the routing table.
+    RoutingStore.save(tables)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
+  @impl true
   def handle_call(:port, _from, %__MODULE__{port: port} = state), do: {:reply, port, state}
 
-  def handle_call(:udp_socket, _from, %__MODULE__{socket: socket} = state),
-    do: {:reply, socket, state}
+  def handle_call({:udp_socket, family}, _from, state),
+    do: {:reply, select_socket(state, family), state}
 
-  def handle_call({:send_udp, ip, port, data}, _from, %__MODULE__{socket: socket} = state) do
+  def handle_call(:udp_socket, from, state),
+    do: handle_call({:udp_socket, :inet}, from, state)
+
+  def handle_call({:send_udp, ip, port, data}, _from, state) do
+    socket = socket_for_dest(state, ip)
     {:reply, :gen_udp.send(socket, ip, port, data), state}
   end
 
@@ -199,12 +238,19 @@ defmodule DHT do
 
   @impl true
   def handle_cast({:announce, hash, port}, state) do
-    {:noreply, start_announce_lookup(state, hash, port)}
+    # Peer discovery casts this on every tracker/DHT round; BEP 5 wants one
+    # announce per ~15 min. A live reannounce timer or in-flight announce
+    # lookup means we are already covered — treat the cast as "ensure announced".
+    if announce_pending?(state, hash) do
+      {:noreply, state}
+    else
+      {:noreply, start_announce_lookup(state, hash, port)}
+    end
   end
 
   def handle_cast({:add_node, contact}, state) do
-    table = RoutingTable.insert(state.routing_table, contact)
-    {:noreply, ping_node(%{state | routing_table: table}, contact)}
+    tables = RoutingTables.insert(state.routing_tables, contact)
+    {:noreply, ping_node(%{state | routing_tables: tables}, contact)}
   end
 
   def handle_cast({:seed_node, ip, port}, state) do
@@ -228,15 +274,30 @@ defmodule DHT do
     {:noreply, refresh_stale_buckets(state)}
   end
 
-  def handle_info({:udp, socket, ip, port, packet}, %__MODULE__{socket: socket} = state) do
+  def handle_info(:persist_routing, state) do
+    schedule_persist(@persist_ms)
+    RoutingStore.save(state.routing_tables)
+    {:noreply, state}
+  end
+
+  # With trap_exit on, a linked UDP socket dying arrives here (the parent
+  # supervisor's shutdown exit is handled by gen_server → terminate/2, not this).
+  # Abnormal socket death should still restart us (re-opening sockets), like
+  # before; terminate/2 persists on the way out.
+  def handle_info({:EXIT, _from, :normal}, state), do: {:noreply, state}
+  def handle_info({:EXIT, _from, reason}, state), do: {:stop, reason, state}
+
+  def handle_info({:udp, socket, ip, port, packet}, state)
+      when socket == state.socket_v4 or socket == state.socket_v6 do
     :inet.setopts(socket, active: :once)
-    {:noreply, handle_packet(state, ip, port, packet)}
+    {:noreply, handle_packet(state, socket, ip, port, packet)}
   end
 
   def handle_info({:udp, _socket, _ip, _port, _packet}, state), do: {:noreply, state}
 
-  def handle_info({:udp_error, socket, reason}, %__MODULE__{socket: socket} = state) do
-    Logger.warning("DHT UDP error: #{inspect(reason)}")
+  def handle_info({:udp_error, socket, reason}, state)
+      when socket == state.socket_v4 or socket == state.socket_v6 do
+    Logger.warning("DHT UDP error family=#{socket_family(state, socket)} reason=#{inspect(reason)}")
     {:noreply, state}
   end
 
@@ -256,7 +317,7 @@ defmodule DHT do
         {:noreply, finish_announce(state, ref, lookup)}
 
       %{from: from, peers: peers} when peers != [] ->
-        GenServer.reply(from, {:ok, Enum.take(peers, Config.max_lookup_peers())})
+        GenServer.reply(from, {:ok, cap_lookup_peers(peers, Config.max_lookup_peers())})
         {:noreply, drop_lookup(state, ref)}
 
       %{from: from} ->
@@ -278,10 +339,10 @@ defmodule DHT do
 
   # --- UDP server (incoming KRPC) ---
 
-  @spec handle_packet(t(), :inet.ip_address(), :inet.port_number(), binary()) :: t()
-  defp handle_packet(state, ip, port, packet) do
+  @spec handle_packet(t(), port(), :inet.ip_address(), :inet.port_number(), binary()) :: t()
+  defp handle_packet(state, socket, ip, port, packet) do
     if UTP.Packet.utp_packet?(packet) do
-      :ok = UTP.Dispatcher.dispatch(state.socket, ip, port, packet)
+      :ok = UTP.Dispatcher.dispatch(socket, ip, port, packet)
       state
     else
       handle_dht_packet(state, ip, port, packet)
@@ -303,28 +364,60 @@ defmodule DHT do
       {:error, _} ->
         state
     end
+  rescue
+    exception ->
+      # A single malformed packet must never take down the DHT server.
+      Logger.warning(
+        "[dht] packet_crash from=#{Acceptor.format_ip(ip)}:#{port} error=#{Exception.message(exception)}"
+      )
+
+      state
   end
 
   @spec handle_query(t(), :inet.ip_address(), :inet.port_number(), KRPC.query()) :: t()
   defp handle_query(state, ip, port, query) do
-    contact = %{id: query.node_id, ip: ip, port: port}
-    table = RoutingTable.insert(state.routing_table, contact, from_query: true)
-    state = %{state | routing_table: table}
+    if valid_query_args?(query) do
+      contact = %{id: query.node_id, ip: ip, port: port}
+      tables = RoutingTables.insert(state.routing_tables, contact, from_query: true)
+      state = %{state | routing_tables: tables}
 
-    case query.method do
-      :ping ->
-        reply_ping(state, ip, port, query.transaction_id)
+      case query.method do
+        :ping ->
+          reply_ping(state, ip, port, query.transaction_id)
 
-      :find_node ->
-        reply_find_node(state, ip, port, query)
+        :find_node ->
+          reply_find_node(state, ip, port, query)
 
-      :get_peers ->
-        reply_get_peers(state, ip, port, query)
+        :get_peers ->
+          reply_get_peers(state, ip, port, query)
 
-      :announce_peer ->
-        handle_announce_peer(state, ip, port, query)
+        :announce_peer ->
+          handle_announce_peer(state, ip, port, query)
+      end
+    else
+      # BEP 5: queries with missing/invalid arguments get a 203 protocol error.
+      send_error(state, ip, port, query.transaction_id, 203, "Protocol Error")
+      state
     end
   end
+
+  @spec valid_query_args?(KRPC.query()) :: boolean()
+  defp valid_query_args?(%{method: :ping}), do: true
+
+  defp valid_query_args?(%{method: :find_node} = q),
+    do: node_id_arg?(Map.get(q, :target))
+
+  defp valid_query_args?(%{method: :get_peers} = q),
+    do: node_id_arg?(Map.get(q, :info_hash))
+
+  defp valid_query_args?(%{method: :announce_peer} = q) do
+    node_id_arg?(Map.get(q, :info_hash)) and is_binary(Map.get(q, :token)) and
+      (Map.get(q, :implied_port) == 1 or is_integer(Map.get(q, :port)))
+  end
+
+  defp valid_query_args?(_), do: false
+
+  defp node_id_arg?(value), do: is_binary(value) and byte_size(value) == 20
 
   @spec reply_ping(t(), :inet.ip_address(), :inet.port_number(), binary()) :: t()
   defp reply_ping(state, ip, port, tid) do
@@ -334,51 +427,62 @@ defmodule DHT do
   end
 
   @spec reply_find_node(t(), :inet.ip_address(), :inet.port_number(), KRPC.query()) :: t()
-  defp reply_find_node(state, ip, port, %{transaction_id: tid, target: target}) do
-    nodes =
-      state.routing_table
-      |> RoutingTable.closest(target, 8)
-      |> RoutingTable.to_contacts()
-      |> Compact.encode_nodes()
+  defp reply_find_node(state, ip, port, %{transaction_id: tid, target: target} = query) do
+    want = Map.get(query, :want)
+    node_fields = reply_node_fields(state.routing_tables, target, want)
 
-    response = %{
-      transaction_id: tid,
-      node_id: state.node_id,
-      nodes: nodes,
-      version: @version
-    }
+    response =
+      Map.merge(
+        %{
+          transaction_id: tid,
+          node_id: state.node_id,
+          version: @version
+        },
+        node_fields
+      )
 
     send_response(state, ip, port, response)
     state
   end
 
   @spec reply_get_peers(t(), :inet.ip_address(), :inet.port_number(), KRPC.query()) :: t()
-  defp reply_get_peers(state, ip, port, %{transaction_id: tid, info_hash: hash}) do
+  defp reply_get_peers(state, ip, port, %{transaction_id: tid, info_hash: hash} = query) do
     token = Token.issue(state.tokens, ip)
     peers = PeerStore.get(state.peer_store, hash)
+    want = Map.get(query, :want)
 
     response =
       if peers == [] do
-        nodes =
-          state.routing_table
-          |> RoutingTable.closest(hash, 8)
-          |> RoutingTable.to_contacts()
-          |> Compact.encode_nodes()
+        node_fields = reply_node_fields(state.routing_tables, hash, want)
 
-        %{
-          transaction_id: tid,
-          node_id: state.node_id,
-          nodes: nodes,
-          token: token,
-          version: @version
-        }
+        Map.merge(
+          %{
+            transaction_id: tid,
+            node_id: state.node_id,
+            token: token,
+            version: @version
+          },
+          node_fields
+        )
       else
         values =
           peers
           |> Enum.map(fn %Peer{ip: peer_ip, port: peer_port} ->
-            case Compact.encode_peer(peer_ip, peer_port) do
-              blob when is_binary(blob) -> blob
-              _ -> nil
+            case peer_ip do
+              {a, b, c, d} ->
+                case Compact.encode_peer({a, b, c, d}, peer_port) do
+                  blob when is_binary(blob) -> blob
+                  _ -> nil
+                end
+
+              {s1, s2, s3, s4, s5, s6, s7, s8} ->
+                case Compact.encode_ipv6_peer({s1, s2, s3, s4, s5, s6, s7, s8}, peer_port) do
+                  blob when is_binary(blob) -> blob
+                  _ -> nil
+                end
+
+              _ ->
+                nil
             end
           end)
           |> Enum.reject(&is_nil/1)
@@ -444,14 +548,22 @@ defmodule DHT do
 
         contact = %{id: response.node_id, ip: ip, port: port}
 
-        table =
-          state.routing_table
-          |> RoutingTable.insert(contact)
-          |> RoutingTable.mark_good(response.node_id, from_query: true)
+        tables =
+          state.routing_tables
+          |> RoutingTables.insert(contact)
+          |> RoutingTables.mark_good(response.node_id, from_query: true)
 
-        state = %{state | routing_table: table, pending: pending_map}
+        state = %{state | routing_tables: tables, pending: pending_map}
         peers = KRPC.response_peers(response)
         nodes = KRPC.response_nodes(response)
+
+        if peers != [] do
+          v6 = Enum.count(peers, &(tuple_size(&1.ip) == 8))
+
+          if v6 > 0 do
+            Logger.debug("[dht] get_peers ipv6_peers=#{v6} total=#{length(peers)}")
+          end
+        end
 
         state =
           if response.token do
@@ -483,8 +595,9 @@ defmodule DHT do
         {:error, :too_many_pending, new_state}
 
       {:ok, new_state} ->
+        socket = socket_for_dest(new_state, node.ip)
         packet = KRPC.encode_query(query)
-        _ = :gen_udp.send(new_state.socket, node.ip, node.port, packet)
+        _ = :gen_udp.send(socket, node.ip, node.port, packet)
         {:ok, tid, new_state}
     end
   end
@@ -502,14 +615,20 @@ defmodule DHT do
       version: @version
     }
 
-  defp build_query(:get_peers, tid, node_id, args),
-    do: %{
+  defp build_query(:get_peers, tid, node_id, args) do
+    query = %{
       method: :get_peers,
       transaction_id: tid,
       node_id: node_id,
       info_hash: Keyword.fetch!(args, :info_hash),
       version: @version
     }
+
+    case Keyword.get(args, :want) do
+      want when is_list(want) and want != [] -> Map.put(query, :want, want)
+      _ -> query
+    end
+  end
 
   defp build_query(:announce_peer, tid, node_id, args),
     do: %{
@@ -539,16 +658,31 @@ defmodule DHT do
   defp bootstrap(state) do
     state =
       Enum.reduce(Config.bootstrap_routers(), state, fn {host, port}, acc ->
-        case :inet.gethostbyname(String.to_charlist(host)) do
-          {:ok, {:hostent, _name, _aliases, _type, _len, ips}} ->
-            bootstrap_ip(acc, hd(ips), port)
-
-          _ ->
-            acc
-        end
+        Enum.reduce(resolve_bootstrap_hosts(host), acc, fn ip, inner ->
+          bootstrap_ip(inner, ip, port)
+        end)
       end)
 
     %{state | bootstrapped?: true}
+  end
+
+  @spec resolve_bootstrap_hosts(String.t()) :: [:inet.ip_address()]
+  defp resolve_bootstrap_hosts(host) do
+    char_host = String.to_charlist(host)
+
+    v4 =
+      case :inet.getaddrs(char_host, :inet) do
+        {:ok, ips} -> ips
+        {:error, _} -> []
+      end
+
+    v6 =
+      case :inet.getaddrs(char_host, :inet6) do
+        {:ok, ips} -> ips
+        {:error, _} -> []
+      end
+
+    v4 ++ v6
   end
 
   @spec bootstrap_ip(t(), :inet.ip_address(), :inet.port_number()) :: t()
@@ -564,12 +698,12 @@ defmodule DHT do
 
   @spec refresh_stale_buckets(t()) :: t()
   defp refresh_stale_buckets(state) do
-    state.routing_table
-    |> RoutingTable.stale_buckets()
+    state.routing_tables
+    |> RoutingTables.stale_buckets()
     |> Enum.reduce(state, fn bucket, acc ->
       target = RoutingTable.random_id_in_bucket(bucket)
 
-      case RoutingTable.closest(acc.routing_table, target, 1) do
+      case RoutingTables.closest(acc.routing_tables, target, 1) do
         [node | _] ->
           case send_query(acc, node, :find_node, target: target) do
             {:ok, _tid, new_state} -> new_state
@@ -586,7 +720,7 @@ defmodule DHT do
 
   @spec start_lookup(t(), Torrent.hash(), reference(), GenServer.from(), pos_integer()) :: t()
   defp start_lookup(state, hash, ref, from, timeout) do
-    shortlist = Lookup.initial_shortlist(state.routing_table, hash)
+    shortlist = Lookup.initial_shortlist(state.routing_tables, hash)
 
     lookup = %{
       ref: ref,
@@ -609,7 +743,7 @@ defmodule DHT do
   defp start_announce_lookup(state, hash, bt_port) do
     state = cancel_announce_timer(state, hash)
     ref = make_ref()
-    shortlist = Lookup.initial_shortlist(state.routing_table, hash)
+    shortlist = Lookup.initial_shortlist(state.routing_tables, hash)
     timeout = Config.lookup_timeout_ms()
 
     lookup = %{
@@ -634,8 +768,8 @@ defmodule DHT do
   @spec bootstrap_delay_ms(t()) :: non_neg_integer()
   defp bootstrap_delay_ms(%__MODULE__{bootstrapped?: false}), do: @bootstrap_after_ms + 500
 
-  defp bootstrap_delay_ms(%__MODULE__{routing_table: table}) do
-    if RoutingTable.node_count(table) >= @min_routing_nodes,
+  defp bootstrap_delay_ms(%__MODULE__{routing_tables: tables}) do
+    if RoutingTables.node_count(tables) >= @min_routing_nodes,
       do: 0,
       else: @bootstrap_lookup_wait_ms
   end
@@ -658,7 +792,7 @@ defmodule DHT do
         state
 
       %{hash: hash, shortlist: shortlist, peers: peers} = lookup ->
-        shortlist = Lookup.refresh_shortlist(state.routing_table, hash, shortlist)
+        shortlist = Lookup.refresh_shortlist(state.routing_tables, hash, shortlist)
 
         cond do
           peers != [] and Lookup.converged?(shortlist) ->
@@ -691,14 +825,14 @@ defmodule DHT do
   @spec maybe_wait_for_bootstrap(t(), reference(), map(), Torrent.hash()) :: t()
   defp maybe_wait_for_bootstrap(state, ref, lookup, hash) do
     waits = Map.get(lookup, :bootstrap_waits, 0)
-    node_count = RoutingTable.node_count(state.routing_table)
+    node_count = RoutingTables.node_count(state.routing_tables)
 
     if waits < @bootstrap_lookup_waits and node_count < 8 do
       state = if state.bootstrapped?, do: state, else: bootstrap(state)
 
       updated =
         lookup
-        |> Map.put(:shortlist, Lookup.initial_shortlist(state.routing_table, hash))
+        |> Map.put(:shortlist, Lookup.initial_shortlist(state.routing_tables, hash))
         |> Map.put(:bootstrap_waits, waits + 1)
 
       state
@@ -736,20 +870,20 @@ defmodule DHT do
   defp query_nodes_for_lookup(state, ref, hash, shortlist, query_ids, lookup, peers) do
     {state, queried} =
       Enum.reduce(query_ids, {state, lookup.queried}, fn id, {acc, q} ->
-        case find_entry(acc.routing_table, id) do
+        case RoutingTables.find_entry(acc.routing_tables, id) do
           nil ->
             {acc, MapSet.put(q, id)}
 
           entry ->
             pending = %{type: :lookup, lookup_ref: ref, node_id: id}
 
-            case send_query(acc, entry, :get_peers, [info_hash: hash], pending: pending) do
+            case send_query(acc, entry, :get_peers, get_peers_args(hash), pending: pending) do
               {:ok, _tid, new_state} ->
                 {new_state, MapSet.put(q, id)}
 
               {:error, _, new_state} ->
-                table = RoutingTable.mark_bad(new_state.routing_table, id)
-                {Map.put(new_state, :routing_table, table), MapSet.put(q, id)}
+                tables = RoutingTables.mark_bad(new_state.routing_tables, id)
+                {Map.put(new_state, :routing_tables, tables), MapSet.put(q, id)}
             end
         end
       end)
@@ -766,7 +900,7 @@ defmodule DHT do
   @spec finish_lookup(t(), reference(), [Peer.t()]) :: t()
   defp finish_lookup(state, ref, peers) do
     lookup = Map.get(state.lookups, ref)
-    peers = peers |> Enum.take(Config.max_lookup_peers())
+    peers = cap_lookup_peers(peers, Config.max_lookup_peers())
     GenServer.reply(lookup.from, {:ok, peers})
     drop_lookup(state, ref)
   end
@@ -793,7 +927,7 @@ defmodule DHT do
         peers =
           (lookup.peers ++ peers)
           |> Enum.uniq_by(&{&1.ip, &1.port})
-          |> Enum.take(Config.max_lookup_peers())
+          |> cap_lookup_peers(Config.max_lookup_peers())
 
         updated = lookup |> Map.put(:shortlist, merged) |> Map.put(:peers, peers)
         state = %{state | lookups: Map.put(state.lookups, ref, updated)}
@@ -803,6 +937,23 @@ defmodule DHT do
   end
 
   defp dispatch_pending(state, _pending, _peers, _nodes), do: state
+
+  @doc false
+  @spec cap_lookup_peers([Peer.t()], pos_integer()) :: [Peer.t()]
+  def cap_lookup_peers(peers, max) when is_list(peers) and is_integer(max) and max > 0 do
+    {v6, v4} = Enum.split_with(peers, fn %Peer{ip: ip} -> tuple_size(ip) == 8 end)
+
+    cond do
+      v6 == [] ->
+        Enum.take(peers, max)
+
+      true ->
+        v6_slots = min(div(max, 2), length(v6))
+        v6_take = Enum.take(v6, v6_slots)
+        v4_take = Enum.take(v4, max - length(v6_take))
+        v6_take ++ v4_take
+    end
+  end
 
   # --- announce_peer client (BEP 5 § announce after get_peers tokens) ---
 
@@ -817,7 +968,9 @@ defmodule DHT do
     )
 
     state =
-      Enum.reduce(lookup.announce_nodes, state, fn {{ip, port}, token}, acc ->
+      lookup.announce_nodes
+      |> Enum.sort_by(fn {{ip, _port}, _token} -> contact_family_rank(ip) end)
+      |> Enum.reduce(state, fn {{ip, port}, token}, acc ->
         node = %{id: <<0::160>>, ip: ip, port: port}
 
         case send_query(acc, node, :announce_peer,
@@ -839,6 +992,14 @@ defmodule DHT do
   defp schedule_reannounce(state, hash, port) do
     timer = Process.send_after(self(), {:reannounce, hash, port}, @reannounce_interval_ms)
     %{state | announce_timers: Map.put(state.announce_timers, hash, timer)}
+  end
+
+  @spec announce_pending?(t(), Torrent.hash()) :: boolean()
+  defp announce_pending?(state, hash) do
+    Map.has_key?(state.announce_timers, hash) or
+      Enum.any?(state.lookups, fn {_ref, lookup} ->
+        Map.get(lookup, :purpose) == :announce and lookup.hash == hash
+      end)
   end
 
   @spec cancel_announce_timer(t(), Torrent.hash()) :: t()
@@ -890,21 +1051,23 @@ defmodule DHT do
     nodes
     |> Enum.uniq_by(& &1.id)
     |> Enum.reduce(state, fn node, acc ->
-      %{acc | routing_table: RoutingTable.insert(acc.routing_table, node)}
+      %{acc | routing_tables: RoutingTables.insert(acc.routing_tables, node)}
     end)
   end
 
   @spec send_response(t(), :inet.ip_address(), :inet.port_number(), KRPC.response()) :: :ok
   defp send_response(state, ip, port, response) do
-    _ = :gen_udp.send(state.socket, ip, port, KRPC.encode_response(response))
+    socket = socket_for_dest(state, ip)
+    _ = :gen_udp.send(socket, ip, port, KRPC.encode_response(response))
     :ok
   end
 
   @spec send_error(t(), :inet.ip_address(), :inet.port_number(), binary(), 201..204, String.t()) ::
           :ok
   defp send_error(state, ip, port, tid, code, message) do
+    socket = socket_for_dest(state, ip)
     packet = KRPC.encode_error(%{transaction_id: tid, code: code, message: message})
-    _ = :gen_udp.send(state.socket, ip, port, packet)
+    _ = :gen_udp.send(socket, ip, port, packet)
     :ok
   end
 
@@ -935,11 +1098,11 @@ defmodule DHT do
   defp maybe_mark_bad(state, %{type: :lookup}), do: state
 
   defp maybe_mark_bad(state, %{node: %{id: id}}) when byte_size(id) == 20 do
-    %{state | routing_table: RoutingTable.mark_bad(state.routing_table, id)}
+    %{state | routing_tables: RoutingTables.mark_bad(state.routing_tables, id)}
   end
 
   defp maybe_mark_bad(state, %{node_id: id}) when byte_size(id) == 20 do
-    %{state | routing_table: RoutingTable.mark_bad(state.routing_table, id)}
+    %{state | routing_tables: RoutingTables.mark_bad(state.routing_tables, id)}
   end
 
   defp maybe_mark_bad(state, _), do: state
@@ -952,44 +1115,159 @@ defmodule DHT do
 
   defp maybe_lookup_step(state, _), do: state
 
-  @spec find_entry(RoutingTable.t(), RoutingTable.node_id()) :: RoutingTable.entry() | nil
-  defp find_entry(table, id) do
-    table
-    |> RoutingTable.closest(id, 160)
-    |> Enum.find(&(&1.id == id))
-  end
-
   @spec transaction_id() :: binary()
   defp transaction_id, do: :crypto.strong_rand_bytes(2)
 
-  @spec open_socket() :: {:ok, port(), :inet.port_number()} | {:error, term()}
-  defp open_socket do
+  @spec open_sockets() :: {:ok, port(), port() | nil, :inet.port_number()} | {:error, term()}
+  defp open_sockets do
     case Config.port() do
+      nil -> open_sockets_auto_port()
+      port -> open_sockets_on_port(port)
+    end
+  end
+
+  @spec open_sockets_auto_port() :: {:ok, port(), port() | nil, :inet.port_number()} | {:error, term()}
+  defp open_sockets_auto_port do
+    Enum.find_value(Acceptor.port_range(), {:error, :no_udp_port}, fn number ->
+      case open_sockets_on_port(number) do
+        {:ok, _, _, _} = ok -> ok
+        {:error, _} -> nil
+      end
+    end)
+  end
+
+  @spec open_sockets_on_port(:inet.port_number()) ::
+          {:ok, port(), port() | nil, :inet.port_number()} | {:error, term()}
+  defp open_sockets_on_port(port) do
+    with {:ok, socket_v4} <- open_v4_socket(port),
+         {:ok, socket_v6} <- open_v6_socket(port) do
+      {:ok, socket_v4, socket_v6, port}
+    end
+  end
+
+  @spec open_v4_socket(:inet.port_number()) :: {:ok, port()} | {:error, term()}
+  defp open_v4_socket(port) do
+    opts = [:binary, :inet, active: false, reuseaddr: true, reuseport: true]
+    :gen_udp.open(port, opts)
+  end
+
+  @spec open_v6_socket(:inet.port_number()) :: {:ok, port() | nil} | {:error, term()}
+  defp open_v6_socket(port) do
+    case Acceptor.primary_ips().inet6 do
       nil ->
-        case Acceptor.open_udp() do
+        {:ok, nil}
+
+      v6_addr ->
+        opts = [
+          :binary,
+          :inet6,
+          {:ipv6_v6only, true},
+          {:ip, v6_addr},
+          active: false,
+          reuseaddr: true,
+          reuseport: true
+        ]
+
+        case :gen_udp.open(port, opts) do
           {:ok, socket} ->
-            {:ok, port} = :inet.port(socket)
-            {:ok, socket, port}
+            {:ok, socket}
 
-          :error ->
-            {:error, :no_udp_port}
-        end
+          {:error, reason} ->
+            Logger.warning(
+              "[dht] could not bind dedicated IPv6 socket port=#{port} addr=#{Acceptor.format_ip(v6_addr)} reason=#{inspect(reason)}"
+            )
 
-      port ->
-        case :gen_udp.open(port, Acceptor.socket_options(:inet)) do
-          {:ok, socket} -> {:ok, socket, port}
-          {:error, _} = error -> error
+            {:ok, nil}
         end
     end
   end
 
-  @spec bind_socket(port()) :: :ok | {:error, term()}
+  @spec bind_socket(port() | nil) :: :ok | {:error, term()}
+  defp bind_socket(nil), do: :ok
+
   defp bind_socket(socket) do
     case :gen_udp.controlling_process(socket, self()) do
       :ok -> :ok
       {:error, _} = error -> error
     end
   end
+
+  @spec maybe_bind_socket(port() | nil) :: :ok | {:error, term()}
+  defp maybe_bind_socket(nil), do: :ok
+  defp maybe_bind_socket(socket), do: bind_socket(socket)
+
+  @spec select_socket(t(), :inet | :inet6) :: port() | nil
+  defp select_socket(%__MODULE__{socket_v6: socket_v6}, :inet6) when is_port(socket_v6), do: socket_v6
+  defp select_socket(%__MODULE__{socket_v4: socket_v4}, :inet6), do: socket_v4
+  defp select_socket(%__MODULE__{socket_v4: socket_v4}, :inet), do: socket_v4
+  defp select_socket(%__MODULE__{socket_v4: socket_v4}, _), do: socket_v4
+
+  @spec socket_for_dest(t(), :inet.ip_address()) :: port()
+  defp socket_for_dest(state, ip) do
+    family = if tuple_size(ip) == 8, do: :inet6, else: :inet
+    select_socket(state, family)
+  end
+
+  @spec socket_family(t(), port()) :: :inet | :inet6
+  defp socket_family(%__MODULE__{socket_v6: socket_v6}, socket) when socket == socket_v6, do: :inet6
+  defp socket_family(%__MODULE__{}, _socket), do: :inet
+
+  @spec get_peers_args(Torrent.hash()) :: keyword()
+  defp get_peers_args(hash) do
+    case dht_want() do
+      nil -> [info_hash: hash]
+      want -> [info_hash: hash, want: want]
+    end
+  end
+
+  @spec dht_want() :: [String.t()] | nil
+  defp dht_want do
+    %{inet6: ip6} = Acceptor.primary_ips()
+
+    cond do
+      ip6 != nil -> ["n4", "n6"]
+      true -> nil
+    end
+  end
+
+  @spec reply_node_fields(RoutingTables.t(), RoutingTable.node_id(), [String.t()] | nil) ::
+          %{optional(:nodes) => binary(), optional(:nodes6) => binary()}
+  defp reply_node_fields(tables, target, want) do
+    %{}
+    |> maybe_reply_nodes(:v4, tables, target, want)
+    |> maybe_reply_nodes(:v6, tables, target, want)
+  end
+
+  @spec maybe_reply_nodes(map(), RoutingTables.family(), RoutingTables.t(), RoutingTable.node_id(), [String.t()] | nil) ::
+          map()
+  defp maybe_reply_nodes(acc, family, tables, target, want) do
+    if include_want_family?(want, family) do
+      key = if family == :v4, do: :nodes, else: :nodes6
+      encode = if family == :v4, do: &Compact.encode_nodes/1, else: &Compact.encode_nodes6/1
+
+      contacts =
+        tables
+        |> RoutingTables.closest_family(family, target, 8)
+        |> RoutingTables.to_contacts()
+
+      encoded = encode.(contacts)
+
+      if encoded == <<>>, do: acc, else: Map.put(acc, key, encoded)
+    else
+      acc
+    end
+  end
+
+  @spec include_want_family?([String.t()] | nil, RoutingTables.family()) :: boolean()
+  defp include_want_family?(nil, _family), do: true
+  defp include_want_family?([], _family), do: true
+
+  defp include_want_family?(want, :v4) when is_list(want), do: "n4" in want
+  defp include_want_family?(want, :v6) when is_list(want), do: "n6" in want
+
+  @spec contact_family_rank(:inet.ip_address()) :: 0 | 1
+  defp contact_family_rank(ip) when tuple_size(ip) == 8, do: 0
+  defp contact_family_rank(_ip), do: 1
 
   @spec schedule_bootstrap() :: reference()
   defp schedule_bootstrap, do: Process.send_after(self(), :bootstrap, @bootstrap_after_ms)
@@ -999,6 +1277,9 @@ defmodule DHT do
 
   @spec schedule_refresh(non_neg_integer()) :: reference()
   defp schedule_refresh(ms), do: Process.send_after(self(), :refresh_buckets, ms)
+
+  @spec schedule_persist(non_neg_integer()) :: reference()
+  defp schedule_persist(ms), do: Process.send_after(self(), :persist_routing, ms)
 
   @spec trim_map(map(), pos_integer()) :: map()
   defp trim_map(map, max) when map_size(map) <= max, do: map
