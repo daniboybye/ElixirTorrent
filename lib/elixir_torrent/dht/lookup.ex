@@ -16,7 +16,13 @@ defmodule DHT.Lookup do
   @type shortlist_entry :: %{id: RoutingTable.node_id(), queried?: boolean()}
 
   @doc "Build an initial shortlist of up to `@k` closest nodes from the routing table."
-  @spec initial_shortlist(RoutingTable.t(), target()) :: [shortlist_entry()]
+  @spec initial_shortlist(RoutingTable.t() | DHT.RoutingTables.t(), target()) :: [shortlist_entry()]
+  def initial_shortlist(%{v4: _, v6: _} = tables, target) do
+    tables
+    |> DHT.RoutingTables.closest(target, @k)
+    |> Enum.map(&%{id: &1.id, queried?: false})
+  end
+
   def initial_shortlist(table, target) do
     table
     |> RoutingTable.closest(target, @k)
@@ -69,7 +75,18 @@ defmodule DHT.Lookup do
   Preserves `queried?` flags for ids already in the shortlist so iterative search
   does not re-query nodes after bootstrap fills the table (BEP 5 § peer lookup).
   """
-  @spec refresh_shortlist(RoutingTable.t(), target(), [shortlist_entry()]) :: [shortlist_entry()]
+  @spec refresh_shortlist(RoutingTable.t() | DHT.RoutingTables.t(), target(), [shortlist_entry()]) ::
+          [shortlist_entry()]
+  def refresh_shortlist(%{v4: _, v6: _} = tables, target, shortlist) do
+    queried_flags = Map.new(shortlist, &{&1.id, &1.queried?})
+
+    tables
+    |> initial_shortlist(target)
+    |> Enum.map(fn entry ->
+      %{entry | queried?: Map.get(queried_flags, entry.id, false)}
+    end)
+  end
+
   def refresh_shortlist(table, target, shortlist) do
     queried_flags = Map.new(shortlist, &{&1.id, &1.queried?})
 

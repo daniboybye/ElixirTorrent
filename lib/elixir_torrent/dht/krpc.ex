@@ -8,6 +8,9 @@ defmodule DHT.KRPC do
 
   alias DHT.Compact
 
+  @peer_info_size 6
+  @ipv6_peer_info_size 18
+
   @type transaction_id :: binary()
   @type node_id :: <<_::160>>
   @type info_hash :: Torrent.hash()
@@ -22,13 +25,15 @@ defmodule DHT.KRPC do
           optional(:port) => :inet.port_number(),
           optional(:token) => binary(),
           optional(:implied_port) => 0 | 1,
-          optional(:version) => binary()
+          optional(:version) => binary(),
+          optional(:want) => [String.t()]
         }
 
   @type response :: %{
           required(:transaction_id) => transaction_id(),
           required(:node_id) => node_id(),
           optional(:nodes) => binary(),
+          optional(:nodes6) => binary(),
           optional(:values) => [binary()],
           optional(:token) => binary(),
           optional(:version) => binary()
@@ -66,10 +71,11 @@ defmodule DHT.KRPC do
   def encode_response(%{transaction_id: tid, node_id: node_id} = response) do
     body =
       response
-      |> Map.take([:nodes, :values, :token])
+      |> Map.take([:nodes, :nodes6, :values, :token])
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new(fn
         {:nodes, nodes} -> {"nodes", nodes}
+        {:nodes6, nodes6} -> {"nodes6", nodes6}
         {:values, values} -> {"values", values}
         {:token, token} -> {"token", token}
       end)
@@ -136,6 +142,7 @@ defmodule DHT.KRPC do
         transaction_id: tid,
         node_id: node_id,
         nodes: body["nodes"],
+        nodes6: body["nodes6"],
         values: body["values"],
         token: body["token"],
         version: map["v"]
@@ -168,6 +175,11 @@ defmodule DHT.KRPC do
   @spec query_args(query(), method()) :: map()
   defp query_args(%{target: target}, :find_node) when is_binary(target), do: %{"target" => target}
 
+  defp query_args(%{info_hash: hash, want: want}, :get_peers)
+       when byte_size(hash) == 20 and is_list(want) and want != [] do
+    %{"info_hash" => hash, "want" => want}
+  end
+
   defp query_args(%{info_hash: hash}, :get_peers) when byte_size(hash) == 20,
     do: %{"info_hash" => hash}
 
@@ -186,6 +198,11 @@ defmodule DHT.KRPC do
   @spec merge_query_args(query(), method(), map()) :: query()
   defp merge_query_args(query, :find_node, %{"target" => target}) when is_binary(target) do
     Map.put(query, :target, target)
+  end
+
+  defp merge_query_args(query, :get_peers, %{"info_hash" => hash, "want" => want})
+       when byte_size(hash) == 20 and is_list(want) do
+    query |> Map.put(:info_hash, hash) |> Map.put(:want, want)
   end
 
   defp merge_query_args(query, :get_peers, %{"info_hash" => hash}) when byte_size(hash) == 20 do
@@ -245,25 +262,54 @@ defmodule DHT.KRPC do
 
   @doc "Decode compact nodes from a get_peers / find_node response body."
   @spec response_nodes(response()) :: [Compact.contact()]
-  def response_nodes(%{nodes: nodes}) when is_binary(nodes) do
-    nodes |> Compact.decode_nodes() |> Enum.uniq_by(& &1.id)
-  end
+  def response_nodes(response) when is_map(response) do
+    v4 =
+      case Map.get(response, :nodes) do
+        nodes when is_binary(nodes) -> Compact.decode_nodes(nodes)
+        _ -> []
+      end
 
-  def response_nodes(_), do: []
+    v6 =
+      case Map.get(response, :nodes6) do
+        nodes when is_binary(nodes) -> Compact.decode_nodes6(nodes)
+        _ -> []
+      end
+
+    (v4 ++ v6) |> Enum.uniq_by(& &1.id)
+  end
 
   @doc "Decode compact peers from a get_peers response body."
   @spec response_peers(response()) :: [Peer.t()]
-  def response_peers(%{values: values}) when is_list(values) do
+  def response_peers(%{values: values}) do
     values
-    |> Enum.flat_map(fn
-      peer when is_binary(peer) and byte_size(peer) == 6 ->
-        Compact.decode_peers(peer)
-
-      _ ->
-        []
-    end)
+    |> normalize_values()
+    |> Enum.flat_map(&decode_value_peers/1)
     |> Enum.uniq_by(&{&1.ip, &1.port})
   end
 
   def response_peers(_), do: []
+
+  @spec normalize_values(term()) :: [binary()]
+  defp normalize_values(values) when is_binary(values), do: [values]
+  defp normalize_values(values) when is_list(values), do: Enum.filter(values, &is_binary/1)
+  defp normalize_values(_), do: []
+
+  @spec decode_value_peers(binary()) :: [Peer.t()]
+  defp decode_value_peers(blob) when is_binary(blob) do
+    size = byte_size(blob)
+
+    cond do
+      size == 0 ->
+        []
+
+      rem(size, @ipv6_peer_info_size) == 0 ->
+        Compact.decode_ipv6_peers(blob)
+
+      rem(size, @peer_info_size) == 0 ->
+        Compact.decode_peers(blob)
+
+      true ->
+        []
+    end
+  end
 end
