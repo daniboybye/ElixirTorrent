@@ -116,7 +116,9 @@ defmodule Peer.Sender do
   @doc false
   @spec socket_recv(Peer.key(), non_neg_integer(), timeout()) :: {:ok, binary()} | {:error, term()}
   def socket_recv(key, len, timeout) do
-    GenServer.call(via(key), {:socket_recv, len, timeout}, timeout + 5_000)
+    timeout = if is_integer(timeout), do: max(timeout, 0), else: timeout
+    call_timeout = if is_integer(timeout), do: timeout + 5_000, else: timeout
+    GenServer.call(via(key), {:socket_recv, len, timeout}, call_timeout)
   catch
     :exit, _ -> {:error, :noproc}
   end
@@ -238,6 +240,16 @@ defmodule Peer.Sender do
 
   def handle_info(:drain_buffered, state), do: drain_inbound(state)
 
+  # MSE: active-mode data is tagged with the inner (raw) socket and is ciphertext;
+  # decrypt with the inbound RC4 stream before buffering.
+  def handle_info({:tcp, raw, data}, %__MODULE__{socket: {:mse, raw, ciphers}} = state) do
+    drain_inbound(%{state | buffer: state.buffer <> Peer.MSE.crypt(ciphers.recv, data)})
+  end
+
+  def handle_info({:utp, raw, data}, %__MODULE__{socket: {:mse, raw, ciphers}} = state) do
+    drain_inbound(%{state | buffer: state.buffer <> Peer.MSE.crypt(ciphers.recv, data)})
+  end
+
   def handle_info({:tcp, socket, data}, %{socket: socket} = state) do
     drain_inbound(%{state | buffer: state.buffer <> data})
   end
@@ -274,6 +286,13 @@ defmodule Peer.Sender do
 
   # Peer data can arrive after the last passive recv (LTEP) but before active:true.
   @spec absorb_kernel_buffer(Peer.Transport.socket(), binary()) :: binary()
+  defp absorb_kernel_buffer({:mse, inner, ciphers}, buffer) do
+    case absorb_kernel_buffer(inner, <<>>) do
+      <<>> -> buffer
+      pending -> buffer <> Peer.MSE.crypt(ciphers.recv, pending)
+    end
+  end
+
   defp absorb_kernel_buffer(socket, buffer) when is_port(socket) do
     absorb_kernel_buffer_loop(socket, buffer)
   end

@@ -31,7 +31,12 @@ defmodule Peer.MSE.Handshake do
   @max_scan @max_pad + 40
   @vc MSE.vc()
 
-  @type result :: %{recv: MSE.cipher(), send: MSE.cipher(), leftover: binary()}
+  # `respond` always returns rc4 ciphers. `initiate` tags the negotiated `:mode`
+  # and, when the peer selected plaintext, omits the ciphers (stream is cleartext).
+  @type result ::
+          %{mode: :rc4, recv: MSE.cipher(), send: MSE.cipher(), leftover: binary()}
+          | %{mode: :plaintext, leftover: binary()}
+          | %{recv: MSE.cipher(), send: MSE.cipher(), leftover: binary()}
 
   # ---- Initiator (dialer, "A") ------------------------------------------------
 
@@ -55,9 +60,35 @@ defmodule Peer.MSE.Handshake do
       req = build_initiator_request(s, info_hash, send_cipher, ia)
 
       with :ok <- Transport.send(socket, req),
-           {:ok, _crypto_select, leftover} <- read_select(socket, recv_cipher, timeout) do
-        {:ok, %{recv: recv_cipher, send: send_cipher, leftover: leftover}}
+           {:ok, crypto_select, leftover} <- read_select(socket, recv_cipher, timeout) do
+        interpret_select(crypto_select, recv_cipher, send_cipher, leftover)
       end
+    end
+  end
+
+  # B picks ONE method from the `crypto_provide` we offered (plaintext|rc4). We
+  # MUST honour its choice for the post-handshake data stream:
+  #
+  #   * rc4       -> keep the two RC4 ciphers; the rest of the stream is encrypted.
+  #   * plaintext -> the data stream is cleartext, so the caller uses the RAW
+  #                  socket. (Our IA was still sent RC4-encrypted in step 3 — that
+  #                  is correct; crypto_select only governs the stream AFTER the
+  #                  handshake.) Ignoring this was the outbound `:invalid_handshake`
+  #                  bug: we kept RC4-decrypting a peer that had gone plaintext.
+  #
+  # Anything else is a protocol violation (B must echo one of our offered bits).
+  @spec interpret_select(non_neg_integer(), MSE.cipher(), MSE.cipher(), binary()) ::
+          {:ok, result()} | {:error, term()}
+  defp interpret_select(select, recv_cipher, send_cipher, leftover) do
+    cond do
+      select == MSE.crypto_rc4() ->
+        {:ok, %{mode: :rc4, recv: recv_cipher, send: send_cipher, leftover: leftover}}
+
+      select == MSE.crypto_plaintext() ->
+        {:ok, %{mode: :plaintext, leftover: leftover}}
+
+      true ->
+        {:error, {:mse_bad_select, select}}
     end
   end
 

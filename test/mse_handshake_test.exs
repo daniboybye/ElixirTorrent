@@ -49,6 +49,9 @@ defmodule Peer.MSE.HandshakeTest do
     assert {:ok, cres} = client_result
     assert {:ok, sres} = server_result
 
+    # The responder always selects RC4, so the initiator negotiates encrypted mode.
+    assert cres.mode == :rc4
+
     # The responder recovered the initiator's initial payload (its BT handshake).
     assert sres.leftover == ia
 

@@ -1,9 +1,25 @@
 defmodule Peer.Transport do
   @moduledoc """
   Thin transport abstraction over TCP (`:gen_tcp`) and uTP (`UTP.Socket`).
+
+  An `{:mse, inner, %{recv, send}}` socket layers MSE/PE RC4 encryption over any
+  inner transport: every `send/2` is encrypted with the outbound cipher and
+  every `recv/3` decrypted with the inbound one. The ciphers are stateful RC4
+  streams, so a single owner must drive the socket in order (which the peer
+  process does). Active-mode data still arrives tagged with the *inner* socket;
+  `raw/1` exposes it so the receiver can match and decrypt those messages.
   """
 
-  @type socket :: :gen_tcp.socket() | UTP.Connection.socket_ref()
+  # Our send/2 wraps the inner transport recursively; shadow Kernel.send cleanly.
+  import Kernel, except: [send: 2]
+
+  alias Peer.MSE
+
+  @type mse_ciphers :: %{recv: MSE.cipher(), send: MSE.cipher()}
+  @type socket ::
+          :gen_tcp.socket()
+          | UTP.Connection.socket_ref()
+          | {:mse, :gen_tcp.socket() | UTP.Connection.socket_ref(), mse_ciphers()}
 
   @spec connect(:inet.ip_address(), :inet.port_number(), keyword(), timeout()) ::
           {:ok, socket()} | {:error, term()}
@@ -17,15 +33,41 @@ defmodule Peer.Transport do
     end
   end
 
+  @doc "Wrap an inner socket with MSE RC4 ciphers negotiated by the handshake."
+  @spec wrap(term(), mse_ciphers()) :: socket()
+  def wrap(inner, %{recv: _, send: _} = ciphers), do: {:mse, inner, ciphers}
+
+  @doc "The underlying transport socket (the inner one for MSE, else the socket)."
+  @spec raw(socket()) :: term()
+  def raw({:mse, inner, _}), do: inner
+  def raw(socket), do: socket
+
+  @doc "Whether the socket carries an MSE encryption layer."
+  @spec mse?(term()) :: boolean()
+  def mse?({:mse, _, _}), do: true
+  def mse?(_), do: false
+
   @spec send(socket(), iodata()) :: :ok | {:error, term()}
+  def send({:mse, inner, ciphers}, data), do: send(inner, MSE.crypt(ciphers.send, data))
   def send({:utp, _} = socket, data), do: UTP.Socket.send(socket, data)
   def send(socket, data) when is_port(socket), do: :gen_tcp.send(socket, data)
 
   @spec recv(term(), non_neg_integer(), timeout()) :: {:ok, binary()} | {:error, term()}
+  def recv({:mse, inner, ciphers}, len, timeout) do
+    with {:ok, enc} <- recv(inner, len, timeout) do
+      {:ok, MSE.crypt(ciphers.recv, enc)}
+    end
+  end
+
   def recv({:utp, _} = socket, len, timeout), do: UTP.Socket.recv(socket, len, timeout)
   def recv(socket, len, timeout) when is_port(socket), do: :gen_tcp.recv(socket, len, timeout)
 
+  @spec decrypt_inbound(socket(), binary()) :: binary()
+  def decrypt_inbound({:mse, _inner, ciphers}, data), do: MSE.crypt(ciphers.recv, data)
+  def decrypt_inbound(_socket, data), do: data
+
   @spec close(socket()) :: :ok
+  def close({:mse, inner, _}), do: close(inner)
   def close({:utp, _} = socket), do: UTP.Socket.close(socket)
 
   def close(socket) when is_port(socket) do
@@ -35,19 +77,23 @@ defmodule Peer.Transport do
   end
 
   @spec controlling_process(socket(), pid()) :: :ok | {:error, term()}
+  def controlling_process({:mse, inner, _}, pid), do: controlling_process(inner, pid)
   def controlling_process({:utp, _} = socket, pid), do: UTP.Socket.controlling_process(socket, pid)
 
   def controlling_process(socket, pid) when is_port(socket),
     do: :gen_tcp.controlling_process(socket, pid)
 
   @spec setopts(socket(), keyword()) :: :ok | {:error, term()}
+  def setopts({:mse, inner, _}, opts), do: setopts(inner, opts)
   def setopts({:utp, _} = socket, opts), do: UTP.Socket.setopts(socket, opts)
   def setopts(socket, opts) when is_port(socket), do: :inet.setopts(socket, opts)
 
   @spec peername(socket()) :: {:ok, {:inet.ip_address(), :inet.port_number()}} | {:error, term()}
+  def peername({:mse, inner, _}), do: peername(inner)
   def peername({:utp, _} = socket), do: UTP.Socket.peername(socket)
   def peername(socket) when is_port(socket), do: :inet.peername(socket)
 
   @spec utp?(socket() | term()) :: boolean()
+  def utp?({:mse, inner, _}), do: UTP.Socket.utp?(inner)
   def utp?(socket), do: UTP.Socket.utp?(socket)
 end
