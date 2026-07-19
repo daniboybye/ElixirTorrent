@@ -126,7 +126,7 @@ defmodule UTP.Dispatcher do
   @impl true
   def handle_call({:start_connect, ip, port, opts}, _from, _state) do
     reply =
-      with {:ok, udp_socket} <- udp_socket(),
+      with {:ok, udp_socket} <- udp_socket(ip),
            {:ok, socket_ref} <- UTP.Connection.start_client(udp_socket, ip, port, opts) do
         {:ok, socket_ref}
       end
@@ -189,8 +189,10 @@ defmodule UTP.Dispatcher do
 
   defp conn_key(ip, port, conn_id), do: {ip, port, conn_id}
 
-  defp udp_socket do
-    case DHT.udp_socket() do
+  defp udp_socket(ip) do
+    family = if tuple_size(ip) == 8, do: :inet6, else: :inet
+
+    case DHT.udp_socket(family) do
       nil -> {:error, :no_udp_socket}
       socket -> {:ok, socket}
     end

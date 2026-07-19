@@ -17,6 +17,10 @@ defmodule UTP.Connection do
   @min_packet_payload 150
   @recv_buffer_max 65_536
   @tick_ms 50
+  # After shutdown we linger briefly so any final ACK for a FIN we sent can
+  # arrive before we exit, then stop the process. Without this, shutdown/2 only
+  # flipped a flag and left the GenServer running forever, ticking every 50ms.
+  @linger_ms 1_000
 
   defstruct [
     :udp_socket,
@@ -26,6 +30,7 @@ defmodule UTP.Connection do
     :send_conn_id,
     :socket_ref,
     :owner,
+    :owner_ref,
     role: :client,
     phase: :syn_sent,
     seq_nr: 1,
@@ -42,7 +47,6 @@ defmodule UTP.Connection do
     timeout_count: 0,
     peer_wnd: 65_536,
     cur_window: 0,
-    recv_used: 0,
     reply_micro: 0,
     led: nil,
     active: false,
@@ -125,7 +129,8 @@ defmodule UTP.Connection do
       last_recv_ms: now_ms()
     }
 
-    case GenServer.start_link(__MODULE__, state, []) do
+    # start/3 (not start_link) — a send failure must not crash UTP.Dispatcher.
+    case GenServer.start(__MODULE__, state, []) do
       {:ok, pid} ->
         ref = {:utp, pid}
         :ok = UTP.Dispatcher.register_pair(recv_conn_id, send_conn_id, ip, port, pid)
@@ -188,7 +193,9 @@ defmodule UTP.Connection do
   end
 
   def handle_call({:controlling_process, owner}, _from, state) when is_pid(owner) do
-    {:reply, :ok, %{state | owner: owner}}
+    if state.owner_ref, do: Process.demonitor(state.owner_ref, [:flush])
+    ref = Process.monitor(owner)
+    {:reply, :ok, %{state | owner: owner, owner_ref: ref}}
   end
 
   def handle_call(:await_connected, _from, %{phase: :connected} = state) do
@@ -210,7 +217,7 @@ defmodule UTP.Connection do
       {chunk, rest} = take_bytes(state.recv_buffer, len)
       {:reply, {:ok, chunk}, %{state | recv_buffer: rest}}
     else
-      timer_ref = Process.send_after(self(), {:recv_timeout, from}, timeout)
+      timer_ref = Process.send_after(self(), {:recv_timeout, from}, max(timeout, 0))
       {:noreply, %{state | recv_waiters: state.recv_waiters ++ [{from, len, timer_ref}]}}
     end
   end
@@ -234,6 +241,16 @@ defmodule UTP.Connection do
     {:noreply, %{state | recv_waiters: waiters}}
   end
 
+  # Owner (Peer.Sender) died — tear down instead of ticking forever.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{owner_ref: ref} = state) do
+    {:noreply, shutdown(state, :owner_down)}
+  end
+
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
+
+  # Fired @linger_ms after shutdown/2 — actually stop the GenServer.
+  def handle_info(:stop_zombie, state), do: {:stop, :normal, state}
+
   defp handle_inbound(state, header, payload, extensions) do
     unless valid_conn_id?(state, header) do
       state
@@ -254,15 +271,17 @@ defmodule UTP.Connection do
           state
         end
 
-      {state, prev_ack} = {state, state.last_peer_ack}
-      state = process_acks(state, header, extensions)
-
+      # Update dup_acks BEFORE process_acks so the 3rd dup (dup_acks:=3) can
+      # trigger fast-retransmit inside process_acks. The old order incremented
+      # after, meaning we needed 4 duplicates to fire.
       state =
-        if header.ack_nr == prev_ack do
+        if header.ack_nr == state.last_peer_ack do
           %{state | dup_acks: state.dup_acks + 1}
         else
           %{state | dup_acks: 0, last_peer_ack: header.ack_nr}
         end
+
+      state = process_acks(state, header, extensions)
 
       case header.type do
         @st_reset -> shutdown(state, :reset)
@@ -367,7 +386,7 @@ defmodule UTP.Connection do
         )
 
         recv_oob = Map.put(state.recv_oob, seq, {payload, type})
-        %{state | recv_oob: recv_oob, recv_used: state.recv_used + byte_size(payload)}
+        %{state | recv_oob: recv_oob}
 
       true ->
         Logger.debug(
@@ -401,18 +420,35 @@ defmodule UTP.Connection do
   defp deliver_payload(state, payload) when payload == <<>>, do: state
 
   defp deliver_payload(state, payload) do
-    state = %{state | recv_buffer: state.recv_buffer <> payload, recv_used: state.recv_used + byte_size(payload)}
-
-    Logger.info(
-      "[utp] recv_data peer=#{inspect({state.peer_ip, state.peer_port})} bytes=#{byte_size(payload)} buffer=#{byte_size(state.recv_buffer)} waiters=#{recv_byte_waiters(state)}"
-    )
-
     if state.active and is_pid(state.owner) do
+      # Active mode: hand the bytes to the owner immediately. They never enter
+      # our recv_buffer, so nothing to add to the flow-control accounting.
       send(state.owner, {:utp, state.socket_ref, payload})
       state
     else
+      state = %{state | recv_buffer: state.recv_buffer <> payload}
+
+      Logger.debug(
+        "[utp] recv_data peer=#{inspect({state.peer_ip, state.peer_port})} bytes=#{byte_size(payload)} buffer=#{byte_size(state.recv_buffer)} waiters=#{recv_byte_waiters(state)}"
+      )
+
       satisfy_recv_waiters(state)
     end
+  end
+
+  # Bytes currently held in RAM for this connection: delivered-but-unread in
+  # the recv_buffer + out-of-order packets parked in recv_oob. This is the
+  # true memory pressure and drives our advertised wnd_size in transmit/5.
+  # Deriving it every send-time avoids the previous running-counter bug where
+  # OOB payloads were charged twice and reader consumption never decremented.
+  defp recv_bytes_held(state) do
+    byte_size(state.recv_buffer) + oob_bytes(state)
+  end
+
+  defp oob_bytes(state) do
+    Enum.reduce(state.recv_oob, 0, fn {_seq, {payload, _type}}, acc ->
+      acc + byte_size(payload)
+    end)
   end
 
   defp recv_byte_waiters(state) do
@@ -424,7 +460,7 @@ defmodule UTP.Connection do
   end
 
   defp process_acks(state, header, extensions) do
-    state = ack_in_flight_through(state, header.ack_nr)
+    state = cumulative_ack(state, header.ack_nr)
 
     state =
       header
@@ -438,37 +474,24 @@ defmodule UTP.Connection do
     end
   end
 
-  defp ack_in_flight_through(%{unacked: unacked} = state, _peer_ack_nr)
+  # Cumulative ACK. header.ack_nr acknowledges every previously-sent seq up to
+  # and including that value (mod 2^16). We iterate the unacked map directly
+  # instead of assuming a contiguous range: selective_ack punches holes, so the
+  # old base = seq_nr - in_flight arithmetic dropped legitimate cumulative acks
+  # (e.g. peer_ack_nr < seq_nr - in_flight after we selective-acked a middle
+  # seq made every subsequent cumulative ack a no-op).
+  defp cumulative_ack(%{unacked: unacked} = state, _peer_ack_nr)
        when map_size(unacked) == 0,
        do: state
 
-  defp ack_in_flight_through(state, peer_ack_nr) do
-    in_flight = map_size(state.unacked)
-    base = Packet.seq_add(state.seq_nr, -1 - in_flight)
-    acks = rem(peer_ack_nr - base + 65536, 65536)
-
-    if acks > in_flight do
-      state
-    else
-      ack_oldest_n(state, acks)
-    end
-  end
-
-  defp ack_oldest_n(state, 0), do: state
-
-  defp ack_oldest_n(state, n) when n > 0 do
-    seq = oldest_unacked_seq(state)
-    state = ack_exact_seq(state, seq)
-    ack_oldest_n(state, n - 1)
-  end
-
-  defp oldest_unacked_seq(%{seq_nr: seq_nr, unacked: unacked}) do
-    in_flight = map_size(unacked)
-    first = Packet.seq_add(seq_nr, -in_flight)
-
-    unacked
+  defp cumulative_ack(state, peer_ack_nr) do
+    state.unacked
     |> Map.keys()
-    |> Enum.min_by(fn seq -> rem(seq - first + 65536, 65536) end)
+    |> Enum.filter(fn seq ->
+      diff = Packet.seq_diff(peer_ack_nr, seq)
+      diff >= 0
+    end)
+    |> Enum.reduce(state, fn seq, acc -> ack_exact_seq(acc, seq) end)
   end
 
   defp ack_exact_seq(state, seq) do
@@ -477,7 +500,7 @@ defmodule UTP.Connection do
         state
 
       {{_payload, sent_ms, tx_count, bytes}, unacked} ->
-        Logger.info(
+        Logger.debug(
           "[utp] acked seq=#{seq} peer=#{inspect({state.peer_ip, state.peer_port})} bytes=#{bytes} pending=#{map_size(unacked)}"
         )
 
@@ -497,10 +520,12 @@ defmodule UTP.Connection do
 
   defp retransmit_loss(state, seq) do
     case Map.get(state.unacked, seq) do
-      {payload, _sent_ms, tx_count, bytes} ->
+      {payload, _sent_ms, _tx_count, _bytes} ->
         state = put_led(state, LEDBAT.on_loss(state.led))
-        entry = {payload, now_ms(), tx_count + 1, bytes}
-        state = %{state | unacked: Map.put(state.unacked, seq, entry)}
+        # transmit/5 preserves and increments tx_count when re-sending an
+        # already-unacked seq, so we no longer bump it manually here (the old
+        # +1 was overwritten by transmit's map put with tx_count=1 → give-up
+        # never fired).
         transmit(state, @st_data, payload, seq, false)
 
       nil ->
@@ -551,6 +576,8 @@ defmodule UTP.Connection do
 
   defp effective_packet_size(_), do: @max_packet_payload
 
+  defp transmit(%{closed: true} = state, _type, _payload, _seq, _increment?), do: state
+
   defp transmit(state, type, payload, seq, increment?) do
     increment? = increment? and type != @st_state
 
@@ -561,39 +588,58 @@ defmodule UTP.Connection do
       conn_id: packet_conn_id(state, type),
       timestamp: rem(:os.system_time(:microsecond), 0x1_0000_0000),
       timestamp_difference: state.reply_micro,
-      wnd_size: max(@recv_buffer_max - state.recv_used, 0),
+      wnd_size: max(@recv_buffer_max - recv_bytes_held(state), 0),
       seq_nr: seq,
       ack_nr: state.ack_nr
     }
 
     wire = Packet.encode(header, payload)
-    :ok = send_udp_direct(state.udp_socket, state.peer_ip, state.peer_port, wire)
 
-    if type == @st_data and byte_size(payload) > 0 do
-      Logger.info(
-        "[utp] sent_data peer=#{inspect({state.peer_ip, state.peer_port})} seq=#{seq} bytes=#{byte_size(payload)} ack=#{state.ack_nr}"
-      )
+    case send_udp_direct(state.udp_socket, state.peer_ip, state.peer_port, wire) do
+      :ok ->
+        if type == @st_data and byte_size(payload) > 0 do
+          Logger.debug(
+            "[utp] sent_data peer=#{inspect({state.peer_ip, state.peer_port})} seq=#{seq} bytes=#{byte_size(payload)} ack=#{state.ack_nr}"
+          )
+        end
+
+        bytes = byte_size(payload)
+
+        unacked =
+          if type in [@st_data, @st_fin] do
+            # Preserve the retransmit count across re-sends of the same seq so
+            # check_timeouts' give-up (tx_count >= 10) actually fires. The old
+            # code hard-coded tx_count=1 here, making retransmit_loss's manual
+            # bump dead and the give-up branch unreachable.
+            tx_count =
+              case Map.get(state.unacked, seq) do
+                {_, _, prev, _} -> prev + 1
+                nil -> 1
+              end
+
+            Map.put(state.unacked, seq, {payload, now_ms(), tx_count, bytes})
+          else
+            state.unacked
+          end
+
+        cur_window = if bytes > 0, do: state.cur_window + bytes, else: state.cur_window
+
+        seq_nr =
+          if increment? do
+            Packet.seq_add(seq, 1)
+          else
+            state.seq_nr
+          end
+
+        %{state | unacked: unacked, cur_window: cur_window, seq_nr: seq_nr, last_send_ms: now_ms()}
+
+      {:error, reason} ->
+        Logger.debug(
+          "[utp] send_failed peer=#{inspect({state.peer_ip, state.peer_port})} type=#{type} reason=#{inspect(reason)}"
+        )
+
+        shutdown(state, reason)
     end
-
-    bytes = byte_size(payload)
-
-    unacked =
-      if type in [@st_data, @st_fin] do
-        Map.put(state.unacked, seq, {payload, now_ms(), 1, bytes})
-      else
-        state.unacked
-      end
-
-    cur_window = if bytes > 0, do: state.cur_window + bytes, else: state.cur_window
-
-    seq_nr =
-      if increment? do
-        Packet.seq_add(seq, 1)
-      else
-        state.seq_nr
-      end
-
-    %{state | unacked: unacked, cur_window: cur_window, seq_nr: seq_nr, last_send_ms: now_ms()}
   end
 
   defp send_state_ack(state) do
@@ -610,31 +656,57 @@ defmodule UTP.Connection do
     |> Map.put(:fin_sent, true)
   end
 
+  defp check_timeouts(%{closed: true} = state), do: state
+
   defp check_timeouts(state) do
     now = now_ms()
 
-    Enum.reduce(state.unacked, state, fn {seq, {payload, sent_ms, tx_count, _bytes}}, acc ->
-      cond do
-        tx_count >= 10 ->
-          Logger.warning(
-            "[utp] give_up seq=#{seq} peer=#{inspect({acc.peer_ip, acc.peer_port})} tx=#{tx_count}"
-          )
+    # First scan (pure): what's timed out, and is anyone past give-up? This
+    # decouples the state-mutation from iteration so we back off exactly ONCE
+    # per timeout event (libutp semantics) instead of doubling timeout_ms per
+    # timed-out packet, and so a shutdown mid-iteration doesn't leave the
+    # reduce still trying to retransmit later entries.
+    {give_up, timed_out} =
+      Enum.reduce(state.unacked, {nil, []}, fn
+        {seq, {_payload, _sent_ms, tx_count, _bytes}}, {nil, list} when tx_count >= 10 ->
+          {seq, list}
 
-          shutdown(acc, :too_many_retransmits)
+        {seq, {_payload, sent_ms, _tx_count, _bytes}}, {gu, list} ->
+          if now - sent_ms >= state.timeout_ms do
+            {gu, [seq | list]}
+          else
+            {gu, list}
+          end
+      end)
 
-        now - sent_ms >= acc.timeout_ms ->
-          acc =
-            acc
-            |> Map.put(:timeout_ms, min(acc.timeout_ms * 2, 60_000))
-            |> Map.put(:timeout_count, acc.timeout_count + 1)
-            |> put_led(LEDBAT.on_timeout(acc.led))
+    cond do
+      give_up != nil ->
+        Logger.warning(
+          "[utp] give_up seq=#{give_up} peer=#{inspect({state.peer_ip, state.peer_port})}"
+        )
 
-          transmit(acc, @st_data, payload, seq, false)
+        shutdown(state, :too_many_retransmits)
 
-        true ->
-          acc
-      end
-    end)
+      timed_out == [] ->
+        state
+
+      true ->
+        state =
+          state
+          |> Map.put(:timeout_ms, min(state.timeout_ms * 2, 60_000))
+          |> Map.put(:timeout_count, state.timeout_count + 1)
+          |> put_led(LEDBAT.on_timeout(state.led))
+
+        Enum.reduce(timed_out, state, fn seq, acc ->
+          case Map.get(acc.unacked, seq) do
+            nil ->
+              acc
+
+            {payload, _sent_ms, _tx_count, _bytes} ->
+              transmit(acc, @st_data, payload, seq, false)
+          end
+        end)
+    end
   end
 
   defp notify_connected_waiters(state) do
@@ -687,7 +759,11 @@ defmodule UTP.Connection do
         "[utp] closed peer=#{inspect({state.peer_ip, state.peer_port})} reason=#{inspect(reason)}"
       )
 
-      %{state | closed: true, phase: :closed}
+      # Stop ticking now, and schedule an actual GenServer stop after linger.
+      if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
+      Process.send_after(self(), :stop_zombie, @linger_ms)
+
+      %{state | closed: true, phase: :closed, timer_ref: nil}
     end
   end
 
@@ -715,6 +791,8 @@ defmodule UTP.Connection do
     {chunk, rest}
   end
 
+  defp schedule_tick(%{closed: true} = state), do: state
+
   defp schedule_tick(%{timer_ref: ref} = state) do
     if ref, do: Process.cancel_timer(ref)
     %{state | timer_ref: Process.send_after(self(), :tick, @tick_ms)}
@@ -732,7 +810,17 @@ defmodule UTP.Connection do
         :ok
 
       {:error, :disabled} when is_port(udp_socket) ->
-        :gen_udp.send(udp_socket, ip, port, data)
+        try do
+          case :gen_udp.send(udp_socket, ip, port, data) do
+            :ok -> :ok
+            {:error, _} = error -> error
+          end
+        rescue
+          ArgumentError -> {:error, :badarg}
+        catch
+          :error, :badarg -> {:error, :badarg}
+          :exit, :badarg -> {:error, :badarg}
+        end
 
       other ->
         other
