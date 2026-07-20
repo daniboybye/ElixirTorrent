@@ -268,6 +268,25 @@ defmodule Acceptor.Connection.Handshakes do
     end
   end
 
+
+  @doc false
+  @spec dial_utp_and_handshake(Peer.t(), Torrent.hash()) :: :ok | {:error, term()}
+  def dial_utp_and_handshake(%Peer{ip: ip, port: port} = peer, hash) do
+    started = System.monotonic_time(:millisecond)
+
+    if already_connected?(peer, hash) do
+      {:error, :already_connected}
+    else
+      # Hole-punched uTP connections stay plaintext — the punch is the hard part.
+      with {:ok, socket} <- safe_utp_connect(ip, port),
+           :ok <- handshake_peer(peer, hash, socket, :utp, started) do
+        :ok
+      end
+    end
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
   @spec connectable_peer?(Peer.t()) :: boolean()
   def connectable_peer?(%Peer{ip: ip, port: port}) do
     valid_ip?(ip) and routable_ip?(ip) and is_integer(port) and port > 0 and port <= 65535

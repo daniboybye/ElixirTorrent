@@ -4,6 +4,7 @@ defmodule ElixirTorrentApplication do
   def start(_type, _args) do
     [
       {Registry, keys: :unique, name: Registry},
+      Peer.Holepunch.Store,
       Torrents,
       PeerDiscovery,
       Acceptor,

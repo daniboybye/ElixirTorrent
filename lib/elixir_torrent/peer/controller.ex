@@ -106,6 +106,13 @@ defmodule Peer.Controller do
     :exit, _ -> :error
   end
 
+  @spec ltep_session(Peer.key()) :: {:ok, Peer.LTEP.Session.t()} | :error
+  def ltep_session(key) do
+    GenServer.call(via(key), :ltep_session)
+  catch
+    :exit, _ -> :error
+  end
+
   @doc false
   @spec metadata_capable(Peer.key()) :: {:ok, map()} | :error
   def metadata_capable(key) do
@@ -299,6 +306,12 @@ defmodule Peer.Controller do
   end
 
   def handle_call(:metadata_session, _, state), do: {:reply, :error, state}
+
+  def handle_call(:ltep_session, _, %State{ltep: ltep} = state) when not is_nil(ltep) do
+    {:reply, {:ok, ltep}, state}
+  end
+
+  def handle_call(:ltep_session, _, state), do: {:reply, :error, state}
 
   def handle_call(:metadata_capable, _, %State{ltep: ltep} = state) when not is_nil(ltep) do
     ut = Magnet.UtMetadata.extension_name()

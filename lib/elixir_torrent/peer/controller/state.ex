@@ -169,6 +169,9 @@ defmodule Peer.Controller.State do
         :ok = Peer.UtPex.ingest(state.hash, payload)
         state
 
+      ut_holepunch?(state, extended_id) ->
+        Peer.UtHolepunch.handle_inbound(state, payload)
+
       true ->
         state
     end
@@ -184,6 +187,12 @@ defmodule Peer.Controller.State do
   @spec ut_pex?(t(), non_neg_integer()) :: boolean()
   defp ut_pex?(state, extended_id) do
     Peer.LTEP.Session.local_extension_id(state.ltep, Peer.UtPex.extension_name()) == extended_id
+  end
+
+  @spec ut_holepunch?(t(), non_neg_integer()) :: boolean()
+  defp ut_holepunch?(state, extended_id) do
+    Peer.LTEP.Session.local_extension_id(state.ltep, Peer.UtHolepunch.extension_name()) ==
+      extended_id
   end
 
   @spec send_pex(t(), binary()) :: t()
