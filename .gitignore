@@ -22,6 +22,11 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 bittorrent-*.tar
 
-# Local session state and downloaded data (engine default layout).
+# Local session state, DHT node id persistence, and downloaded data (engine default layout).
 /.elixir_torrent/
+
+# Claude Code session files (plans, agent defs, logs — local to each developer).
+CLAUDE.md
+.claude/
+.cursor/
 
