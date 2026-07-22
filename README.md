@@ -1,25 +1,17 @@
 # ElixirTorrent
 
+[![GitHub release](https://img.shields.io/badge/release-0.5.0-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent/releases/tag/0.5.0) [![Hex.pm](https://img.shields.io/hexpm/v/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent/0.5.0) [![HexDocs](https://img.shields.io/badge/hexdocs-0.5.0-8E44AD)](https://hexdocs.pm/elixir_torrent/0.5.0) [![Changelog](https://img.shields.io/badge/changelog-blue)](https://hexdocs.pm/elixir_torrent/changelog.html) [![GitHub](https://img.shields.io/badge/source-ElixirTorrent-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent) [![Web UI](https://img.shields.io/badge/Web%20UI-ElixirTorrentWebUI-181717?logo=github)](https://github.com/daniboybye/ElixirTorrentWebUI) [![macOS](https://img.shields.io/badge/macOS-releases-silver?logo=apple)](https://github.com/daniboybye/ElixirTorrentWebUI/releases)
+
 BitTorrent client **engine** for Elixir/OTP — embed downloads in your own app with a small, stable public API.
 
 ## About
 
 This is a **fully functional BitTorrent client** that actually downloads torrents — not a stub or protocol sketch. It started as a course project for **Functional Programming with Elixir** at **Sofia University**. After the course ended, development continued in spare time until it was ready to publish on Hex.
 
-| | |
-| --- | --- |
-| **Hex** | [`hex.pm/packages/elixir_torrent`](https://hex.pm/packages/elixir_torrent) |
-| **Docs** | [`hexdocs.pm/elixir_torrent`](https://hexdocs.pm/elixir_torrent) |
-| **Changelog** | [`hexdocs.pm/elixir_torrent/changelog.html`](https://hexdocs.pm/elixir_torrent/changelog.html) |
-| **Source** | [`github.com/daniboybye/ElixirTorrent`](https://github.com/daniboybye/ElixirTorrent) |
-
 ## ElixirTorrent Web (desktop app)
 
 Need a full client, not just the library? **[ElixirTorrent Web](https://github.com/daniboybye/ElixirTorrentWebUI)**
 is the official Phoenix LiveView UI for this engine, shipped as a native macOS desktop app.
-
-- **Repository:** [github.com/daniboybye/ElixirTorrentWebUI](https://github.com/daniboybye/ElixirTorrentWebUI)
-- **Download (macOS Apple Silicon):** [Releases](https://github.com/daniboybye/ElixirTorrentWebUI/releases)
 
 The sections below cover the **engine API** for Elixir developers embedding BitTorrent in their own apps.
 
