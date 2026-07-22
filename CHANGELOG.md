@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.5.0 - 2026-07-22
+
+### Added
+
+- **BEP 9/10 (magnet + ut_metadata):** magnet URI parsing, `download_magnet/1`, LTEP extension protocol, metadata fetch/serve, magnet bootstrap and fetcher supervisors
+- **BEP 11 (ut_pex):** peer exchange encode/decode, ingest, and broadcast over LTEP
+- **BEP 32 (IPv6 DHT):** separate IPv4/IPv6 routing tables, compact node/peer codecs, dual-stack KRPC and lookup
+- **BEP 42:** secure DHT node ID generation from the local IPv4 address
+- **BEP 55 (ut_holepunch):** rendezvous/connect/forward hole-punch messages over LTEP; `Peer.Holepunch.Store` for punch state
+- **DHT (BEP 5):** routing-table persistence across restarts, dual-stack socket wiring, runtime node-id path fix
+- **NAT traversal:** NAT-PMP and UPnP IGD port-mapping clients, STUN mapping-behaviour detection, `NAT.PortMapper` orchestrator
+- **MSE/PE:** Message Stream Encryption handshake and RC4 transport layer over `Peer.Transport`
+- **uTP (BEP 29):** zombie-connection hardening and BEP 29 off-spec bug fixes
+- **Peer discovery/dial:** `Peer.Endpoints`, sticky dial backoff with churn and hard-fail escalation, `Peer.DialStats` per address-family outcomes
+- **Acceptor:** global IPv4/IPv6 address helpers, `IpCache` periodic `getifaddrs` snapshot via `:persistent_term`, dual-stack listen logging; LTEP handshakes advertise listen port and global addresses
+- README: BEP 9, 10, 11, 32, 42, and 55 rows in Supported BEPs table; `download_magnet/1` in public API table
+
+### Changed
+
+- **Peer I/O:** MSE/PE encryption integrated into the peer transport and sender receive path
+- **Peer dial:** immediate-drop churn backoff, endpoint PID lookup via `Peer.Endpoints.get_pid/3`
+
+### Fixed
+
+- DHT node ID persistence file path resolved at runtime instead of compile time
+
+### Notes
+
+- **Started at runtime** (via `ElixirTorrentApplication`): TCP acceptor (with `IpCache`), `PeerDiscovery`, magnet fetcher/bootstrap, and `Peer.Holepunch.Store`
+- **Implemented and compiled, not started in supervision:** mainline DHT server, uTP dispatcher, `NAT.PortMapper`, `Peer.Endpoints`, `Peer.DialBackoff`, and `Peer.DialStats` — wiring deferred to a future release
+- Default peer acquisition remains **TCP + tracker** (plus magnet metadata bootstrap); DHT announce, uTP fallback dials, NAT mapping, and full hole-punch initiation require the dormant services above
+
+
 ## 0.4.0 - 2026-07-08
 
 ### Added

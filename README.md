@@ -19,7 +19,7 @@ Need a full client, not just the library? **[ElixirTorrent Web](https://github.c
 is the official Phoenix LiveView UI for this engine, shipped as a native macOS desktop app.
 
 - **Repository:** [github.com/daniboybye/ElixirTorrentWebUI](https://github.com/daniboybye/ElixirTorrentWebUI)
-- **Download (macOS Apple Silicon):** [Release 0.1.0](https://github.com/daniboybye/ElixirTorrentWebUI/releases/tag/0.1.0)
+- **Download (macOS Apple Silicon):** [Releases](https://github.com/daniboybye/ElixirTorrentWebUI/releases)
 
 The sections below cover the **engine API** for Elixir developers embedding BitTorrent in their own apps.
 
@@ -30,7 +30,7 @@ Add `elixir_torrent` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:elixir_torrent, "~> 0.3.0"}
+    {:elixir_torrent, "~> 0.5.0"}
   ]
 end
 ```
@@ -119,6 +119,7 @@ Full reference: [`hexdocs.pm/elixir_torrent/ElixirTorrent.html`](https://hexdocs
 | Function | Description |
 | --- | --- |
 | `download/2` | Start a download from a local `.torrent` path; optional `download_dir:` |
+| `download_magnet/1` | Start a download from a magnet URI (BEP 9 metadata exchange) |
 | `stats/2` | Runtime stats map (`:name`, `:speed`, `:downloaded`, `:bytes_size`, …) |
 | `list/0` | Info hashes for all active torrent processes |
 | `list_files/1` | Per-file paths and download progress |
@@ -147,6 +148,7 @@ Full reference: [`hexdocs.pm/elixir_torrent/ElixirTorrent.html`](https://hexdocs
 | [BEP 24](https://www.bittorrent.org/beps/bep_0024.html) | Tracker returns external IP |
 | [BEP 29](https://www.bittorrent.org/beps/bep_0029.html) | Micro Transport Protocol (uTP) |
 | [BEP 31](https://www.bittorrent.org/beps/bep_0031.html) | Failure retry extension |
+| [BEP 32](https://www.bittorrent.org/beps/bep_0032.html) | IPv6 extension for DHT |
 | [BEP 42](https://www.bittorrent.org/beps/bep_0042.html) | DHT IP address and port encoding |
 | [BEP 55](https://www.bittorrent.org/beps/bep_0055.html) | Hole punching (ut_holepunch) |
 
