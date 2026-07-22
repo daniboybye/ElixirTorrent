@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1 - 2026-07-22
+
+### Changed
+
+- README: single-row shields.io badges at the top for release, Hex, HexDocs, changelog, source, Web UI, and macOS downloads
+
 ## 0.5.0 - 2026-07-22
 
 ### Added

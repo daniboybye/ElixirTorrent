@@ -1,6 +1,6 @@
 # ElixirTorrent
 
-[![GitHub release](https://img.shields.io/badge/release-0.5.0-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent/releases/tag/0.5.0) [![Hex.pm](https://img.shields.io/hexpm/v/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent/0.5.0) [![HexDocs](https://img.shields.io/badge/hexdocs-0.5.0-8E44AD)](https://hexdocs.pm/elixir_torrent/0.5.0) [![Changelog](https://img.shields.io/badge/changelog-blue)](https://hexdocs.pm/elixir_torrent/changelog.html) [![GitHub](https://img.shields.io/badge/source-ElixirTorrent-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent) [![Web UI](https://img.shields.io/badge/Web%20UI-ElixirTorrentWebUI-181717?logo=github)](https://github.com/daniboybye/ElixirTorrentWebUI) [![macOS](https://img.shields.io/badge/macOS-releases-silver?logo=apple)](https://github.com/daniboybye/ElixirTorrentWebUI/releases)
+[![GitHub release](https://img.shields.io/badge/release-0.5.1-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent/releases/tag/0.5.1) [![Hex.pm](https://img.shields.io/hexpm/v/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent/0.5.1) [![HexDocs](https://img.shields.io/badge/hexdocs-0.5.1-8E44AD)](https://hexdocs.pm/elixir_torrent/0.5.1) [![Changelog](https://img.shields.io/badge/changelog-blue)](https://hexdocs.pm/elixir_torrent/changelog.html) [![GitHub](https://img.shields.io/badge/source-ElixirTorrent-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent) [![Web UI](https://img.shields.io/badge/Web%20UI-ElixirTorrentWebUI-181717?logo=github)](https://github.com/daniboybye/ElixirTorrentWebUI) [![macOS](https://img.shields.io/badge/macOS-releases-silver?logo=apple)](https://github.com/daniboybye/ElixirTorrentWebUI/releases)
 
 BitTorrent client **engine** for Elixir/OTP — embed downloads in your own app with a small, stable public API.
 
@@ -22,7 +22,7 @@ Add `elixir_torrent` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:elixir_torrent, "~> 0.5.0"}
+    {:elixir_torrent, "~> 0.5.1"}
   ]
 end
 ```
