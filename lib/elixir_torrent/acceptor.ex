@@ -1,5 +1,5 @@
 defmodule Acceptor do
-  alias __MODULE__.{BlackList, Connection}
+  alias __MODULE__.{BlackList, Connection, IpCache}
   alias Connection.{Handshakes, Handler}
   require Logger
 
@@ -7,7 +7,9 @@ defmodule Acceptor do
     %{
       id: __MODULE__,
       type: :supervisor,
-      start: {Supervisor, :start_link, [[BlackList, Connection], [strategy: :one_for_one]]}
+      start:
+        {Supervisor, :start_link,
+         [[IpCache, BlackList, Connection], [strategy: :one_for_one]]}
     }
   end
 
@@ -48,6 +50,12 @@ defmodule Acceptor do
   def socket_options(:inet), do: socket_options() ++ [:inet]
   def socket_options(:inet6), do: socket_options() ++ [:inet6, ipv6_v6only: false]
 
+  # ipv6_v6only is a bind/listen-time option; gen_tcp.connect rejects it with
+  # badarg, which silently killed every outbound IPv6 TCP dial.
+  @spec connect_options(:inet | :inet6) :: list()
+  def connect_options(:inet), do: socket_options() ++ [:inet]
+  def connect_options(:inet6), do: socket_options() ++ [:inet6]
+
   @spec tcp_socket_options(:inet | :inet6) :: list()
   def tcp_socket_options(:inet), do: tcp_socket_options() ++ [:inet]
   def tcp_socket_options(:inet6), do: tcp_socket_options() ++ [:inet6, ipv6_v6only: false]
@@ -58,12 +66,16 @@ defmodule Acceptor do
   @spec open_udp() :: {:ok, port()} | :error
   def open_udp(), do: open_udp(:inet)
 
+  # Request sockets (UDP trackers) bind an OS-chosen ephemeral port. Binding
+  # into 6881..6889 attracts stray DHT/uTP traffic: some trackers hand out our
+  # source port instead of the announced port field (BEP 15), so peers end up
+  # dialing whatever short-lived socket sits there next.
   @spec open_udp(:inet | :inet6) :: {:ok, port()} | :error
   def open_udp(family) do
-    Enum.find_value(port_range(), :error, fn number ->
-      with {:error, _} <- :gen_udp.open(number, socket_options(family)),
-           do: nil
-    end)
+    case :gen_udp.open(0, socket_options(family)) do
+      {:ok, socket} -> {:ok, socket}
+      {:error, _} -> :error
+    end
   end
 
   @key :crypto.strong_rand_bytes(4)
@@ -81,6 +93,15 @@ defmodule Acceptor do
 
   @type ip_family :: :inet | :inet6
 
+  # Cached snapshot of getifaddrs-derived addresses. Written by IpCache every
+  # 30s; readers hit :persistent_term (~constant time), with a direct compute
+  # fallback for the pre-boot / test path where IpCache is not running.
+  @ip_cache_key {__MODULE__, :ip_cache}
+
+  @doc false
+  @spec ip_cache_key() :: term()
+  def ip_cache_key(), do: @ip_cache_key
+
   @spec primary_ips() :: %{inet: :inet.ip4_address() | nil, inet6: :inet.ip6_address() | nil}
   def primary_ips() do
     %{inet: v4, inet6: v6} = all_global_ips()
@@ -88,12 +109,17 @@ defmodule Acceptor do
   end
 
   @doc false
-  @spec all_global_ips() :: %{
-          inet: :inet.ip4_address() | nil,
-          inet6: :inet.ip6_address() | nil,
-          inet6_all: [:inet.ip6_address()]
-        }
+  @spec all_global_ips() :: %{inet: :inet.ip4_address() | nil, inet6: :inet.ip6_address() | nil, inet6_all: [:inet.ip6_address()]}
   def all_global_ips() do
+    case :persistent_term.get(@ip_cache_key, nil) do
+      nil -> compute_all_global_ips()
+      cached -> cached
+    end
+  end
+
+  @doc false
+  @spec compute_all_global_ips() :: %{inet: :inet.ip4_address() | nil, inet6: :inet.ip6_address() | nil, inet6_all: [:inet.ip6_address()]}
+  def compute_all_global_ips() do
     case :inet.getifaddrs() do
       {:ok, ifs} ->
         ips =
@@ -116,6 +142,12 @@ defmodule Acceptor do
         Logger.warning("getifaddrs failed: #{inspect(reason)}")
         %{inet: nil, inet6: nil, inet6_all: []}
     end
+  end
+
+  @doc false
+  @spec ipv6_binary(:inet.ip6_address()) :: <<_::128>>
+  def ipv6_binary({s1, s2, s3, s4, s5, s6, s7, s8}) do
+    <<s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16>>
   end
 
   @spec global_ipv4?(:inet.ip_address()) :: boolean()
@@ -154,12 +186,6 @@ defmodule Acceptor do
       {s1, s2, s3, s4, s5, s6, s7, s8} ->
         <<s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16>>
     end
-  end
-
-  @doc false
-  @spec ipv6_binary(:inet.ip6_address()) :: <<_::128>>
-  def ipv6_binary({s1, s2, s3, s4, s5, s6, s7, s8}) do
-    <<s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16>>
   end
 
   @doc false
