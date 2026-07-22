@@ -179,7 +179,7 @@ Status meanings:
 | [BEP 32](https://www.bittorrent.org/beps/bep_0032.html) | IPv6 DHT extension | **Full** | Separate v4/v6 k-bucket routing tables; `nodes`/`nodes6` in find_node/get_peers replies with BEP 32 `want` filtering; dedicated global-IPv6 UDP socket for KRPC and uTP egress |
 | [BEP 42](https://www.bittorrent.org/beps/bep_0042.html) | DHT security extension (IP-derived node ID) | **Full** | CRC32C-bound node id prefix from the primary global IPv6 (falls back to random); Sybil/routing-poisoning mitigation |
 | [BEP 48](https://www.bittorrent.org/beps/bep_0048.html) | Tracker scrape convention | **Full** | `Tracker.scrape/2` for HTTP (BEP 48 `/scrape` URL derivation, bencoded `files` map) and UDP (BEP 15 scrape packet, prefer IPv6 host); periodic 5 min per-torrent scrape loop caches `{seeders, leechers, completed}` per tracker; dead-swarm URLs ({0, 0} within 20 min) skipped at announce time so a fully-dead tier falls through to the next tier |
-| [BEP 52](https://www.bittorrent.org/beps/bep_0052.html) | BitTorrent v2 (SHA-256 + merkle trees) | **Partial** | Phase 1/6: detects `:v1`/`:hybrid`/`:v2`, computes `hash_v2` and accepts hybrid `.torrent`s/magnets transparently (wire hash stays SHA-1), filters BEP 47 padding files from the listing. Pure-v2 torrents are rejected with a clear error, not crashed on — merkle verification (phases 2–5) isn't built yet |
+| [BEP 52](https://www.bittorrent.org/beps/bep_0052.html) | BitTorrent v2 (SHA-256 + merkle trees) | **Partial** | Phases 1–2/6: detects `:v1`/`:hybrid`/`:v2`, computes `hash_v2`, accepts hybrid `.torrent`s/magnets transparently (wire hash stays SHA-1), filters BEP 47 padding files, and parses the peer handshake's v2-support bit. Our bit remains unset until the v2 handshake upgrade path is usable end-to-end. Pure-v2 torrents are rejected clearly pending merkle verification |
 | [BEP 55](https://www.bittorrent.org/beps/bep_0055.html) | uTP hole punching (`ut_holepunch`) | **Full** | LTEP extension id 3; binary rendezvous/connect/error codec for IPv4 **and** IPv6; relay role sends `connect` to both endpoints or a typed error reply (`no_such_peer`/`not_connected`/`no_support`/`no_self`) to the initiator; uTP punch dial on `connect`; outbound trigger after direct dial failure for both families; per-target exponential backoff (30s/2m/8m, max 4/session); symmetric-NAT guard skips initiating when STUN classifies our mapping as endpoint-dependent |
 
 **Magnet URIs** are a de-facto convention (BitTorrent wiki), not a numbered BEP. We parse `xt=urn:btih:` (hex and base32), multiple `tr=`, and optional `dn=`.
@@ -192,7 +192,7 @@ Status meanings:
 
 - **Web seeds (BEP 19)** — HTTP/URL seeding as a third data source alongside peers and DHT, sharing the same piece-verify and write path as a normal download.
 - **Local Service Discovery (BEP 14)** — LAN peer discovery via UDP multicast, no tracker/DHT round-trip needed.
-- **BitTorrent v2 detection (BEP 52, phase 1/6)** — recognizes v1/hybrid/v2 torrents and magnets; hybrid torrents load transparently; pure-v2 rejected with a clear message pending the merkle-verify phases.
+- **BitTorrent v2 foundation (BEP 52, phases 1–2/6)** — recognizes v1/hybrid/v2 torrents and magnets and parses peers' v2 handshake capability; hybrid torrents load transparently; pure-v2 is rejected clearly pending the merkle-verify phases.
 - **DHT secure node ID (BEP 42)** — node id cryptographically bound to our own IP (Sybil/routing-poisoning mitigation).
 - **BEP 48 scrape-driven tracker health** — every torrent scrapes its trackers periodically for `{seeders, leechers}` and skips confirmed dead-swarm URLs at announce time, so a tier of dead trackers falls through to the next tier instead of firing a wasted parallel announce every 30 s while under swarm target.
 - **Magnet x.pe hand-off** — magnet-embedded fallback peers stay live candidates for the whole session instead of being dropped once metadata fetch completes.
@@ -209,7 +209,7 @@ Work tracked for future releases:
 | Priority | Item | Why it matters |
 | --- | --- | --- |
 | Medium | **BEP 7 — full multi-homed announce** | Announce per local listen address (v4/v6), filter link-local/loopback, correct source-IP bind for HTTP and UDP |
-| Medium | **BEP 52 phases 2–6 — BitTorrent v2 merkle verify + pure-v2 download** | Reserved-bit signalling, merkle tree construction/verification, `hash_request`/`hashes`/`hash_reject` wire messages, pure-v2 end-to-end download |
+| Medium | **BEP 52 phases 3–6 — BitTorrent v2 merkle verify + pure-v2 download** | Merkle tree construction/verification, `hash_request`/`hashes`/`hash_reject` wire messages, capability advertisement, and pure-v2 end-to-end download |
 | Low | **BEP 16 — Superseeding** | Efficient initial-seed strategy; minimizes redundant uploads when first distributing a torrent |
 
 Full internal backlog and design rationale live in [`.claude/PLAN.md`](.claude/PLAN.md) and [`.claude/ARCHITECTURE.md`](.claude/ARCHITECTURE.md) (kept in sync with this table).

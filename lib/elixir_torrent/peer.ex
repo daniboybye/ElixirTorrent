@@ -86,6 +86,9 @@ defmodule Peer do
   @spec fast_extension?(reserved()) :: boolean()
   def fast_extension?(<<_::61, x::1, _::2>>), do: x == 1
 
+  @spec v2_support?(reserved()) :: boolean()
+  def v2_support?(<<_::59, x::1, _::4>>), do: x == 1
+
   @spec extension_protocol?(reserved()) :: boolean()
   defdelegate extension_protocol?(reserved), to: Peer.LTEP
 

@@ -7,7 +7,7 @@
 - **BEP 14 (LSD):** Local Service Discovery via UDP multicast (`BT-SEARCH`)
 - **BEP 19 (WebSeed):** HTTP `Range` seeding from `url-list` via `Torrent.WebSeed`
 - **BEP 48:** periodic tracker scrape; skip confirmed dead-swarm announce URLs
-- **BEP 52 (phase 1/6):** detect v1/hybrid/v2; accept hybrid torrents/magnets; reject pure-v2 cleanly
+- **BEP 52 (phases 1–2/6):** detect v1/hybrid/v2, parse peers' v2 handshake capability; accept hybrid torrents/magnets; reject pure-v2 cleanly
 - **Lazy piece storage:** on-demand piece read/write/verify workers with idle terminate
 - **Peer.ConnectionManager:** outbound dial orchestration with per-family throttle
 - Mid-download session checkpoint (bitfield + counters every 30s)
