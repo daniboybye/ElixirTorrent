@@ -738,4 +738,13 @@ defmodule PeerDiscoveryAnnounceTest do
       refute MapSet.member?(new_state.disabled, announce)
     end
   end
+
+  test "expected_tracker_failure_reason?/1 covers common dead-tracker outcomes" do
+    assert Announce.expected_tracker_failure_reason?(:timeout)
+    assert Announce.expected_tracker_failure_reason?(:nxdomain)
+    assert Announce.expected_tracker_failure_reason?(:connect_timeout)
+    assert Announce.expected_tracker_failure_reason?({:nxdomain, ~c"dead.example"})
+    refute Announce.expected_tracker_failure_reason?(:bad_response)
+    refute Announce.expected_tracker_failure_reason?(:invalid_bencode)
+  end
 end

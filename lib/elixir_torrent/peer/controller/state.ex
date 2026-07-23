@@ -537,6 +537,9 @@ defmodule Peer.Controller.State do
         {:error, :protocol_error, state}
 
       not Torrent.have?(state.hash, index) ->
+        # Bitfield vs disk can race during verify/invalidate. BEP 6 reject (or
+        # silent ignore without Fast) is enough — protocol_error would tear down
+        # the whole peer via one_for_all and lose a productive remote seeder.
         model_count =
           case Torrent.get(state.hash, :bitfield) do
             bf when is_binary(bf) -> Torrent.Bitfield.count(bf, state.pieces_count)
@@ -548,7 +551,11 @@ defmodule Peer.Controller.State do
           "request_reject index=#{index} reason=no_piece_on_disk model_pieces=#{model_count}"
         )
 
-        {:error, :protocol_error, state}
+        if state.fast_extension != nil do
+          Sender.reject(key(state), index, begin, length)
+        end
+
+        state
 
       true ->
         do_serve_request(state, index, begin, length)

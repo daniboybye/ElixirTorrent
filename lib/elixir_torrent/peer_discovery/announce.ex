@@ -1248,9 +1248,35 @@ defmodule PeerDiscovery.Announce do
   end
 
   defp retry_interval_seconds(_, reason) do
-    Logger.warning("request failure reason: #{inspect(reason)}")
+    # Dead public trackers (NXDOMAIN / black-hole UDP / connect timeouts) are the
+    # common case in real announce-lists — BEP 12 already fails over tiers. Warn
+    # only on unexpected reasons so server.log stays readable under CGNAT churn.
+    if expected_tracker_failure_reason?(reason) do
+      Logger.debug("request failure reason: #{inspect(reason)}")
+    else
+      Logger.warning("request failure reason: #{inspect(reason)}")
+    end
+
     Tracker.default_failure_interval()
   end
+
+  @doc false
+  @spec expected_tracker_failure_reason?(term()) :: boolean()
+  def expected_tracker_failure_reason?(reason)
+      when reason in [
+             :timeout,
+             :nxdomain,
+             :connect_timeout,
+             :econnrefused,
+             :closed,
+             :enetunreach,
+             :ehostunreach,
+             :eaddrnotavail
+           ],
+      do: true
+
+  def expected_tracker_failure_reason?({:nxdomain, _}), do: true
+  def expected_tracker_failure_reason?(_), do: false
 
   @spec extract_tiers(map()) :: [list(String.t())]
   defp extract_tiers(%{"announce-list" => tiers}) when is_list(tiers) do

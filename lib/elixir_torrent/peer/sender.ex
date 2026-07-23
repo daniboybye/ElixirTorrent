@@ -394,6 +394,15 @@ defmodule Peer.Sender do
 
   defp take_message(_), do: :incomplete
 
+  # Core + DHT port + Fast + LTEP. Not BEP 52 hash_* (21–23) until phase 4.
+  @known_wire_ids [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 20]
+
+  defguardp is_known_wire_id(id) when id in @known_wire_ids
+
+  @doc false
+  @spec known_wire_id?(integer()) :: boolean()
+  def known_wire_id?(id) when is_integer(id), do: id in @known_wire_ids
+
   defp parse(<<>>, _), do: :ok
 
   defp parse(@choke_id, key), do: handle_choke(key)
@@ -452,6 +461,16 @@ defmodule Peer.Sender do
 
   defp parse(<<@extended_id, extended_id::8, payload::binary>>, key),
     do: handle_extended(key, extended_id, payload)
+
+  # BEP 3 forward-compat: unknown message *types* are ignored (libtorrent /
+  # qBittorrent do the same). BEP 52 `hash_request`/`hashes`/`hash_reject`
+  # (ids 21–23) hit this path today — treating them as protocol_error was
+  # tearing down otherwise-healthy peers via one_for_all + max_restarts:0.
+  # Malformed payloads of *known* ids still fall through to protocol_error.
+  defp parse(<<id, _::binary>> = msg, key) when not is_known_wire_id(id) do
+    log_wire(key, "ignored_unknown id=#{id} bytes=#{byte_size(msg)}", :debug)
+    :ok
+  end
 
   defp parse(_, _), do: :protocol_error
 

@@ -263,7 +263,11 @@ defmodule Peer.Controller do
   end
 
   def terminate(reason, %State{} = state) do
-    unless reason == :normal do
+    # :shutdown / {:shutdown,_} are normal OTP stop paths (app teardown, swarm
+    # cap eviction, supervisor restart). Logging them at :info floods mix test
+    # outside ExUnit's per-test capture_log — Application children keep the
+    # default Logger handler. Keep :info for unexpected disconnect reasons only.
+    unless quiet_disconnect_reason?(reason) do
       require Logger
 
       Logger.info(
@@ -275,6 +279,13 @@ defmodule Peer.Controller do
     Torrent.PiecesStatistic.remove_peer(state.hash, state.bitfield, state.pieces_count)
     :ok
   end
+
+  @doc false
+  @spec quiet_disconnect_reason?(term()) :: boolean()
+  def quiet_disconnect_reason?(:normal), do: true
+  def quiet_disconnect_reason?(:shutdown), do: true
+  def quiet_disconnect_reason?({:shutdown, _}), do: true
+  def quiet_disconnect_reason?(_), do: false
 
   # Micro-swarm: peers that already delivered blocks are scarce under CGNAT.
   # Soften DialBackoff, re-queue the endpoint (dial_done already removed it from
