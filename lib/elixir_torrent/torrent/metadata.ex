@@ -6,19 +6,22 @@ defmodule Torrent.Metadata do
   """
   @spec serve?(Torrent.hash()) :: boolean()
   def serve?(hash) do
-    case Torrent.get(hash, [:left, :metadata]) do
-      [0, %{"info" => info}] when is_map(info) -> true
+    case Torrent.get(hash, [:left, :info_blob]) do
+      [0, blob] when is_binary(blob) -> true
       _ -> false
     end
   end
 
   @doc """
   Bencoded info dictionary bytes transferred by BEP 9 ut_metadata.
+
+  Returns the raw slice captured at parse time — never a re-encoded map — so the
+  SHA-1 of the returned bytes matches the torrent's info_hash (BEP 3).
   """
   @spec info_blob(Torrent.hash()) :: binary() | nil
   def info_blob(hash) do
-    case Torrent.get(hash, :metadata) do
-      %{"info" => info} when is_map(info) -> Bento.encode!(info)
+    case Torrent.get(hash, :info_blob) do
+      blob when is_binary(blob) -> blob
       _ -> nil
     end
   end

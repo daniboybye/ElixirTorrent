@@ -5,11 +5,28 @@ defmodule Torrent.Files do
   Progress is derived from the torrent bitfield at piece granularity: a byte
   range counts as downloaded only when every piece overlapping that range is
   marked complete in the bitfield.
+
+  BEP 47 padding files (marked with `attr` containing `"p"`) are excluded
+  from user-facing listings: they exist only to align the following real
+  file to a piece boundary and their bytes are known-zero. They still
+  occupy their share of the flat piece stream so per-piece offset math
+  keeps working; only the visible file list drops them.
   """
 
   alias Torrent.Bitfield
   alias Torrent.Model
   alias Torrent.PathLayout
+
+  @doc """
+  Whether a file entry from `info["files"]` is a BEP 47 padding file.
+
+  BEP 47 § File attributes: the `attr` field is a byte string of one-letter
+  flags; `p` marks the file as padding. Real files never carry this flag,
+  so a padding file always has both `attr` and `p` in it.
+  """
+  @spec padding?(map()) :: boolean()
+  def padding?(%{"attr" => attr}) when is_binary(attr), do: String.contains?(attr, "p")
+  def padding?(_), do: false
 
   defmodule Entry do
     @enforce_keys [:index, :path, :name, :length, :downloaded, :progress, :complete?]
@@ -89,11 +106,21 @@ defmodule Torrent.Files do
 
   defp normalize_files(%{"files" => files} = info) do
     {_, entries} =
-      Enum.reduce(files, {0, []}, fn %{"length" => length, "path" => path}, {offset, acc} ->
-        path_str = PathLayout.relative_path(info, path)
-        name = List.last(path)
-        entry = %{offset: offset, length: length, path: path_str, name: name}
-        {offset + length, [entry | acc]}
+      Enum.reduce(files, {0, []}, fn file, {offset, acc} ->
+        %{"length" => length, "path" => path} = file
+        next_offset = offset + length
+
+        if padding?(file) do
+          # Advance the running byte offset so following real files land at
+          # their true positions in the piece stream, but do not surface a
+          # user-visible entry for the pad.
+          {next_offset, acc}
+        else
+          path_str = PathLayout.relative_path(info, path)
+          name = List.last(path)
+          entry = %{offset: offset, length: length, path: path_str, name: name}
+          {next_offset, [entry | acc]}
+        end
       end)
 
     Enum.reverse(entries)
