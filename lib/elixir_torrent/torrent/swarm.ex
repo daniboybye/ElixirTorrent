@@ -1,7 +1,7 @@
 defmodule Torrent.Swarm do
   use Via
 
-  alias Torrent.Downloads
+  alias Torrent.{Downloads, Model}
 
   require Logger
 
@@ -29,30 +29,128 @@ defmodule Torrent.Swarm do
 
   @spec interested_for_piece(Torrent.hash(), Torrent.index()) :: :ok
   def interested_for_piece(hash, index) do
-    active = Downloads.active_indices(hash)
-
     hash
-    |> peer_pids()
+    |> interest_peer_pids(index)
     |> Enum.each(fn pid ->
       case Peer.get_key(pid) do
-        key when is_tuple(key) ->
-          if assign_peer_to_piece?(key, index, active), do: Peer.interested(pid, index)
-
-        _ ->
-          :ok
+        key when is_tuple(key) -> Peer.Controller.interested_sync(key, index)
+        _ -> :ok
       end
     end)
   end
 
-  defp assign_peer_to_piece?(key, index, active_indices) do
+  @doc false
+  @spec assign_peer_to_piece?(Torrent.hash(), Peer.key(), Torrent.index(), [Torrent.index()]) ::
+          boolean()
+  def assign_peer_to_piece?(hash, key, index, active_indices) when is_list(active_indices) do
+    do_assign_peer_to_piece?(hash, key, index, active_indices)
+  end
+
+  def assign_peer_to_piece?(hash, key, index) do
+    do_assign_peer_to_piece?(hash, key, index, Downloads.active_indices(hash))
+  end
+
+  @doc false
+  @spec interest_peer_pids(Torrent.hash(), Torrent.index()) :: [pid()]
+  def interest_peer_pids(hash, index) do
+    active = Downloads.active_indices(hash)
+
+    hash
+    |> peer_pids()
+    |> sort_peers_seeders_first()
+    |> Enum.flat_map(fn pid ->
+      case Peer.get_key(pid) do
+        key when is_tuple(key) ->
+          if do_assign_peer_to_piece?(hash, key, index, active), do: [pid], else: []
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  @doc false
+  @spec sort_peers_seeders_first([pid()]) :: [pid()]
+  def sort_peers_seeders_first(pids) do
+    # Seeders (bitfield :all) have every piece and usually higher upload; under
+    # scarce unchokes, pin them first so their request pipeline fills before
+    # fellow leechers race for the same blocks.
+    Enum.sort_by(pids, &peer_seeder_rank/1)
+  end
+
+  # Decide whether to (re)pin a peer to the new `index`. Peer must have the
+  # bitfield bit set. Then:
+  #   * no current pin → assign
+  #   * already pinned to this index → keep
+  #   * pinned to another piece that is no longer active → free to move
+  #   * pinned to another piece that IS still active BUT has no unclaimed
+  #     subpieces left (drained) → free to move. This is the fix: without
+  #     it, a peer would sit pinned to a drained piece until its worker
+  #     died, losing all its bandwidth to the pump.
+  #   * pinned to another active piece with waiting subpieces BUT this peer
+  #     is choked and has delivered zero bytes on the pin for longer than
+  #     @stale_pin_ms → free to move (endgame monopoly fix). In endgame, a
+  #     stable hash spreads useless pins across ALL remaining indices so one
+  #     choked piece does not hoard the whole swarm.
+  #   * otherwise: keep the current pin (they're presumably still working).
+  defp do_assign_peer_to_piece?(hash, key, index, active_indices) do
     Peer.Controller.has_index?(key, index) and
       case Peer.Controller.download_piece(key) do
-        nil -> true
-        ^index -> true
-        other -> other not in active_indices
+        nil ->
+          true
+
+        ^index ->
+          true
+
+        other ->
+          may_leave_pin?(hash, key, index, other, active_indices)
       end
   catch
     :exit, _ -> false
+  end
+
+  defp may_leave_pin?(hash, key, index, other, active_indices) do
+    drained? = not Downloads.piece_has_waiting?(hash, other)
+    endgame? = Model.get(hash, :mode) == :endgame
+    useless? = useless_pin_may_switch?(hash, key, index, other, active_indices)
+
+    cond do
+      other not in active_indices ->
+        true
+
+      drained? and not endgame? ->
+        true
+
+      drained? and endgame? and useless? ->
+        true
+
+      useless? ->
+        true
+
+      true ->
+        false
+    end
+  end
+
+  # A peer choked with zero bytes on its current pin for long enough is not
+  # contributing to that piece. In endgame, only re-pin to another active
+  # index when a stable hash says this peer "owns" that index — otherwise
+  # reconcile's multi-interest pass would leave every peer on the last index.
+  defp useless_pin_may_switch?(hash, key, index, _other, active_indices) do
+    Peer.Controller.stale_useless_pin?(key) and
+      case Model.get(hash, :mode) do
+        :endgame when length(active_indices) > 1 ->
+          endgame_preferred_index(key, active_indices) == index
+
+        _ ->
+          true
+      end
+  end
+
+  defp endgame_preferred_index({_hash, peer_id}, active_indices) do
+    sorted = Enum.sort(active_indices)
+    bucket = rem(:erlang.phash2(peer_id, length(sorted)), length(sorted))
+    Enum.at(sorted, bucket)
   end
 
   @spec seed(Torrent.hash()) :: :ok
@@ -149,6 +247,26 @@ defmodule Torrent.Swarm do
     :exit, _ -> {:error, :noproc}
   end
 
+  # Short timeout for batched unchoke probes from the download pump — a stuck
+  # peer must not block the controller; treat failures like choked (not counted).
+  @unchoked_probe_timeout 100
+
+  @doc false
+  @spec unchoked_for_us_count(Torrent.hash()) :: non_neg_integer()
+  def unchoked_for_us_count(hash) do
+    case GenServer.whereis(via(hash)) do
+      nil ->
+        0
+
+      _ ->
+        hash
+        |> peer_pids()
+        |> Enum.count(&peer_unchoked_for_us?/1)
+    end
+  catch
+    :exit, _ -> 0
+  end
+
   @spec count(Torrent.hash()) :: non_neg_integer()
   def count(hash) do
     case GenServer.whereis(via(hash)) do
@@ -166,6 +284,13 @@ defmodule Torrent.Swarm do
   @spec disconnect_all(Torrent.hash()) :: :ok
   def disconnect_all(hash), do: Torrent.Swarm.Disconnect.all(hash)
 
+  @doc false
+  @spec evict_peers(Torrent.hash(), [pid()]) :: :ok
+  def evict_peers(_hash, pids) when is_list(pids) do
+    Enum.each(pids, &Peer.disconnect/1)
+    :ok
+  end
+
   @spec peer_supervisors(Torrent.hash()) :: [pid()]
   def peer_supervisors(hash), do: peer_pids(hash)
 
@@ -173,6 +298,24 @@ defmodule Torrent.Swarm do
     hash
     |> peer_pids()
     |> Enum.each(fun)
+  end
+
+  @spec peer_seeder_rank(pid()) :: 0 | 1 | 2
+  defp peer_seeder_rank(pid) do
+    case Peer.get_key(pid) do
+      key when is_tuple(key) ->
+        if peer_seeder?(key), do: 0, else: 1
+
+      _ ->
+        2
+    end
+  end
+
+  @spec peer_seeder?(Peer.key()) :: boolean()
+  defp peer_seeder?(key) do
+    Peer.Controller.seeder?(key)
+  catch
+    :exit, _ -> false
   end
 
   @spec peer_pids(Torrent.hash()) :: [pid()]
@@ -225,6 +368,27 @@ defmodule Torrent.Swarm do
     :ok
   catch
     :exit, _ -> :ok
+  end
+
+  @spec peer_unchoked_for_us?(pid()) :: boolean()
+  defp peer_unchoked_for_us?(pid) when is_pid(pid) do
+    with key when is_tuple(key) <- Peer.get_key(pid),
+         %{choke_me?: false} <- safe_unchoked_probe(key) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  @spec safe_unchoked_probe(Peer.key()) :: map() | :error
+  defp safe_unchoked_probe(key) do
+    GenServer.call(
+      {:via, Registry, {Registry, {key, Peer.Controller}}},
+      :eviction_info,
+      @unchoked_probe_timeout
+    )
+  catch
+    :exit, _ -> :error
   end
 
   @spec peer_has_index?(pid(), Torrent.index()) :: boolean()

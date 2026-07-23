@@ -24,6 +24,14 @@ defmodule Peer.Controller do
   def interested(key, index),
     do: GenServer.cast(via(key), {:interested, [index]})
 
+  @doc false
+  @spec interested_sync(Peer.key(), Torrent.index()) :: :ok
+  def interested_sync(key, index) do
+    GenServer.call(via(key), {:interested, index})
+  catch
+    :exit, _ -> :ok
+  end
+
   @spec cancel(Torrent.hash(), Peer.id(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           :ok
   def cancel(hash, id, index, begin, length) do
@@ -62,11 +70,30 @@ defmodule Peer.Controller do
     :exit, _ -> nil
   end
 
+  @doc false
+  @spec stale_useless_pin?(Peer.key()) :: boolean()
+  def stale_useless_pin?(key) do
+    GenServer.call(via(key), :stale_useless_pin?)
+  catch
+    :exit, _ -> true
+  end
+
   @spec has_all?(Peer.key()) :: boolean()
   def has_all?(key), do: GenServer.call(via(key), :has_all?)
 
+  @spec seeder?(Peer.key()) :: boolean()
+  def seeder?(key), do: has_all?(key)
+
   @spec reset_rank(Peer.key()) :: :ok
   def reset_rank(key), do: GenServer.cast(via(key), {:reset_rank, []})
+
+  @doc false
+  @spec eviction_info(Peer.key()) :: map() | :error
+  def eviction_info(key) do
+    GenServer.call(via(key), :eviction_info, 500)
+  catch
+    :exit, _ -> :error
+  end
 
   @spec handle_choke(Peer.key()) :: :ok
   def handle_choke(key), do: GenServer.cast(via(key), {:handle_choke, []})
@@ -203,8 +230,16 @@ defmodule Peer.Controller do
     do: GenServer.cast(via(key), {:send_pex, [payload]})
 
   def init([hash, id, socket, reserved]) do
+    # The peer supervisor is one_for_all: a Sender exit tears this process down
+    # with an exit signal, which skips terminate/2 unless exits are trapped —
+    # and terminate is what returns this peer's bitfield contribution to
+    # PiecesStatistic. Without it every remote-close leaked availability.
+    Process.flag(:trap_exit, true)
+
     [status, count, downloaded, _piece_length] =
       Torrent.get(hash, [:peer_status, :pieces_count, :downloaded, :piece_length])
+
+    now = System.monotonic_time(:millisecond)
 
     {:ok,
      %State{
@@ -215,7 +250,10 @@ defmodule Peer.Controller do
        status: status,
        pieces_count: count,
        peer_reserved: reserved,
-       downloaded_at_connect: downloaded
+       downloaded_at_connect: downloaded,
+       connected_at: now,
+       last_block_at: now,
+       downloaded_bytes: 0
      }}
   end
 
@@ -233,9 +271,45 @@ defmodule Peer.Controller do
       )
     end
 
+    maybe_mark_productive_endpoint(state)
     Torrent.PiecesStatistic.remove_peer(state.hash, state.bitfield, state.pieces_count)
     :ok
   end
+
+  # Micro-swarm: peers that already delivered blocks are scarce under CGNAT.
+  # Soften DialBackoff, re-queue the endpoint (dial_done already removed it from
+  # ConnectionManager's queue), and kick an immediate re-dial — otherwise kick
+  # alone burns lottery timeouts on unrelated candidates while the known-good
+  # peer sits nowhere until the next tracker announce.
+  defp maybe_mark_productive_endpoint(%State{downloaded_bytes: n} = state) when n > 0 do
+    case Peer.Transport.safe_peername(state.socket) do
+      {:ok, {ip, port}} ->
+        Peer.DialBackoff.mark_productive(state.hash, ip, port)
+        Peer.ConnectionManager.offer_peers(state.hash, [%Peer{ip: ip, port: port}])
+        Peer.ConnectionManager.kick(state.hash)
+
+        require Logger
+
+        ip_str = ip |> :inet.ntoa() |> to_string()
+
+        Logger.info(
+          "[peer_dial] warm_redial endpoint=#{ip_str}:#{port} hash=#{Torrent.hex_encoded_hash(state.hash)} downloaded=#{n}"
+        )
+
+      _ ->
+        :ok
+    end
+  catch
+    _, _ -> :ok
+  end
+
+  defp maybe_mark_productive_endpoint(_), do: :ok
+
+  # With trap_exit, non-parent linked exits (socket port, spawned helpers)
+  # arrive here; propagate abnormal ones so the connection still dies with
+  # terminate/2 running.
+  def handle_info({:EXIT, _pid, :normal}, state), do: {:noreply, state}
+  def handle_info({:EXIT, _pid, reason}, state), do: {:stop, reason, state}
 
   def handle_call(:rank, _, state), do: {:reply, State.rank(state), state}
 
@@ -252,8 +326,21 @@ defmodule Peer.Controller do
     {:reply, piece, state}
   end
 
+  def handle_call({:interested, index}, _, state) do
+    case State.interested(state, index) do
+      {:error, reason, state} -> {:stop, {:shutdown, reason}, state}
+      state -> {:reply, :ok, state}
+    end
+  end
+
+  def handle_call(:stale_useless_pin?, _, state),
+    do: {:reply, State.stale_useless_pin?(state), state}
+
   def handle_call(:has_all?, _, state),
     do: {:reply, match?(%State{bitfield: :all}, state), state}
+
+  def handle_call(:eviction_info, _, state),
+    do: {:reply, State.eviction_info(state), state}
 
   def handle_call(:disconnect, _, %State{} = state) do
     {operations, state} = State.disconnect_operations(state)

@@ -44,6 +44,29 @@ defmodule Torrent.Downloads do
 
   defdelegate reject(hash, index, peer_id, begin, length), to: Piece
 
+  # Whether the piece worker for {hash, index} is alive AND still has
+  # unclaimed subpieces to hand out. Returns false for dead workers or those
+  # whose waiting list is drained (all subpieces handed to some peer). Used
+  # by Swarm.assign_peer_to_piece? so a peer pinned to a drained piece can
+  # be re-pinned to a fresh active piece.
+  defdelegate piece_has_waiting?(hash, index), to: Piece, as: :has_waiting?
+
+  @spec piece_has_in_flight?(Torrent.hash(), Torrent.index()) :: boolean()
+  def piece_has_in_flight?(hash, index) do
+    case Piece.whereis(hash, index) do
+      nil ->
+        false
+
+      pid ->
+        GenServer.call(pid, :has_in_flight?, 1_000)
+    end
+  catch
+    :exit, _ -> false
+  end
+
+  @spec abort_idle_piece(Torrent.hash(), Torrent.index(), keyword()) :: :ok
+  def abort_idle_piece(hash, index, opts \\ []), do: Piece.abort_if_orphan(hash, index, opts)
+
   @spec active_indices(Torrent.hash()) :: [Torrent.index()]
   def active_indices(hash) do
     case GenServer.whereis(via(hash)) do

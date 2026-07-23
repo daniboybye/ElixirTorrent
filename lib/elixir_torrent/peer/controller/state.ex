@@ -18,7 +18,31 @@ defmodule Peer.Controller.State do
     :downloaded_at_connect,
     :ltep,
     requests: MapSet.new(),
+    # Outbound Downloads.request casts we've fired but whose piece-worker
+    # callback hasn't come back yet. Counted alongside `requests` in
+    # full_requests_queue?/1 so a peer with reqq=16 never has more than 16
+    # requests in flight, even during the initial fill_request_pipeline sweep
+    # (which used to fire @request_pipeline_depth=64 casts before any of the
+    # response casts landed to grow `requests`). Reset on choke and on status
+    # change to avoid leakage in edge cases (piece drained, endgame skip).
+    pending_requests: 0,
     rank: 0,
+    # Monotonic ms at connect — used by ConnectionManager to evict peers that
+    # sat in the swarm cap without delivering bytes (choke-cycling under CGNAT).
+    connected_at: 0,
+    # Monotonic ms of last received block (piece data). Initialized to
+    # connected_at so idle_ms grows from connect until the first block; reset
+    # on each handle_piece. Lets ConnectionManager snub peers that stay unchoked
+    # but deliver nothing (libtorrent-style idle-while-unchoked, ~30s).
+    last_block_at: 0,
+    downloaded_bytes: 0,
+    # Monotonic ms when `status` was pinned to the current piece index. Used to
+    # release peers stuck choked with zero bytes on one piece (endgame monopoly).
+    pinned_at: 0,
+    # Bytes received while pinned to the current `status` index (reset on pin
+    # change). Distinguishes a fresh useless pin from prior progress on another
+    # piece still reflected in `downloaded_bytes`.
+    pin_downloaded_bytes: 0,
     bitfield: nil,
     interested: false,
     choke: true,
@@ -39,7 +63,13 @@ defmodule Peer.Controller.State do
           socket: port(),
           ltep: Peer.LTEP.Session.t() | nil,
           requests: MapSet.t(subpiece()),
+          pending_requests: non_neg_integer(),
           rank: non_neg_integer(),
+          connected_at: non_neg_integer(),
+          last_block_at: non_neg_integer(),
+          downloaded_bytes: non_neg_integer(),
+          pinned_at: non_neg_integer(),
+          pin_downloaded_bytes: non_neg_integer(),
           bitfield: bitfield(),
           interested: boolean(),
           choke: boolean(),
@@ -47,11 +77,57 @@ defmodule Peer.Controller.State do
           choke_me: boolean()
         }
 
-  @max_unanswered_requests 20
-  @request_pipeline_depth 8
+  # Per-peer request pipelining (BEP 10 reqq). Throughput per peer is bounded by
+  # in-flight-bytes / RTT: 16 × 16 KiB = 256 KiB capped a 150 ms peer at
+  # ~1.7 MB/s. 64 × 16 KiB = 1 MiB raises that ceiling to ~7 MB/s while staying
+  # far below what mainstream clients accept (they advertise reqq 250-500); when
+  # a peer advertises a smaller reqq we honor it instead of overflowing its queue.
+  @max_unanswered_requests 64
+  @request_pipeline_depth 64
+  # How long a peer may stay pinned to a piece with choke_me and zero bytes on
+  # that pin before Swarm may reassign it. Endgame uses a shorter threshold so
+  # scarce unchokes rotate across ALL remaining pieces instead of monopolizing
+  # the first active index (BEP-3 endgame needs multi-source redundancy).
+  @stale_pin_ms 20_000
+  @stale_pin_ms_endgame 15_000
 
   @spec key(t()) :: Peer.key()
   def key(state), do: make_key(state.hash, state.id)
+
+  @doc false
+  @spec eviction_info(t()) :: %{
+          downloaded_bytes: non_neg_integer(),
+          age_ms: non_neg_integer(),
+          idle_ms: non_neg_integer(),
+          useful?: boolean(),
+          seeder?: boolean(),
+          choke_me?: boolean()
+        }
+  def eviction_info(%__MODULE__{} = state) do
+    now = System.monotonic_time(:millisecond)
+
+    %{
+      downloaded_bytes: state.downloaded_bytes,
+      age_ms: max(now - state.connected_at, 0),
+      idle_ms: max(now - state.last_block_at, 0),
+      useful?: useful_for_download?(state),
+      seeder?: state.bitfield == :all,
+      choke_me?: state.choke_me
+    }
+  end
+
+  # Whether this peer can contribute missing pieces we still need. Cheap cases
+  # first (interested / :all / :none); full bitfield scan only as fallback.
+  @spec useful_for_download?(t()) :: boolean()
+  def useful_for_download?(%__MODULE__{bitfield: :none}), do: false
+
+  def useful_for_download?(%__MODULE__{bitfield: :all, hash: hash}) do
+    not torrent_complete?(hash)
+  end
+
+  def useful_for_download?(%__MODULE__{interested: true}), do: true
+
+  def useful_for_download?(%__MODULE__{} = state), do: peer_has_missing_piece?(state)
 
   @spec rank(t()) :: rank()
   def rank(state) do
@@ -96,9 +172,19 @@ defmodule Peer.Controller.State do
   def unchoke(%__MODULE__{choke: false} = state), do: state
 
   @spec interested(t(), Torrent.index()) :: t()
+  def interested(%__MODULE__{status: index} = state, index) do
+    check_interested(state)
+  end
+
   def interested(%__MODULE__{} = state, index) do
-    %__MODULE__{state | status: index}
-    |> check_interested()
+    # Status change → reset the pending-request counter. Any pending casts
+    # sent under the old piece belong to a different piece worker and their
+    # responses (if any) will still land in `state.request/4` and decrement
+    # naturally; the counter is a best-effort throttle, not a strict tally.
+    # Resetting here prevents leakage if the previous pin was on a drained
+    # or dead piece and its worker silently dropped our casts.
+    state = apply_pin(%__MODULE__{state | pending_requests: 0}, index)
+    check_interested(state)
   end
 
   @spec first_message(t(), non_neg_integer()) :: t()
@@ -146,6 +232,7 @@ defmodule Peer.Controller.State do
           []
       end
 
+    # BEP 10: advertise listen port and global addresses so peers can dial us (incl. IPv6).
     case Peer.LTEP.handshake_exchange(key(state), session, opts) do
       {:ok, ltep} -> %__MODULE__{state | ltep: ltep}
       {:error, _} -> state
@@ -182,7 +269,6 @@ defmodule Peer.Controller.State do
     Peer.LTEP.Session.local_extension_id(state.ltep, Magnet.UtMetadata.extension_name()) ==
       extended_id
   end
-
 
   @spec ut_pex?(t(), non_neg_integer()) :: boolean()
   defp ut_pex?(state, extended_id) do
@@ -256,7 +342,11 @@ defmodule Peer.Controller.State do
       log_download(state, "request_sent index=#{index} begin=#{begin} len=#{length}", :debug)
     end
 
+    # A piece-worker callback has arrived; the outbound-cast round-trip we
+    # counted in `pending_requests` is now realized in `state.requests`.
+    # Decrement (clamped at 0) so we don't double-count the pipeline.
     state
+    |> decrement_pending()
     |> put_request(index, begin, length)
     |> make_request
   end
@@ -322,7 +412,10 @@ defmodule Peer.Controller.State do
       Downloads.reject(state.hash, index, state.id, begin, length)
     end)
 
-    %__MODULE__{state | choke_me: true, requests: MapSet.new()}
+    # Peer choked us → they will drop any queued requests. Reset both the
+    # in-flight set and the pending-cast counter so we can re-fill the
+    # pipeline from zero on the next unchoke.
+    %__MODULE__{state | choke_me: true, requests: MapSet.new(), pending_requests: 0}
   end
 
   @spec handle_unchoke(t()) :: t()
@@ -467,11 +560,12 @@ defmodule Peer.Controller.State do
 
       log_upload(
         state,
-        "request index=#{index} begin=#{begin} len=#{length} choked=#{state.choke}"
+        "request index=#{index} begin=#{begin} len=#{length} choked=#{state.choke}",
+        :debug
       )
 
       if state.choke and state.fast_extension != nil and not allowed_while_choked? do
-        log_upload(state, "reject index=#{index} begin=#{begin} len=#{length} reason=choked")
+        log_upload(state, "reject index=#{index} begin=#{begin} len=#{length} reason=choked", :debug)
         Sender.reject(key(state), index, begin, length)
       end
 
@@ -484,7 +578,8 @@ defmodule Peer.Controller.State do
 
           log_upload(
             state,
-            "piece_sent index=#{index} begin=#{begin} len=#{byte_size(block)}"
+            "piece_sent index=#{index} begin=#{begin} len=#{byte_size(block)}",
+            :debug
           )
 
           GenServer.cast(pid, {:upload, [length]})
@@ -500,8 +595,13 @@ defmodule Peer.Controller.State do
           t() | {:error, :protocol_error, t()}
   def handle_piece(state, index, begin, length) do
     if member_request?(state, index, begin, length) do
+      now = System.monotonic_time(:millisecond)
+
       state
       |> Map.update!(:rank, &(&1 + length))
+      |> Map.update!(:downloaded_bytes, &(&1 + length))
+      |> Map.update!(:pin_downloaded_bytes, &(&1 + length))
+      |> Map.put(:last_block_at, now)
       |> delete_request(index, begin, length)
       |> make_request
     else
@@ -516,9 +616,9 @@ defmodule Peer.Controller.State do
     if Magnet.Bootstrap.active?(hash) do
       state
     else
-      case Peer.Transport.peername(state.socket) do
+      case Peer.Transport.safe_peername(state.socket) do
         {:ok, {ip, _port}} ->
-          :ok = DHT.seed_node(ip, dht_port)
+          _ = DHT.seed_node(ip, dht_port)
           state
 
         _ ->
@@ -664,7 +764,9 @@ defmodule Peer.Controller.State do
     if MapSet.size(set) > 0 do
       state
     else
-      case Peer.Transport.peername(state.socket) do
+      # safe_peername: seed startup may race peer teardown — uTP GenServer can be
+      # gone while Controller still runs LTEP post-handshake (allowed-fast set).
+      case Peer.Transport.safe_peername(state.socket) do
         {:ok, {peer_addr, _port}} ->
           set = AllowedFast.set(peer_addr, state.hash, state.pieces_count)
 
@@ -699,24 +801,34 @@ defmodule Peer.Controller.State do
     cond do
       full_requests_queue?(state) ->
         log_download(state, "request_skip queue_full index=#{index}", :debug)
+        state
 
       state.choke_me and not FastExtension.download?(state.fast_extension, index) ->
         log_download(state, "request_skip choked index=#{index}", :debug)
+        state
 
       true ->
         pid = self()
 
-        Downloads.request(
-          state.hash,
-          index,
-          state.id,
-          &GenServer.cast(pid, {:request, [&1, &2, &3]})
-        )
+        case Downloads.request(
+               state.hash,
+               index,
+               state.id,
+               &GenServer.cast(pid, {:request, [&1, &2, &3]})
+             ) do
+          :error ->
+            # Piece worker is gone (verify-fail, timeout, race between our
+            # pin and the worker exiting). Clear the pin so the next
+            # Swarm.interested_for_piece edge (or a fresh :interested cast
+            # from the controller) can re-pin us to a live piece.
+            log_download(state, "request_skip piece_dead index=#{index}", :debug)
+            clear_pin(state)
 
-        log_download(state, "request_queued index=#{index}", :debug)
+          _ ->
+            log_download(state, "request_queued index=#{index}", :debug)
+            increment_pending(state)
+        end
     end
-
-    state
   end
 
   defp do_make_request(%__MODULE__{interested: false, status: index} = state)
@@ -753,7 +865,7 @@ defmodule Peer.Controller.State do
     case Torrent.get(hash, :peer_status) do
       index when is_integer(index) ->
         log_download(state, "piece_index from_controller index=#{index}", :debug)
-        %{state | status: index}
+        apply_pin(state, index)
 
       _ ->
         case PiecesStatistic.choice_piece(hash, :random) do
@@ -761,7 +873,7 @@ defmodule Peer.Controller.State do
             case Downloads.active_indices(hash) do
               [index | _] ->
                 log_download(state, "piece_index from_active index=#{index}", :debug)
-                %{state | status: index}
+                apply_pin(state, index)
 
               [] ->
                 log_download(state, "piece_index none_available", :debug)
@@ -770,7 +882,7 @@ defmodule Peer.Controller.State do
 
           index ->
             log_download(state, "piece_index chosen=#{index}", :debug)
-            %{state | status: index}
+            apply_pin(state, index)
         end
     end
   end
@@ -882,5 +994,92 @@ defmodule Peer.Controller.State do
   end
 
   @spec full_requests_queue?(t()) :: boolean()
-  defp full_requests_queue?(state), do: MapSet.size(state.requests) >= @max_unanswered_requests
+  # Counts both in-flight (`requests`) AND pending outbound casts we haven't
+  # yet heard back on. Before this counted only `requests`, and
+  # fill_request_pipeline could fire @request_pipeline_depth casts before any
+  # of the piece-worker callbacks landed to grow `requests` — so a peer
+  # advertising reqq=16 would receive up to 64 in-flight block requests,
+  # tripping their queue guard and silently dropping our requests. See
+  # `pending_requests` in the struct.
+  defp full_requests_queue?(state),
+    do:
+      MapSet.size(state.requests) + state.pending_requests >=
+        max_unanswered_requests(state)
+
+  @spec increment_pending(t()) :: t()
+  defp increment_pending(%__MODULE__{} = state),
+    do: %__MODULE__{state | pending_requests: state.pending_requests + 1}
+
+  @spec decrement_pending(t()) :: t()
+  defp decrement_pending(%__MODULE__{pending_requests: n} = state) when n > 0,
+    do: %__MODULE__{state | pending_requests: n - 1}
+
+  defp decrement_pending(state), do: state
+
+  # BEP 10: peers advertise how many requests they are willing to queue (reqq);
+  # exceeding it gets requests silently dropped by some clients.
+  defp max_unanswered_requests(%__MODULE__{ltep: %Peer.LTEP.Session{peer: %{reqq: reqq}}})
+       when is_integer(reqq) and reqq > 0,
+       do: min(reqq, @max_unanswered_requests)
+
+  defp max_unanswered_requests(_state), do: @max_unanswered_requests
+
+  @spec torrent_complete?(Torrent.hash()) :: boolean()
+  defp torrent_complete?(hash) do
+    case Torrent.get(hash, :left) do
+      left when is_integer(left) and left <= 0 -> true
+      _ -> false
+    end
+  catch
+    :exit, _ -> false
+  end
+
+  @spec peer_has_missing_piece?(t()) :: boolean()
+  defp peer_has_missing_piece?(%__MODULE__{hash: hash, pieces_count: count} = state)
+       when is_integer(count) and count > 0 do
+    Enum.any?(0..(count - 1), fn index ->
+      has_index?(state, index) and not Torrent.have?(hash, index)
+    end)
+  catch
+    :exit, _ -> false
+  end
+
+  defp peer_has_missing_piece?(_), do: false
+
+  @doc false
+  @spec stale_useless_pin?(t()) :: boolean()
+  def stale_useless_pin?(%__MODULE__{status: idx} = state) when is_integer(idx) do
+    state.choke_me and state.pin_downloaded_bytes == 0 and
+      pin_age_ms(state) >= stale_pin_threshold_ms(state.hash)
+  end
+
+  def stale_useless_pin?(_), do: false
+
+  @spec apply_pin(t(), Torrent.index()) :: t()
+  defp apply_pin(%__MODULE__{} = state, index) do
+    now = System.monotonic_time(:millisecond)
+    %{state | status: index, pinned_at: now, pin_downloaded_bytes: 0}
+  end
+
+  @spec clear_pin(t()) :: t()
+  defp clear_pin(%__MODULE__{} = state) do
+    %{state | status: nil, pending_requests: 0, pinned_at: 0, pin_downloaded_bytes: 0}
+  end
+
+  @spec pin_age_ms(t()) :: non_neg_integer()
+  defp pin_age_ms(%__MODULE__{pinned_at: 0}), do: 0
+
+  defp pin_age_ms(%__MODULE__{} = state) do
+    max(System.monotonic_time(:millisecond) - state.pinned_at, 0)
+  end
+
+  @spec stale_pin_threshold_ms(Torrent.hash()) :: non_neg_integer()
+  defp stale_pin_threshold_ms(hash) do
+    case Torrent.get(hash, :mode) do
+      :endgame -> @stale_pin_ms_endgame
+      _ -> @stale_pin_ms
+    end
+  catch
+    :exit, _ -> @stale_pin_ms
+  end
 end

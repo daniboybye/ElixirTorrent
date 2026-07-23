@@ -7,7 +7,18 @@ defmodule Torrent.Model do
   require Logger
 
   @timeout_detect_the_speed 5 * 1_000
-  @until_endgame 4
+  # Mid-download resume checkpoint (BEP-adjacent): persist bitfield + counters to
+  # `.term` so a restart loads Session.apply/2 and Resume runs :verify_saved on
+  # only the pieces we claim — not a blind re-download from peers. Without this,
+  # only graceful stop_and_serialize/1 or 100 % completion wrote session state;
+  # crash/kill lost all partial progress.
+  @checkpoint_interval 30_000
+  # BEP-3 endgame: request the same block from multiple peers until the last
+  # bytes arrive. Enter when ≤ this many standard piece-lengths remain (bytes,
+  # not a piece count — last piece may be shorter). Was 4; raised to 10 so
+  # scarce-peer swarms (CGNAT, few v6 peers) start redundant requests earlier
+  # while Piece.State still caps per-block redundancy at 3.
+  @until_endgame 10
   @stopped Torrent.stopped()
 
   @spec start_link(Torrent.t()) :: GenServer.on_start()
@@ -78,6 +89,7 @@ defmodule Torrent.Model do
 
     torrent = reconcile_progress(torrent)
     message_for_next_detection(torrent)
+    schedule_checkpoint()
 
     {:ok, torrent}
   end
@@ -153,6 +165,27 @@ defmodule Torrent.Model do
     {:noreply, %{torrent | speed: speed}}
   end
 
+  def handle_info(:checkpoint, %Torrent{left: 0} = torrent) do
+    schedule_checkpoint()
+    {:noreply, torrent}
+  end
+
+  def handle_info(:checkpoint, %Torrent{} = torrent) do
+    last = Process.get({:checkpoint_downloaded, torrent.hash}, -1)
+
+    if torrent.downloaded > 0 and torrent.downloaded != last do
+      :ok = Session.save(torrent.hash, torrent)
+      Process.put({:checkpoint_downloaded, torrent.hash}, torrent.downloaded)
+
+      Logger.info(
+        "[checkpoint] hash=#{Torrent.hex_encoded_hash(torrent.hash)} downloaded=#{torrent.downloaded} left=#{torrent.left} pieces=#{Bitfield.count(torrent.bitfield, torrent.last_index + 1)}"
+      )
+    end
+
+    schedule_checkpoint()
+    {:noreply, torrent}
+  end
+
   defp do_get(:bytes_size, %Torrent{downloaded: n, left: m}),
     do: n + m
 
@@ -182,6 +215,10 @@ defmodule Torrent.Model do
   defp message_for_next_detection(torrent) do
     message = {:detected_the_speed, torrent.downloaded, torrent.uploaded}
     Process.send_after(self(), message, @timeout_detect_the_speed)
+  end
+
+  defp schedule_checkpoint do
+    Process.send_after(self(), :checkpoint, @checkpoint_interval)
   end
 
   defp do_piece_length(index, %Torrent{last_index: last_index} = torrent)

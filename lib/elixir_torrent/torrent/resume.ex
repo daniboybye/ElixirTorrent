@@ -7,7 +7,9 @@ defmodule Torrent.Resume do
 
   require Logger
 
-  @spec child_spec({Torrent.hash(), :full_scan | :verify_saved}) :: Supervisor.child_spec()
+  @type mode :: :full_scan | :verify_saved | :skip
+
+  @spec child_spec({Torrent.hash(), mode()}) :: Supervisor.child_spec()
   def child_spec({hash, mode}) do
     %{
       id: {__MODULE__, hash},
@@ -16,7 +18,7 @@ defmodule Torrent.Resume do
     }
   end
 
-  @spec start_link({Torrent.hash(), :full_scan | :verify_saved}) :: GenServer.on_start()
+  @spec start_link({Torrent.hash(), mode()}) :: GenServer.on_start()
   def start_link({hash, mode}) do
     GenServer.start_link(__MODULE__, {hash, mode})
   end
@@ -28,7 +30,18 @@ defmodule Torrent.Resume do
   end
 
   @impl true
-  def handle_info(:verify, {hash, mode}) do
+  def handle_info(:verify, {hash, :skip}) do
+    hash_hex = Torrent.hex_encoded_hash(hash)
+
+    Logger.info(
+      "[resume] hash=#{hash_hex} mode=skip magnet_handoff downloaded=0 left=#{Model.get(hash, :left)}"
+    )
+
+    :ok = Controller.resume_ready(hash)
+    {:stop, :normal, {hash, :skip}}
+  end
+
+  def handle_info(:verify, {hash, mode}) when mode in [:full_scan, :verify_saved] do
     torrent = Model.get(hash)
 
     indices =
@@ -40,20 +53,48 @@ defmodule Torrent.Resume do
           Enum.to_list(0..torrent.last_index)
       end
 
-    Enum.each(indices, fn index ->
-      FileHandle.check?(hash, index)
-    end)
+    # Verify on-disk pieces with bounded concurrency via transient tasks instead
+    # of driving one long-lived Piece GenServer per index. FileHandle.verify/3
+    # reuses the exact do_check side effects (Model/PiecesStatistic updates,
+    # :resume logging) but re-hashes straight off the shared io_devices without
+    # ever starting a process. SHA-1 is CPU-bound, so schedulers_online is the
+    # natural cap; each task frees its piece buffer as it finishes.
+    indices
+    |> Task.async_stream(
+      fn index -> FileHandle.verify(hash, index, :resume) end,
+      max_concurrency: System.schedulers_online(),
+      ordered: false,
+      timeout: :infinity
+    )
+    |> Stream.run()
 
+    # All verify tasks have completed (so every downloaded_piece cast is already
+    # in Model's mailbox) before this synchronous call reconciles from the
+    # bitfield — preserving the original ordering guarantee.
     Model.sync_progress!(hash)
 
     verified =
       Enum.count(indices, fn index -> Torrent.have?(hash, index) end)
 
-    failed = length(indices) - verified
+    not_ok = length(indices) - verified
 
-    Logger.info(
-      "[resume] hash=#{Torrent.hex_encoded_hash(hash)} mode=#{mode} checked=#{length(indices)} ok=#{verified} failed=#{failed} downloaded=#{Model.get(hash, :downloaded)} left=#{Model.get(hash, :left)}"
-    )
+    hash_hex = Torrent.hex_encoded_hash(hash)
+    downloaded = Model.get(hash, :downloaded)
+    left = Model.get(hash, :left)
+    checked = length(indices)
+
+    # :verify_saved only hashes bitfield-marked pieces — a mismatch is corruption.
+    # :full_scan walks every index; zeros on sparse prealloc are absent, not failed.
+    log =
+      case mode do
+        :verify_saved ->
+          "[resume] hash=#{hash_hex} mode=#{mode} checked=#{checked} ok=#{verified} corrupt=#{not_ok} downloaded=#{downloaded} left=#{left}"
+
+        :full_scan ->
+          "[resume] hash=#{hash_hex} mode=#{mode} checked=#{checked} ok=#{verified} absent=#{not_ok} downloaded=#{downloaded} left=#{left}"
+      end
+
+    Logger.info(log)
 
     if Model.downloaded?(hash) do
       Model.set_peer_status(hash, :seed)

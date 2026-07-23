@@ -17,7 +17,8 @@ defmodule Torrent.Downloads.Piece.State do
     Downloads.Piece,
     FileHandle,
     PiecesStatistic,
-    Model
+    Model,
+    Swarm
   }
 
   require Logger
@@ -39,8 +40,17 @@ defmodule Torrent.Downloads.Piece.State do
   # In endgame, request remaining blocks redundantly, but cap the redundancy per block.
   @endgame_window 32
   @endgame_redundancy 3
-  @timeout_request 60_000
+  # Per-peer block request timeout. Shorter than the old 60s so a stalled peer
+  # (common behind CGNAT / lossy dials) releases the in-flight slot sooner and
+  # endgame redundancy can try another peer.
+  @timeout_request 30_000
   @timeout_get_request 100_000
+  # Piece worker with zero in-flight block requests cannot make progress until a
+  # peer unchokes and calls Downloads.request/3. If every peer drops before that
+  # (typical CGNAT churn: interested → disconnect ~5s, no unchoke), the old
+  # 100s stall timer froze effective_max_parallel=1 pumps. Re-check every 10s
+  # while requests=[]; abort when the swarm is empty (no one left to unchoke us).
+  @timeout_idle_orphan 10_000
 
   @compile {:inline, subpieces: 2}
 
@@ -79,7 +89,9 @@ defmodule Torrent.Downloads.Piece.State do
     %__MODULE__{
       state
       | mode: mode,
-        timer: unless(mode, do: new_timer()),
+        # Endgame has no overall stall timer; normal mode starts the short orphan
+        # probe (not the 100s stall timer) until the first block request lands.
+        timer: unless(mode, do: new_idle_orphan_timer()),
         downloaded: downloaded,
         requests_are_dealt: requests_are_dealt
     }
@@ -147,6 +159,7 @@ defmodule Torrent.Downloads.Piece.State do
 
     if Enum.empty?(waiting), do: state.requests_are_dealt.()
 
+    cancel_timer(state.timer, :idle_orphan_check)
     cancel_timer(state.timer, :timeout)
 
     request = %Request{
@@ -157,7 +170,7 @@ defmodule Torrent.Downloads.Piece.State do
 
     %__MODULE__{
       state
-      | timer: unless(Enum.empty?(waiting), do: new_timer()),
+      | timer: unless(Enum.empty?(waiting), do: new_stall_timer()),
         waiting: waiting
     }
     |> new_request(callback, request)
@@ -181,6 +194,12 @@ defmodule Torrent.Downloads.Piece.State do
     {list, requests} = Enum.split_with(state.requests, &(&1.subpiece == subpiece))
 
     if Enum.empty?(list) and not Enum.member?(state.waiting, subpiece) do
+      # Endgame: a corrupt block may arrive first and drop the subpiece from
+      # `waiting`; accept later duplicates so a good copy can overwrite disk.
+      if state.mode == :endgame do
+        FileHandle.write(state.hash, state.index, begin, block)
+      end
+
       state
     else
       FileHandle.write(state.hash, state.index, begin, block)
@@ -233,10 +252,47 @@ defmodule Torrent.Downloads.Piece.State do
     |> do_reject(list)
   end
 
-  @spec down(t(), reference()) :: t()
-  def down(%__MODULE__{} = state, ref) do
-    {peer_id, new_state} = pop_in(state, [Access.key!(:monitoring), ref])
-    timeout(new_state, peer_id)
+  @spec down(t(), reference()) :: t() | {:abort, t()}
+  def down(%__MODULE__{monitoring: monitoring} = state, ref) do
+    case Enum.find(monitoring, fn {_peer_id, mon_ref} -> mon_ref == ref end) do
+      {peer_id, _} ->
+        state
+        |> Map.update!(:monitoring, &Map.delete(&1, peer_id))
+        |> timeout(peer_id)
+        |> maybe_abort_orphan()
+
+      nil ->
+        state
+    end
+  end
+
+  # Periodic probe while requests=[] — see @timeout_idle_orphan above.
+  @spec idle_orphan_check(t()) :: t() | {:abort, t()}
+  def idle_orphan_check(%__MODULE__{requests: [_ | _]} = state), do: state
+
+  def idle_orphan_check(%__MODULE__{} = state) do
+    if orphan_no_sources?(state) do
+      {:abort, cancel_idle_orphan_timer(state)}
+    else
+      %{cancel_idle_orphan_timer(state) | timer: new_idle_orphan_timer()}
+    end
+  end
+
+  @doc false
+  @spec orphan_no_sources?(t()) :: boolean()
+  def orphan_no_sources?(%__MODULE__{hash: hash, monitoring: monitoring}) do
+    map_size(monitoring) == 0 and Swarm.count(hash) == 0
+  end
+
+  @spec maybe_abort_orphan(t()) :: t() | {:abort, t()}
+  defp maybe_abort_orphan(%__MODULE__{requests: [_ | _]} = state), do: state
+
+  defp maybe_abort_orphan(%__MODULE__{} = state) do
+    if orphan_no_sources?(state) do
+      {:abort, cancel_idle_orphan_timer(cancel_stall_timer(state))}
+    else
+      state
+    end
   end
 
   @spec do_reject(t(), list(Request.t())) :: t()
@@ -247,12 +303,38 @@ defmodule Torrent.Downloads.Piece.State do
 
     Enum.each(requests, &cancel_request/1)
 
-    Map.update!(
-      state,
-      :waiting,
-      fn x -> if(state.mode, do: x, else: Enum.map(requests, & &1.subpiece) ++ x) end
-    )
+    state
+    |> Map.update!(:waiting, &requeue_rejected(&1, state, requests))
+    |> restart_stall_timer()
   end
+
+  # Normal mode: rejected/timed-out blocks go back to waiting. Endgame: re-queue
+  # only when redundancy on that subpiece dropped below the cap so choked peers
+  # do not strand blocks exclusively in-flight.
+  @spec requeue_rejected(waiting(), t(), list(Request.t())) :: waiting()
+  defp requeue_rejected(waiting, %__MODULE__{mode: nil}, requests) do
+    Enum.map(requests, & &1.subpiece) ++ waiting
+  end
+
+  defp requeue_rejected(waiting, state, requests) do
+    Enum.reduce(requests, waiting, fn %Request{subpiece: subpiece}, acc ->
+      in_flight = Enum.count(state.requests, &(&1.subpiece == subpiece))
+
+      if in_flight < @endgame_redundancy and subpiece not in acc do
+        [subpiece | acc]
+      else
+        acc
+      end
+    end)
+  end
+
+  # Peer request timeouts re-queue blocks into waiting but previously left the
+  # overall stall timer cancelled, so the worker could live forever in active_indices.
+  defp restart_stall_timer(%__MODULE__{mode: nil, timer: nil, waiting: [_ | _], requests: []} = state) do
+    %{state | timer: new_stall_timer()}
+  end
+
+  defp restart_stall_timer(state), do: state
 
   @spec requests_timer(Peer.id()) :: reference()
   defp requests_timer(peer_id) do
@@ -289,6 +371,22 @@ defmodule Torrent.Downloads.Piece.State do
     Map.update!(state, :requests, &[request | &1])
   end
 
-  @spec new_timer() :: reference()
-  defp new_timer, do: Process.send_after(self(), :timeout, @timeout_get_request)
+  @spec new_idle_orphan_timer() :: reference()
+  defp new_idle_orphan_timer,
+    do: Process.send_after(self(), :idle_orphan_check, @timeout_idle_orphan)
+
+  @spec new_stall_timer() :: reference()
+  defp new_stall_timer, do: Process.send_after(self(), :timeout, @timeout_get_request)
+
+  @spec cancel_idle_orphan_timer(t()) :: t()
+  defp cancel_idle_orphan_timer(%__MODULE__{timer: timer} = state) do
+    cancel_timer(timer, :idle_orphan_check)
+    %{state | timer: nil}
+  end
+
+  @spec cancel_stall_timer(t()) :: t()
+  defp cancel_stall_timer(%__MODULE__{timer: timer} = state) do
+    cancel_timer(timer, :timeout)
+    %{state | timer: nil}
+  end
 end
