@@ -1,5 +1,5 @@
 defmodule Peer.Controller.State do
-  alias Torrent.{Bitfield, PiecesStatistic, Uploader, Downloads, HashServe}
+  alias Torrent.{Bitfield, PiecesStatistic, Uploader, Downloads, HashServe, Superseed}
   alias Peer.{Sender, Controller.FastExtension, HashWire, HashTransfer}
 
   import Peer, only: [make_key: 2]
@@ -47,6 +47,7 @@ defmodule Peer.Controller.State do
     # change). Distinguishes a fresh useless pin from prior progress on another
     # piece still reflected in `downloaded_bytes`.
     pin_downloaded_bytes: 0,
+    superseed_piece: nil,
     bitfield: nil,
     interested: false,
     choke: true,
@@ -76,6 +77,7 @@ defmodule Peer.Controller.State do
           downloaded_bytes: non_neg_integer(),
           pinned_at: non_neg_integer(),
           pin_downloaded_bytes: non_neg_integer(),
+          superseed_piece: Torrent.index() | :all | nil,
           bitfield: bitfield(),
           interested: boolean(),
           choke: boolean(),
@@ -194,16 +196,12 @@ defmodule Peer.Controller.State do
   end
 
   @spec first_message(t(), non_neg_integer()) :: t()
-  def first_message(%__MODULE__{status: :seed, fast_extension: %FastExtension{}} = state, _) do
-    :ok = Sender.have_all(key(state))
-    log_upload(state, "have_all_sent reason=connect")
-    state
-  end
-
   def first_message(%__MODULE__{status: :seed} = state, _) do
-    :ok = Sender.bitfield(key(state))
-    log_upload(state, bitfield_log(state))
-    state
+    if Superseed.active?(state.hash) do
+      assign_superseed_piece(state)
+    else
+      normal_seed_first_message(state)
+    end
   end
 
   def first_message(%__MODULE__{fast_extension: %FastExtension{}} = state, 0) do
@@ -358,20 +356,31 @@ defmodule Peer.Controller.State do
   end
 
   @spec seed(t()) :: t() | {:error, :two_seeders, t()}
-  def seed(%__MODULE__{bitfield: :all} = x), do: {:error, :two_seeders, x}
+  def seed(%__MODULE__{bitfield: :all, status: status} = state) when status != :seed,
+    do: {:error, :two_seeders, state}
 
   def seed(%__MODULE__{} = state) do
     peer_key = key(state)
     if state.interested, do: Sender.not_interested(peer_key)
 
-    :ok = Sender.have_all(peer_key)
-    log_upload(state, "have_all_sent reason=seed_transition")
-
     state
-    |> Map.put(:bitfield, nil)
     |> Map.put(:status, :seed)
     |> Map.put(:interested, false)
-    |> seed_allowed_fast()
+    |> advertise_seed_mode(peer_key)
+  end
+
+  @doc false
+  @spec superseed_assign(t(), Torrent.index() | nil) :: t()
+  def superseed_assign(%__MODULE__{} = state, nil) do
+    :ok = Sender.have_all(key(state))
+    log_upload(state, "have_all_sent reason=superseed_peer_exhausted")
+    %{state | superseed_piece: :all}
+  end
+
+  def superseed_assign(%__MODULE__{} = state, index) do
+    :ok = Sender.have(key(state), index)
+    log_upload(state, "superseed_have_sent index=#{index} reason=rotation")
+    %{state | superseed_piece: index}
   end
 
   @doc """
@@ -495,14 +504,19 @@ defmodule Peer.Controller.State do
       true ->
         PiecesStatistic.inc(state.hash, index)
 
+        state =
+          state
+          |> Map.update!(
+            :bitfield,
+            fn <<prefix::bits-size(^index), _::1, postfix::bits>> ->
+              <<prefix::bits, 1::1, postfix::bits>>
+            end
+          )
+          |> check_interested()
+
         state
-        |> Map.update!(
-          :bitfield,
-          fn <<prefix::bits-size(^index), _::1, postfix::bits>> ->
-            <<prefix::bits, 1::1, postfix::bits>>
-          end
-        )
-        |> check_interested()
+        |> rotate_propagated_superseed_piece(index)
+        |> maybe_confirm_superseed_exit()
     end
   end
 
@@ -511,9 +525,19 @@ defmodule Peer.Controller.State do
       when not is_nil(x),
       do: {:error, :protocol_error, state}
 
-  def handle_bitfield(%__MODULE__{status: :seed} = x, _), do: x
+  def handle_bitfield(%__MODULE__{status: :seed} = state, bitfield) do
+    if Superseed.active?(state.hash) do
+      do_handle_bitfield(state, bitfield)
+    else
+      state
+    end
+  end
 
   def handle_bitfield(%__MODULE__{} = state, bitfield) do
+    do_handle_bitfield(state, bitfield)
+  end
+
+  defp do_handle_bitfield(%__MODULE__{} = state, bitfield) do
     cond do
       Bitfield.valid?(bitfield, state.pieces_count) ->
         PiecesStatistic.update(state.hash, bitfield, state.pieces_count)
@@ -532,6 +556,8 @@ defmodule Peer.Controller.State do
 
         state
         |> check_interested()
+        |> sync_superseed_peer_bitfield()
+        |> maybe_confirm_superseed_exit()
 
       Magnet.Bootstrap.active?(state.hash) and
           byte_size(bitfield) > Bitfield.expected_byte_size(state.pieces_count) ->
@@ -561,6 +587,15 @@ defmodule Peer.Controller.State do
       index >= state.pieces_count ->
         log_upload(state, "request_reject index=#{index} reason=bad_index")
         {:error, :protocol_error, state}
+
+      Superseed.active?(state.hash) and state.superseed_piece not in [index, :all] ->
+        log_upload(state, "request_reject index=#{index} reason=superseed_hidden")
+
+        if state.fast_extension != nil do
+          Sender.reject(key(state), index, begin, length)
+        end
+
+        state
 
       not Torrent.have?(state.hash, index) ->
         # Bitfield vs disk can race during verify/invalidate. BEP 6 reject (or
@@ -672,7 +707,16 @@ defmodule Peer.Controller.State do
   @spec handle_have_all(t()) :: t() | {:error, :two_seeds | :protocol_error, t()}
   def handle_have_all(%__MODULE__{bitfield: :all} = state), do: state
 
-  def handle_have_all(%__MODULE__{status: :seed} = x), do: {:error, :two_seeders, x}
+  def handle_have_all(%__MODULE__{status: :seed} = state) do
+    if Superseed.active?(state.hash) do
+      state
+      |> maybe_drop_partial_bitfield()
+      |> do_handle_have_all()
+      |> maybe_confirm_superseed_exit()
+    else
+      {:error, :two_seeders, state}
+    end
+  end
 
   def handle_have_all(%__MODULE__{bitfield: bin} = state) when is_binary(bin) do
     state
@@ -714,6 +758,26 @@ defmodule Peer.Controller.State do
     PiecesStatistic.remove_peer(state.hash, bin, state.pieces_count)
     %{state | bitfield: nil}
   end
+
+  defp maybe_drop_partial_bitfield(%__MODULE__{bitfield: bin} = state) when is_binary(bin),
+    do: drop_partial_bitfield(state, bin)
+
+  defp maybe_drop_partial_bitfield(state), do: state
+
+  defp maybe_confirm_superseed_exit(%__MODULE__{status: :seed} = state) do
+    complete? =
+      state.bitfield == :all or
+        (is_binary(state.bitfield) and
+           Bitfield.count(state.bitfield, state.pieces_count) == state.pieces_count)
+
+    if complete? and Superseed.confirm_seed(state.hash, state.id) == :deactivated do
+      Torrent.Swarm.seed(state.hash)
+    end
+
+    state
+  end
+
+  defp maybe_confirm_superseed_exit(state), do: state
 
   @spec handle_have_none(t()) :: t() | {:error, :protocol_error, t()}
   def handle_have_none(%__MODULE__{bitfield: x} = state) when not is_nil(x) do
@@ -1122,6 +1186,81 @@ defmodule Peer.Controller.State do
   end
 
   defp offers_pieces?(_), do: false
+
+  defp normal_seed_first_message(%__MODULE__{fast_extension: %FastExtension{}} = state) do
+    :ok = Sender.have_all(key(state))
+    log_upload(state, "have_all_sent reason=connect")
+    state
+  end
+
+  defp normal_seed_first_message(%__MODULE__{} = state) do
+    :ok = Sender.bitfield(key(state))
+    log_upload(state, bitfield_log(state))
+    state
+  end
+
+  defp advertise_seed_mode(%__MODULE__{} = state, peer_key) do
+    if Superseed.active?(state.hash) do
+      assign_superseed_piece(state)
+    else
+      :ok = Sender.have_all(peer_key)
+      log_upload(state, "have_all_sent reason=seed_transition")
+
+      state
+      |> Map.put(:bitfield, nil)
+      |> Map.put(:superseed_piece, nil)
+      |> seed_allowed_fast()
+    end
+  end
+
+  defp assign_superseed_piece(%__MODULE__{} = state) do
+    case Superseed.assign(state.hash, state.id, state.bitfield) do
+      {:ok, index} ->
+        :ok = Sender.have(key(state), index)
+        log_upload(state, "superseed_have_sent index=#{index} reason=assignment")
+        %{state | superseed_piece: index}
+
+      _ ->
+        superseed_assign(state, nil)
+    end
+  end
+
+  defp rotate_propagated_superseed_piece(%__MODULE__{} = state, index) do
+    case Superseed.peer_have(state.hash, state.id, index) do
+      {:rotate, assigned_peer, new_piece} when assigned_peer == state.id ->
+        superseed_assign(state, new_piece)
+
+      {:rotate, assigned_peer, new_piece} ->
+        state.hash
+        |> Peer.make_key(assigned_peer)
+        |> Peer.Controller.superseed_assign(new_piece)
+
+        state
+
+      :ok ->
+        state
+    end
+  end
+
+  defp sync_superseed_peer_bitfield(%__MODULE__{} = state) do
+    if Superseed.active?(state.hash) do
+      _ = Superseed.assign(state.hash, state.id, state.bitfield)
+
+      case state.superseed_piece do
+        index when is_integer(index) ->
+          if has_index?(state, index) do
+            rotate_propagated_superseed_piece(state, index)
+          else
+            state
+          end
+
+        _ ->
+          state
+      end
+    else
+      state
+    end
+  end
 
   @spec seed_allowed_fast(t()) :: t()
   defp seed_allowed_fast(%__MODULE__{fast_extension: %FastExtension{}} = state),

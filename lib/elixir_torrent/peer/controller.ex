@@ -43,6 +43,11 @@ defmodule Peer.Controller do
   @spec seed(Peer.key()) :: :ok
   def seed(key), do: GenServer.cast(via(key), {:seed, []})
 
+  @doc false
+  @spec superseed_assign(Peer.key(), Torrent.index() | nil) :: :ok
+  def superseed_assign(key, index),
+    do: GenServer.cast(via(key), {:superseed_assign, [index]})
+
   @spec choke(Torrent.hash(), Peer.id()) :: :ok
   def choke(hash, id) do
     make_key(hash, id)
@@ -295,6 +300,7 @@ defmodule Peer.Controller do
 
   def terminate({:shutdown, :protocol_error}, state) do
     State.notify_hash_request_disconnect(state, :protocol_error)
+    Torrent.Superseed.release(state.hash, state.id)
     Torrent.PiecesStatistic.remove_peer(state.hash, state.bitfield, state.pieces_count)
     Acceptor.malicious_peer(state.id)
   end
@@ -314,6 +320,7 @@ defmodule Peer.Controller do
     end
 
     maybe_mark_productive_endpoint(state)
+    Torrent.Superseed.release(state.hash, state.id)
     Torrent.PiecesStatistic.remove_peer(state.hash, state.bitfield, state.pieces_count)
     :ok
   end

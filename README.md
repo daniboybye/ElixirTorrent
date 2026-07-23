@@ -180,7 +180,7 @@ Status meanings:
 | [BEP 12](https://www.bittorrent.org/beps/bep_0012.html) | Multitracker metadata | **Full** | Preserves `announce-list` tier structure; sequential tier failover; promotes working tracker within tier |
 | [BEP 14](https://www.bittorrent.org/beps/bep_0014.html) | Local Service Discovery | **Full** | UDP multicast on 239.192.152.143:6771, `BT-SEARCH` broadcast every 5 min for active public torrents; IPv6 group deferred |
 | [BEP 15](https://www.bittorrent.org/beps/bep_0015.html) | UDP tracker protocol | **Full** | Connect, announce, scrape, error packets; connection_id cache; 15×2ⁿ s backoff; compact IPv4/IPv6 peers |
-| [BEP 16](https://www.bittorrent.org/beps/bep_0016.html) | Superseeding | **Not implemented** | Efficient initial-seed strategy; minimizes redundant uploads when first distributing a torrent |
+| [BEP 16](https://www.bittorrent.org/beps/bep_0016.html) | Superseeding | **Full** | Automatically enters initial-seed mode when a live download completes with no confirmed remote seed: one rare fabricated `have` per peer, assignment rotation on propagation, hidden-piece request rejection, and normal seeding restored when a remote peer holds the full torrent |
 | [BEP 19](https://www.bittorrent.org/beps/bep_0019.html) | WebSeed — HTTP/FTP seeding (GetRight-style) | **Full** | `Torrent.WebSeed` per torrent when `metadata["url-list"]` is present; HTTP `Range` GETs feed the same verify/write path as a peer download; never races the peer swarm for a piece; BEP 17 (older httpseeds format) not planned |
 | [BEP 20](https://www.bittorrent.org/beps/bep_0020.html) | Peer ID conventions | **Full** | Prefix `ET0-3-0` |
 | [BEP 23](https://www.bittorrent.org/beps/bep_0023.html) | Compact peer lists | **Full** | Compact IPv4 peers; combined with BEP 7 for `peers6` |
@@ -201,6 +201,7 @@ Status meanings:
 
 ## Recently completed (2026-07)
 
+- **Superseeding (BEP 16)** — a newly completed sole seed hides its full bitfield and assigns one rare piece per peer until the swarm produces another complete seed, reducing redundant initial uploads.
 - **Web seeds (BEP 19)** — HTTP/URL seeding as a third data source alongside peers and DHT, sharing the same piece-verify and write path as a normal download.
 - **Local Service Discovery (BEP 14)** — LAN peer discovery via UDP multicast, no tracker/DHT round-trip needed.
 - **BitTorrent v2 download path (BEP 52, phases 1–5/6)** — pure-v2 `.torrent` files now parse, discover peers through the truncated SHA-256 swarm id, store file-tree content with piece-boundary alignment, and verify completed/resumed pieces through per-file Merkle hashes; top-level hash-transfer IDs 21–23 remain available for peer proofs.
@@ -221,7 +222,6 @@ Work tracked for future releases:
 | --- | --- | --- |
 | Medium | **BEP 7 — full multi-homed announce** | Announce per local listen address (v4/v6), filter link-local/loopback, correct source-IP bind for HTTP and UDP |
 | Medium | **BEP 52 phase 6 — pure-v2 interop** | Verify the Phase 5 `.torrent` path against live libtorrent/qBittorrent peers, then add pure-v2 magnet and webseed support |
-| Low | **BEP 16 — Superseeding** | Efficient initial-seed strategy; minimizes redundant uploads when first distributing a torrent |
 
 Full internal backlog and design rationale live in [`.claude/PLAN.md`](.claude/PLAN.md) and [`.claude/ARCHITECTURE.md`](.claude/ARCHITECTURE.md) (kept in sync with this table).
 

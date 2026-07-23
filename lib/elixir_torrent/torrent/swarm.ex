@@ -157,7 +157,26 @@ defmodule Torrent.Swarm do
   def seed(hash), do: each_childred(hash, &Peer.seed/1)
 
   @spec have(Torrent.hash(), Torrent.index()) :: :ok
-  def have(hash, index), do: each_childred(hash, &Peer.have(&1, index))
+  def have(hash, index) do
+    if Torrent.Superseed.active?(hash) do
+      :ok
+    else
+      each_childred(hash, &Peer.have(&1, index))
+    end
+  end
+
+  @doc false
+  @spec confirmed_seed_count(Torrent.hash()) :: non_neg_integer()
+  def confirmed_seed_count(hash) do
+    hash
+    |> peer_pids()
+    |> Enum.count(fn pid ->
+      case Peer.get_key(pid) do
+        key when is_tuple(key) -> peer_seeder?(key)
+        _ -> false
+      end
+    end)
+  end
 
   @spec reset_rank(Torrent.hash()) :: :ok
   def reset_rank(hash), do: each_childred(hash, &Peer.reset_rank/1)

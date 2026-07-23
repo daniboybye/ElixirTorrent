@@ -6,7 +6,7 @@ defmodule Torrent.Controller do
 
   require Logger
 
-  alias Torrent.{Swarm, PiecesStatistic, Downloads, Model}
+  alias Torrent.{Swarm, PiecesStatistic, Downloads, Model, Superseed}
 
   @next_piece_timeout 2_500
   # Concurrent in-flight pieces per torrent. Each active piece is what lets a
@@ -263,7 +263,7 @@ defmodule Torrent.Controller do
     Downloads.piece(
       hash,
       index,
-      fn -> Swarm.have(hash, index) end,
+      fn -> piece_completed(hash, index) end,
       fn -> send(pid, {:next_piece, :rare}) end
     )
 
@@ -298,8 +298,22 @@ defmodule Torrent.Controller do
 
   defp mark_complete(hash) do
     Model.set_peer_status(hash, :seed)
+    Superseed.activate(hash, Swarm.confirmed_seed_count(hash))
     Swarm.seed(hash)
     Downloads.stop(hash)
+  end
+
+  defp piece_completed(hash, index) do
+    [count] = Torrent.get(hash, [:pieces_count])
+
+    # This callback only runs for a piece completed from the live peer download
+    # path, never for startup resume verification. Entering here prevents a
+    # long-complete torrent from being mistaken for a new initial seed.
+    if Enum.all?(0..(count - 1), &(PiecesStatistic.get_status(hash, &1) == :complete)) do
+      Superseed.arm(hash)
+    else
+      Swarm.have(hash, index)
+    end
   end
 
   defp log_availability_mismatch(hash, index, connected) do

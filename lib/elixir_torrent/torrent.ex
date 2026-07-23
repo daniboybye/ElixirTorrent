@@ -176,6 +176,7 @@ defmodule Torrent do
       {Uploader, hash},
       {Torrent.HashServe, hash},
       {Downloads, hash},
+      {Torrent.Superseed, hash},
       {Swarm, hash},
       {Peer.ConnectionManager, hash},
       {Controller, hash},
