@@ -27,9 +27,11 @@ defmodule PeerReservedTest do
       assert Peer.fast_extension?(reserved)
     end
 
-    test "our handshake does not advertise v2 before the upgrade path is supported" do
-      assert Peer.reserved() == <<0, 0, 0, 0, 0, 0x10, 0, 0x05>>
-      refute Peer.v2_support?(Peer.reserved())
+    test "our handshake advertises BEP 52 v2 support alongside DHT and Fast" do
+      assert Peer.reserved() == <<0, 0, 0, 0, 0, 0x10, 0, 0x15>>
+      assert Peer.v2_support?(Peer.reserved())
+      assert Peer.dht?(Peer.reserved())
+      assert Peer.fast_extension?(Peer.reserved())
     end
   end
 end

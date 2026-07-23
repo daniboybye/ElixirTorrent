@@ -107,12 +107,32 @@ defmodule PeerSenderLoopbackTest do
       assert_receive {:controller, :handle_extended, [0, "d2:id1i1ee"]}, @timeout
     end
 
+    test "dispatches BEP 52 hash messages to Controller" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+      root = :crypto.strong_rand_bytes(32)
+      req = <<root::binary, 0::32, 0::32, 2::32, 1::32>>
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = :gen_tcp.send(server, frame_payload(<<21, req::binary>>))
+      assert_receive {:controller, :handle_hash_request, [decoded]}, @timeout
+      assert decoded.pieces_root == root
+      assert decoded.length == 2
+
+      hashes = :crypto.strong_rand_bytes(96)
+      assert :ok = :gen_tcp.send(server, frame_payload(<<22, req::binary, hashes::binary>>))
+      assert_receive {:controller, :handle_hashes, [^decoded, ^hashes]}, @timeout
+
+      assert :ok = :gen_tcp.send(server, frame_payload(<<23, req::binary>>))
+      assert_receive {:controller, :handle_hash_reject, [^decoded]}, @timeout
+    end
+
     test "unknown wire ids are ignored without stopping the connection" do
       {client, server, listen, key, sender_pid} = start_sender_pair()
 
       on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
 
-      assert :ok = :gen_tcp.send(server, frame_payload(<<21, 0, 0>>))
+      assert :ok = :gen_tcp.send(server, frame_payload(<<18, 0, 0>>))
       Process.sleep(20)
       assert Process.alive?(sender_pid)
       refute_received {:controller, _, _}
@@ -140,6 +160,18 @@ defmodule PeerSenderLoopbackTest do
 
       # have id + 3 bytes (need 4 for index)
       assert :ok = :gen_tcp.send(server, <<0, 0, 0, 4, 4, 0, 0, 0>>)
+
+      ref = Process.monitor(sender_pid)
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
+    end
+
+    test "oversized hashes frame is rejected from its prefix" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      oversized = Peer.HashWire.max_hashes_message_size() + 1
+      assert :ok = :gen_tcp.send(server, <<oversized::32, 22>>)
 
       ref = Process.monitor(sender_pid)
       assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout

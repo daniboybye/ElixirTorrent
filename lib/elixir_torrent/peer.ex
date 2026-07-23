@@ -60,8 +60,8 @@ defmodule Peer do
   @type key :: {id(), Torrent.hash()}
   @type status :: nil | :seed | :connecting_to_peers | Torrent.index()
 
-  # BEP 10 LTEP (byte 5: 0x10), BEP 5 DHT + BEP 6 Fast (byte 7: 0x05)
-  @reserved <<0, 0, 0, 0, 0, 0x10, 0, 5>>
+  # BEP 10 LTEP (byte 5: 0x10), BEP 5 DHT + BEP 6 Fast + BEP 52 v2 (byte 7: 0x15)
+  @reserved <<0, 0, 0, 0, 0, 0x10, 0, 0x15>>
   @id_length 20
   @id version() <> "-" <> :crypto.strong_rand_bytes(@id_length - byte_size(version()) - 1)
 
@@ -142,6 +142,24 @@ defmodule Peer do
   @spec send_pex(pid(), binary()) :: :ok | nil
   def send_pex(pid, payload) when is_pid(pid) and is_binary(payload) do
     if key = get_key(pid), do: Controller.send_pex(key, payload)
+  end
+
+  @doc """
+  Sends a correlated BEP 52 `hash_request` to a v2-capable peer.
+
+  Returns `{:ok, ref}` immediately; the caller receives
+  `{:peer_hash_transfer, ref, result}` when the peer answers or the request
+  times out. Options: `:timeout` (default 30_000 ms).
+  """
+  @spec request_hashes(pid(), Peer.HashWire.t(), keyword()) ::
+          {:ok, reference()} | {:error, term()} | nil
+  def request_hashes(pid, request, opts \\ []) when is_pid(pid) do
+    if key = get_key(pid), do: Controller.request_hashes(key, request, opts)
+  end
+
+  @spec peer_v2_support?(pid()) :: boolean() | nil
+  def peer_v2_support?(pid) when is_pid(pid) do
+    if key = get_key(pid), do: Controller.peer_v2_support?(key)
   end
 
   @spec disconnect(pid()) :: :ok

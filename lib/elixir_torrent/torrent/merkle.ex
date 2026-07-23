@@ -166,6 +166,302 @@ defmodule Torrent.Merkle do
   def verify(_root, _index, _hash, _proof_layers), do: false
 
   @doc """
+  Validates a BEP 52 hash request against a built tree.
+
+  Returns `:ok` or `{:error, reason}` suitable for `hash_reject`.
+  """
+  @spec validate_hash_request(t(), non_neg_integer(), pos_integer(), pos_integer(), pos_integer()) ::
+          :ok | {:error, atom()}
+  def validate_hash_request(tree, base_layer, index, length, proof_layers) do
+    num_layers = merkle_num_layers(tree.block_count)
+
+    with :ok <- validate_request_shape(base_layer, index, length, proof_layers, nil),
+         true <- base_layer < length(tree.levels) || {:error, :invalid_base_layer},
+         true <- proof_layers < num_layers - base_layer || {:error, :invalid_proof_layers},
+         actual = node_count(tree, base_layer),
+         true <- index + length <= actual || {:error, :invalid_index} do
+      :ok
+    end
+  end
+
+  @doc """
+  Builds the concatenated hash list for a BEP 52 `hashes` response from a tree.
+
+  Returns `{:ok, [hash()]}` ordered as base-layer digests followed by proof
+  siblings bottom-up. Omits the first `log2(length)` proof layers per BEP 52.
+  """
+  @spec range_response(
+          t(),
+          non_neg_integer(),
+          non_neg_integer(),
+          pos_integer(),
+          non_neg_integer()
+        ) ::
+          {:ok, [hash()]} | {:error, atom()}
+  def range_response(tree, base_layer, index, length, proof_layers) do
+    with :ok <- validate_hash_request(tree, base_layer, index, length, proof_layers) do
+      nodes = Enum.at(tree.levels, base_layer)
+      base = Enum.slice(nodes, index, length)
+
+      proofs =
+        proof_siblings(tree.levels, tree.block_count, base_layer, index, length, proof_layers)
+
+      {:ok, base ++ proofs}
+    end
+  end
+
+  @doc """
+  Builds a `hashes` payload from nodes already positioned at `base_layer`.
+
+  Used for piece-layer responses backed by root-validated metadata instead of
+  rebuilding the full leaf tree from disk.
+  """
+  @spec range_response_from_layer(
+          [hash()],
+          non_neg_integer(),
+          hash(),
+          non_neg_integer(),
+          pos_integer(),
+          non_neg_integer()
+        ) :: {:ok, [hash()]} | {:error, atom()}
+  def range_response_from_layer(nodes, base_layer, root, index, length, proof_layers) do
+    levels = upward_levels(nodes, base_layer)
+
+    with :ok <- validate_request_shape(base_layer, index, length, proof_layers, base_layer),
+         true <- index + length <= length(nodes) || {:error, :invalid_index},
+         node_count = length(nodes),
+         true <- proof_layers < merkle_num_layers(node_count) || {:error, :invalid_proof_layers},
+         true <- List.last(levels) |> hd() == root || {:error, :root_mismatch} do
+      base = Enum.slice(nodes, index, length)
+
+      proofs = proof_siblings(levels, node_count, 0, index, length, proof_layers)
+      {:ok, base ++ proofs}
+    end
+  end
+
+  @doc """
+  Verifies a decoded BEP 52 `hashes` payload against a pieces root.
+
+  `hashes` is the full list (base ++ proof) in wire order.
+  """
+  @spec verify_hashes(
+          hash(),
+          non_neg_integer(),
+          non_neg_integer(),
+          pos_integer(),
+          non_neg_integer(),
+          [hash()],
+          pos_integer()
+        ) :: boolean()
+  def verify_hashes(root, base_layer, index, length, proof_layers, hashes, block_count)
+      when is_binary(root) and is_list(hashes) and is_integer(block_count) and block_count > 0 do
+    expected = expected_response_count(length, proof_layers)
+
+    if valid_hash?(root) and length(hashes) == expected and
+         Enum.all?(hashes, &valid_hash?/1) do
+      {base, proofs} = Enum.split(hashes, length)
+      verify_hashes_with_proofs(root, base_layer, index, length, proofs, base, block_count)
+    else
+      false
+    end
+  end
+
+  def verify_hashes(_root, _base_layer, _index, _length, _proof_layers, _hashes, _block_count),
+    do: false
+
+  @doc "Returns the piece-layer node hash at `piece_index` in a built tree."
+  @spec piece_node(t(), pos_integer(), pos_integer()) ::
+          {:ok, hash()} | {:error, :invalid_piece_length | :invalid_index}
+  def piece_node(%__MODULE__{} = tree, piece_length, piece_index) do
+    with {:ok, layer} <- piece_layer_level(piece_length),
+         blocks_per_piece = div(piece_length, @block_size),
+         piece_count = ceil_div(tree.block_count, blocks_per_piece),
+         true <- piece_index >= 0 and piece_index < piece_count do
+      {:ok, tree.levels |> Enum.at(layer) |> Enum.at(piece_index)}
+    else
+      false -> {:error, :invalid_index}
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc "Returns the number of 16 KiB leaf blocks covering `file_length` bytes."
+  @spec file_block_count(non_neg_integer()) :: pos_integer()
+  def file_block_count(file_length) when is_integer(file_length) and file_length > 0 do
+    ceil_div(file_length, @block_size)
+  end
+
+  @doc false
+  @spec log2_int(pos_integer()) :: non_neg_integer()
+  def log2_int(length) when is_integer(length) and length >= 2 do
+    if power_of_two?(length), do: integer_log2(length, 0), else: 0
+  end
+
+  @doc """
+  libtorrent `base_tree_layers`: `merkle_num_layers(merkle_num_leafs(count)) - 1`.
+
+  For a power-of-two `count` this is `log2(count) - 1`.
+  """
+  @spec base_tree_layers(pos_integer()) :: non_neg_integer()
+  def base_tree_layers(length) when is_integer(length) and length >= 2 do
+    max(log2_int(length) - 1, 0)
+  end
+
+  @doc "Number of proof sibling hashes appended after the base range (libtorrent `get_hashes`)."
+  @spec proof_append_count(pos_integer(), non_neg_integer()) :: non_neg_integer()
+  def proof_append_count(length, proof_layers)
+      when is_integer(length) and length >= 2 and is_integer(proof_layers) and proof_layers >= 0 do
+    max(0, proof_layers - base_tree_layers(length))
+  end
+
+  @doc "Total 32-byte digests in a `hashes` payload for the given request shape."
+  @spec expected_response_count(pos_integer(), non_neg_integer()) :: non_neg_integer()
+  def expected_response_count(length, proof_layers),
+    do: length + proof_append_count(length, proof_layers)
+
+  @doc "Merkle tree layer count for a file with `block_count` 16 KiB leaves."
+  @spec merkle_num_layers(pos_integer()) :: pos_integer()
+  def merkle_num_layers(block_count) when is_integer(block_count) and block_count > 0 do
+    integer_log2(next_power_of_two(block_count), 0)
+  end
+
+  @doc false
+  @spec flat_our_layer(non_neg_integer(), pos_integer()) :: non_neg_integer()
+  def flat_our_layer(flat_idx, block_count) when is_integer(flat_idx) and flat_idx >= 0 do
+    num_leafs = next_power_of_two(block_count)
+    max_layer = integer_log2(num_leafs, 0)
+    max_layer - flat_lib_layer(flat_idx)
+  end
+
+  @doc false
+  @spec collect_proof_flat_siblings(
+          pos_integer(),
+          non_neg_integer(),
+          pos_integer(),
+          pos_integer(),
+          non_neg_integer()
+        ) :: [non_neg_integer()]
+  def collect_proof_flat_siblings(block_count, index, length, _base_layer \\ 0, proof_layers) do
+    if proof_layers == 0 do
+      []
+    else
+      start = flat_start_index(block_count, 0, index)
+      base_tree = base_tree_layers(length)
+
+      {_, acc} =
+        proof_parent_fold(proof_layers, start, [], fn i, {proof_idx, acc} ->
+          proof_idx = if proof_idx > 0, do: flat_parent(proof_idx), else: 0
+
+          acc =
+            if i >= base_tree and proof_idx > 0 do
+              [flat_sibling(proof_idx) | acc]
+            else
+              acc
+            end
+
+          {proof_idx, acc}
+        end)
+
+      Enum.reverse(acc)
+    end
+  end
+
+  @doc """
+  Leaf block indices that must be read from disk to serve a leaf-layer request.
+
+  Exposed for tests verifying bounded I/O.
+  """
+  @spec leaf_read_indices(
+          pos_integer(),
+          pos_integer(),
+          non_neg_integer(),
+          pos_integer(),
+          non_neg_integer()
+        ) :: [non_neg_integer()]
+  def leaf_read_indices(block_count, piece_length, index, length, proof_layers) do
+    with {:ok, piece_layer} <- piece_layer_level(piece_length) do
+      block_count
+      |> leaf_read_index_set(piece_length, piece_layer, index, length, proof_layers)
+      |> MapSet.to_list()
+      |> Enum.sort()
+    else
+      _ -> []
+    end
+  end
+
+  @doc """
+  Builds a BEP 52 leaf-layer `hashes` response using bounded `:file.pread` I/O.
+
+  Reconstructs touched piece subtrees and verifies them against `piece_hashes`
+  before returning base hashes plus libtorrent-ordered proof siblings.
+  """
+  @spec leaf_range_response_from_disk(
+          Path.t(),
+          non_neg_integer(),
+          [hash()],
+          pos_integer(),
+          non_neg_integer(),
+          pos_integer(),
+          non_neg_integer()
+        ) :: {:ok, [hash()]} | {:error, term()}
+  def leaf_range_response_from_disk(
+        path,
+        file_length,
+        piece_hashes,
+        piece_length,
+        index,
+        length,
+        proof_layers
+      ) do
+    block_count = file_block_count(file_length)
+    num_layers = merkle_num_layers(block_count)
+
+    with :ok <- validate_request_shape(0, index, length, proof_layers, 0),
+         true <- index + length <= block_count || {:error, :invalid_index},
+         true <- proof_layers < num_layers || {:error, :invalid_proof_layers},
+         {:ok, piece_layer} <- piece_layer_level(piece_length),
+         {:ok, fd} <- :file.open(path, [:binary, :raw, :read]) do
+      try do
+        metadata_levels = metadata_levels(piece_hashes, piece_layer)
+
+        indices =
+          leaf_read_index_set(block_count, piece_length, piece_layer, index, length, proof_layers)
+
+        cache = read_leaf_cache(fd, file_length, block_count, indices)
+
+        with :ok <-
+               verify_piece_subtrees(
+                 cache,
+                 piece_hashes,
+                 piece_length,
+                 block_count,
+                 index,
+                 length
+               ) do
+          base = for leaf <- index..(index + length - 1), do: Map.fetch!(cache, leaf)
+
+          proofs =
+            proof_siblings_from_disk(
+              metadata_levels,
+              cache,
+              block_count,
+              piece_layer,
+              index,
+              length,
+              proof_layers
+            )
+
+          {:ok, base ++ proofs}
+        end
+      after
+        :file.close(fd)
+      end
+    else
+      {:error, _} = err -> err
+      _ -> {:error, :invalid_request}
+    end
+  end
+
+  @doc """
   Validates and normalizes BEP 52 `file tree` and top-level `piece layers`.
 
   The returned per-file `piece_hashes` is uniform for later storage and wire
@@ -261,9 +557,16 @@ defmodule Torrent.Merkle do
     |> root_from_nodes(hash_pair(padding, padding))
   end
 
-  defp piece_layer_level(piece_length)
-       when is_integer(piece_length) and piece_length >= @block_size and
-              rem(piece_length, @block_size) == 0 do
+  @doc """
+  Returns the piece-layer tree level for a torrent piece length.
+
+  Layer zero is the 16 KiB leaf layer; the piece layer is
+  `log2(piece_length / block_size)`.
+  """
+  @spec piece_layer_level(pos_integer()) :: {:ok, non_neg_integer()} | {:error, atom()}
+  def piece_layer_level(piece_length)
+      when is_integer(piece_length) and piece_length >= @block_size and
+             rem(piece_length, @block_size) == 0 do
     blocks = div(piece_length, @block_size)
 
     if power_of_two?(blocks),
@@ -271,7 +574,470 @@ defmodule Torrent.Merkle do
       else: {:error, :invalid_piece_length}
   end
 
-  defp piece_layer_level(_piece_length), do: {:error, :invalid_piece_length}
+  def piece_layer_level(_piece_length), do: {:error, :invalid_piece_length}
+
+  defp validate_request_shape(base_layer, index, length, proof_layers, piece_layer) do
+    allowed_layers =
+      case piece_layer do
+        nil -> [0]
+        layer -> [0, layer]
+      end
+
+    cond do
+      base_layer not in allowed_layers ->
+        {:error, :invalid_base_layer}
+
+      length < 2 or length > 512 or not power_of_two?(length) ->
+        {:error, :invalid_length}
+
+      rem(index, length) != 0 ->
+        {:error, :invalid_index}
+
+      index < 0 or proof_layers < 0 ->
+        {:error, :invalid_index}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp node_count(%__MODULE__{block_count: block_count}, layer) do
+    ceil_div(block_count, Integer.pow(2, layer))
+  end
+
+  # libtorrent flat Merkle heap (root at index 0, leaves at high indices).
+  defp flat_layer_start(layer), do: Integer.pow(2, layer) - 1
+
+  defp flat_lib_layer(idx) when idx >= 0, do: flat_lib_layer(idx, 1)
+
+  defp flat_lib_layer(idx, layer) do
+    if idx > Integer.pow(2, layer) - 2 do
+      flat_lib_layer(idx, layer + 1)
+    else
+      layer - 1
+    end
+  end
+
+  defp flat_parent(0), do: 0
+  defp flat_parent(idx) when idx > 0, do: div(idx - 1, 2)
+
+  defp flat_sibling(0), do: 0
+
+  defp flat_sibling(idx) when idx > 0 do
+    if rem(idx, 2) == 1, do: idx + 1, else: idx - 1
+  end
+
+  defp flat_start_index(block_count, base_layer, index) do
+    num_leafs = next_power_of_two(block_count)
+    max_layer = integer_log2(num_leafs, 0)
+    lib_base = max_layer - base_layer
+    flat_layer_start(lib_base) + index
+  end
+
+  defp flat_to_leaf_index(flat_idx, num_leafs), do: flat_idx - (num_leafs - 1)
+
+  defp proof_siblings(levels, block_count, base_layer, index, length, proof_layers) do
+    start = flat_start_index(block_count, base_layer, index)
+    base_tree = base_tree_layers(length)
+
+    {_, acc} =
+      proof_parent_fold(proof_layers, start, [], fn i, {proof_idx, acc} ->
+        proof_idx = if proof_idx > 0, do: flat_parent(proof_idx), else: 0
+
+        acc =
+          if i >= base_tree and proof_idx > 0 do
+            sib = flat_sibling(proof_idx)
+            [flat_hash_from_levels(levels, block_count, sib) | acc]
+          else
+            acc
+          end
+
+        {proof_idx, acc}
+      end)
+
+    Enum.reverse(acc)
+  end
+
+  defp flat_hash_from_levels(levels, block_count, flat_idx) do
+    num_leafs = next_power_of_two(block_count)
+    max_layer = integer_log2(num_leafs, 0)
+    lib_layer = flat_lib_layer(flat_idx)
+    our_layer = max_layer - lib_layer
+    offset = flat_idx - flat_layer_start(lib_layer)
+    layer_nodes = Enum.at(levels, our_layer, [])
+    actual = ceil_div(block_count, Integer.pow(2, our_layer))
+
+    if offset < length(layer_nodes) and offset < actual do
+      Enum.at(layer_nodes, offset)
+    else
+      padding_hash(our_layer)
+    end
+  end
+
+  defp proof_siblings_from_disk(
+         metadata_levels,
+         cache,
+         block_count,
+         piece_layer,
+         index,
+         length,
+         proof_layers
+       ) do
+    if proof_layers == 0 do
+      []
+    else
+      num_leafs = next_power_of_two(block_count)
+      max_layer = integer_log2(num_leafs, 0)
+      start = flat_start_index(block_count, 0, index)
+      base_tree = base_tree_layers(length)
+
+      {_, acc} =
+        proof_parent_fold(proof_layers, start, [], fn i, {proof_idx, acc} ->
+          proof_idx = if proof_idx > 0, do: flat_parent(proof_idx), else: 0
+
+          acc =
+            if i >= base_tree and proof_idx > 0 do
+              sib = flat_sibling(proof_idx)
+
+              hash =
+                flat_hash_for_disk_response(
+                  metadata_levels,
+                  cache,
+                  block_count,
+                  max_layer,
+                  piece_layer,
+                  sib
+                )
+
+              [hash | acc]
+            else
+              acc
+            end
+
+          {proof_idx, acc}
+        end)
+
+      Enum.reverse(acc)
+    end
+  end
+
+  defp flat_hash_for_disk_response(
+         metadata_levels,
+         cache,
+         block_count,
+         max_layer,
+         piece_layer,
+         flat_idx
+       ) do
+    if flat_our_layer(flat_idx, block_count) >= piece_layer do
+      flat_hash_from_metadata(metadata_levels, block_count, piece_layer, flat_idx)
+    else
+      flat_hash_from_cache(cache, block_count, max_layer, flat_idx)
+    end
+  end
+
+  defp metadata_levels(piece_hashes, piece_layer) do
+    upward_levels(piece_hashes, piece_layer)
+  end
+
+  defp flat_hash_from_metadata(metadata_levels, block_count, piece_layer, flat_idx) do
+    num_leafs = next_power_of_two(block_count)
+    max_layer = integer_log2(num_leafs, 0)
+    our_layer = flat_our_layer(flat_idx, block_count)
+    meta_layer = our_layer - piece_layer
+    offset = flat_idx - flat_layer_start(max_layer - our_layer)
+    layer_nodes = Enum.at(metadata_levels, meta_layer, [])
+
+    if offset < length(layer_nodes) do
+      Enum.at(layer_nodes, offset)
+    else
+      padding_hash(piece_layer + meta_layer)
+    end
+  end
+
+  defp flat_hash_from_cache(cache, block_count, max_layer, flat_idx) do
+    subtree_hash_from_cache(cache, block_count, max_layer, flat_idx)
+  end
+
+  defp subtree_hash_from_cache(cache, block_count, max_layer, flat_idx) do
+    lib_layer = flat_lib_layer(flat_idx)
+
+    if lib_layer == max_layer do
+      leaf = flat_to_leaf_index(flat_idx, next_power_of_two(block_count))
+
+      cond do
+        leaf < 0 or leaf >= block_count -> @zero_hash
+        Map.has_key?(cache, leaf) -> Map.fetch!(cache, leaf)
+        true -> @zero_hash
+      end
+    else
+      left_child = flat_first_child(flat_idx)
+      right_child = left_child + 1
+
+      left =
+        if lib_layer + 1 == max_layer do
+          leaf = flat_to_leaf_index(left_child, next_power_of_two(block_count))
+          Map.get(cache, leaf, @zero_hash)
+        else
+          subtree_hash_from_cache(cache, block_count, max_layer, left_child)
+        end
+
+      right =
+        if lib_layer + 1 == max_layer do
+          leaf = flat_to_leaf_index(right_child, next_power_of_two(block_count))
+          Map.get(cache, leaf, @zero_hash)
+        else
+          subtree_hash_from_cache(cache, block_count, max_layer, right_child)
+        end
+
+      hash_pair(left, right)
+    end
+  end
+
+  defp flat_first_child(flat_idx), do: flat_idx * 2 + 1
+
+  defp verify_hashes_with_proofs(root, base_layer, index, length, proofs, base, block_count) do
+    start = flat_start_index(block_count, base_layer, index)
+    leaf_count = next_power_of_two(length)
+    base_num_layers = merkle_num_layers(leaf_count)
+    insert_root_idx = Bitwise.bsr(start, base_num_layers)
+    subtree_root = subtree_root_from_base(base, length, leaf_count)
+
+    if insert_root_idx == 0 and subtree_root == root do
+      true
+    else
+      tree = %{0 => root}
+      validate_and_insert_proofs(tree, insert_root_idx, subtree_root, proofs)
+    end
+  end
+
+  defp subtree_root_from_base(base, length, leaf_count) do
+    padded =
+      base ++ List.duplicate(@zero_hash, leaf_count - length)
+
+    padded
+    |> then(&build_levels([&1]))
+    |> List.last()
+    |> hd()
+  end
+
+  defp validate_and_insert_proofs(tree, target_idx, node, proofs) do
+    existing = Map.get(tree, target_idx, @zero_hash)
+
+    if existing != @zero_hash and existing != node do
+      false
+    else
+      tree = Map.put(tree, target_idx, node)
+      cursor = target_idx
+
+      result =
+        Enum.reduce_while(proofs, {tree, cursor, false}, fn proof, {tree, cursor, _done} ->
+          if cursor == 0 do
+            {:halt, {tree, cursor, false}}
+          else
+            sib_idx = flat_sibling(cursor)
+            sib_existing = Map.get(tree, sib_idx, @zero_hash)
+
+            tree =
+              cond do
+                sib_existing == @zero_hash ->
+                  Map.put(tree, sib_idx, proof)
+
+                sib_existing == proof ->
+                  tree
+
+                true ->
+                  nil
+              end
+
+            if tree == nil do
+              {:halt, {tree, cursor, false}}
+            else
+              left = min(sib_idx, cursor)
+              parent_hash = hash_pair(Map.fetch!(tree, left), Map.fetch!(tree, left + 1))
+              cursor = flat_parent(cursor)
+              known = Map.get(tree, cursor, @zero_hash)
+
+              cond do
+                known == parent_hash ->
+                  {:halt, {tree, cursor, true}}
+
+                known != @zero_hash ->
+                  {:halt, {tree, cursor, false}}
+
+                true ->
+                  {:cont, {Map.put(tree, cursor, parent_hash), cursor, false}}
+              end
+            end
+          end
+        end)
+
+      case result do
+        {_tree, _cursor, true} -> true
+        _ -> false
+      end
+    end
+  end
+
+  defp upward_levels(nodes, start_layer) do
+    padded =
+      nodes ++
+        List.duplicate(
+          padding_hash(start_layer),
+          next_power_of_two(length(nodes)) - length(nodes)
+        )
+
+    build_upward([padded])
+  end
+
+  defp build_upward([[_root] | _] = levels), do: Enum.reverse(levels)
+
+  defp build_upward([current | _] = levels) do
+    parents =
+      current
+      |> Enum.chunk_every(2)
+      |> Enum.map(fn [left, right] -> hash_pair(left, right) end)
+
+    build_upward([parents | levels])
+  end
+
+  defp proof_parent_fold(0, start, acc, _fun), do: {start, acc}
+
+  defp proof_parent_fold(proof_layers, start, acc, fun) when proof_layers > 0 do
+    Enum.reduce(0..(proof_layers - 1), {start, acc}, fun)
+  end
+
+  defp proof_sibling_leaf_indices(
+         block_count,
+         _piece_length,
+         piece_layer,
+         index,
+         length,
+         proof_layers
+       ) do
+    collect_proof_flat_siblings(block_count, index, length, 0, proof_layers)
+    |> Enum.flat_map(fn flat_idx ->
+      if flat_our_layer(flat_idx, block_count) >= piece_layer do
+        []
+      else
+        leaf_indices_for_flat_node(flat_idx, block_count)
+      end
+    end)
+  end
+
+  defp leaf_indices_for_flat_node(flat_idx, block_count) do
+    our_layer = flat_our_layer(flat_idx, block_count)
+    span = Integer.pow(2, our_layer)
+    num_leafs = next_power_of_two(block_count)
+    max_layer = integer_log2(num_leafs, 0)
+    node_offset = flat_idx - flat_layer_start(max_layer - our_layer)
+    first = node_offset * span
+    last = min(first + span - 1, block_count - 1)
+
+    if first <= last, do: Enum.to_list(first..last), else: []
+  end
+
+  defp leaf_read_index_set(block_count, piece_length, piece_layer, index, length, proof_layers) do
+    blocks_per_piece = div(piece_length, @block_size)
+    first_piece = div(index, blocks_per_piece)
+    last_piece = div(index + length - 1, blocks_per_piece)
+
+    piece_indices =
+      for piece <- first_piece..last_piece,
+          leaf <-
+            (piece * blocks_per_piece)..min((piece + 1) * blocks_per_piece - 1, block_count - 1),
+          into: MapSet.new(),
+          do: leaf
+
+    proof_indices =
+      proof_sibling_leaf_indices(
+        block_count,
+        piece_length,
+        piece_layer,
+        index,
+        length,
+        proof_layers
+      )
+      |> MapSet.new()
+
+    MapSet.new(index..(index + length - 1))
+    |> MapSet.union(proof_indices)
+    |> MapSet.union(piece_indices)
+    |> MapSet.filter(&(&1 < block_count))
+  end
+
+  defp read_leaf_cache(fd, file_length, block_count, indices) do
+    Enum.reduce(indices, %{}, fn leaf, acc ->
+      Map.put(acc, leaf, leaf_hash_from_fd(fd, file_length, block_count, leaf))
+    end)
+  end
+
+  defp leaf_hash_from_fd(fd, file_length, block_count, leaf_index) do
+    offset = leaf_index * @block_size
+
+    data =
+      cond do
+        offset >= file_length ->
+          <<>>
+
+        offset + @block_size > file_length ->
+          size = file_length - offset
+          {:ok, block} = :file.pread(fd, offset, size)
+          block
+
+        true ->
+          {:ok, block} = :file.pread(fd, offset, @block_size)
+          block
+      end
+
+    cond do
+      leaf_index >= block_count -> @zero_hash
+      byte_size(data) == 0 -> @zero_hash
+      true -> :crypto.hash(:sha256, data)
+    end
+  end
+
+  defp subtree_hash(cache, block_count, layer, node_index) do
+    if layer == 0 do
+      if node_index < block_count do
+        Map.get(cache, node_index, @zero_hash)
+      else
+        @zero_hash
+      end
+    else
+      left = subtree_hash(cache, block_count, layer - 1, node_index * 2)
+      right = subtree_hash(cache, block_count, layer - 1, node_index * 2 + 1)
+      hash_pair(left, right)
+    end
+  end
+
+  defp verify_piece_subtrees(cache, piece_hashes, piece_length, block_count, index, length) do
+    blocks_per_piece = div(piece_length, @block_size)
+    first_piece = div(index, blocks_per_piece)
+    last_piece = div(index + length - 1, blocks_per_piece)
+
+    if Enum.all?(first_piece..last_piece, fn piece_idx ->
+         computed = piece_subtree_hash(cache, block_count, blocks_per_piece, piece_idx)
+         Enum.at(piece_hashes, piece_idx) == computed
+       end) do
+      :ok
+    else
+      {:error, :piece_mismatch}
+    end
+  end
+
+  defp piece_subtree_hash(cache, block_count, blocks_per_piece, piece_idx) do
+    if blocks_per_piece == 1 do
+      if piece_idx < block_count do
+        Map.get(cache, piece_idx, @zero_hash)
+      else
+        @zero_hash
+      end
+    else
+      layer = log2_int(blocks_per_piece)
+      subtree_hash(cache, block_count, layer, piece_idx)
+    end
+  end
 
   defp integer_log2(1, acc), do: acc
   defp integer_log2(value, acc), do: integer_log2(div(value, 2), acc + 1)

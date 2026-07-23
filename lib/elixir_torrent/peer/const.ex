@@ -26,10 +26,10 @@ defmodule Peer.Const do
       # Extended payloads are framed in Peer.LTEP (handshake extended id 0).
       @extended_id <<20>>
 
-      # Hash Transfer Protocol
-      # @hash_request_id 0x15
-      # @hashed_id 0x16
-      # @hash_reject_id 0x17
+      # BEP 52 Hash Transfer (top-level wire ids 21–23, not LTEP)
+      @hash_request_id <<21>>
+      @hashes_id <<22>>
+      @hash_reject_id <<23>>
     end
   end
 end

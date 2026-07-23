@@ -25,7 +25,7 @@ defmodule Peer.LTEPTest do
 
     test "Peer.reserved/0 and Magnet.Peer.reserved/0 advertise LTEP at byte index 5" do
       assert Peer.LTEP.extension_protocol?(Peer.reserved())
-      assert Peer.reserved() == <<0, 0, 0, 0, 0, 0x10, 0, 5>>
+      assert Peer.reserved() == <<0, 0, 0, 0, 0, 0x10, 0, 0x15>>
       assert Peer.LTEP.extension_protocol?(Magnet.Peer.reserved())
       assert Magnet.Peer.reserved() == Peer.reserved()
     end

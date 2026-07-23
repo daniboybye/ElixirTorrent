@@ -10,6 +10,7 @@ defmodule Peer.Sender do
 
   @timeout 100_000
   @max_length Torrent.Downloads.piece_max_length()
+  @max_hashes_message_size Peer.HashWire.max_hashes_message_size()
 
   defstruct [:socket, :buffer, :key, active: false]
 
@@ -98,6 +99,18 @@ defmodule Peer.Sender do
   @spec allowed_fast(Peer.key(), Torrent.index()) :: :ok
   def allowed_fast(key, index),
     do: GenServer.cast(via(key), {:allowed_fast, index})
+
+  @spec hash_request(Peer.key(), Peer.HashWire.t()) :: :ok
+  def hash_request(key, %Peer.HashWire{} = req),
+    do: GenServer.cast(via(key), {:hash_request, req})
+
+  @spec hashes(Peer.key(), Peer.HashWire.t(), iodata()) :: :ok
+  def hashes(key, %Peer.HashWire{} = req, digest_blob),
+    do: GenServer.cast(via(key), {:hashes, req, digest_blob})
+
+  @spec hash_reject(Peer.key(), Peer.HashWire.t()) :: :ok
+  def hash_reject(key, %Peer.HashWire{} = req),
+    do: GenServer.cast(via(key), {:hash_reject, req})
 
   @spec send_operations(Peer.key(), [term()]) :: :ok
   def send_operations(key, operations) when is_list(operations) do
@@ -237,6 +250,15 @@ defmodule Peer.Sender do
   def handle_cast({:allowed_fast, index}, state),
     do: do_send(state, [@allowed_fast_id, <<index::32>>])
 
+  def handle_cast({:hash_request, req}, state),
+    do: do_send(state, [@hash_request_id, Peer.HashWire.encode_request(req)])
+
+  def handle_cast({:hashes, req, digests}, state),
+    do: do_send(state, [@hashes_id, Peer.HashWire.encode_hashes(req, digests)])
+
+  def handle_cast({:hash_reject, req}, state),
+    do: do_send(state, [@hash_reject_id, Peer.HashWire.encode_reject(req)])
+
   def handle_info(:drain_buffered, state), do: drain_inbound(state)
 
   # MSE: active-mode data is tagged with the inner (raw) socket and is ciphertext;
@@ -338,6 +360,10 @@ defmodule Peer.Sender do
 
       :incomplete ->
         {:noreply, state, @timeout}
+
+      :protocol_error ->
+        Acceptor.malicious_peer(Peer.key_to_id(key))
+        {:stop, {:shutdown, :protocol_error}, state}
     end
   end
 
@@ -399,7 +425,10 @@ defmodule Peer.Sender do
     end
   end
 
-  @spec take_message(binary()) :: {:ok, binary(), binary()} | :incomplete
+  @spec take_message(binary()) :: {:ok, binary(), binary()} | :incomplete | :protocol_error
+  defp take_message(<<len::32, 22, _::binary>>) when len > @max_hashes_message_size,
+    do: :protocol_error
+
   defp take_message(<<len::32, rest::binary>>) when byte_size(rest) >= len do
     message = binary_part(rest, 0, len)
     rest2 = binary_part(rest, len, byte_size(rest) - len)
@@ -408,8 +437,8 @@ defmodule Peer.Sender do
 
   defp take_message(_), do: :incomplete
 
-  # Core + DHT port + Fast + LTEP. Not BEP 52 hash_* (21–23) until phase 4.
-  @known_wire_ids [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 20]
+  # Core + DHT port + Fast + LTEP + BEP 52 hash transfer (21–23).
+  @known_wire_ids [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 20, 21, 22, 23]
 
   defguardp is_known_wire_id(id) when id in @known_wire_ids
 
@@ -476,11 +505,30 @@ defmodule Peer.Sender do
   defp parse(<<@extended_id, extended_id::8, payload::binary>>, key),
     do: handle_extended(key, extended_id, payload)
 
+  defp parse(<<@hash_request_id, payload::binary>>, key) do
+    case Peer.HashWire.decode_request(payload) do
+      {:ok, req} -> handle_hash_request(key, req)
+      _ -> :protocol_error
+    end
+  end
+
+  defp parse(<<@hashes_id, payload::binary>>, key) do
+    with {:ok, req, hashes} <- Peer.HashWire.decode_hashes(payload),
+         :ok <- Peer.HashWire.validate_hashes_payload(req, hashes) do
+      handle_hashes(key, req, hashes)
+    else
+      _ -> :protocol_error
+    end
+  end
+
+  defp parse(<<@hash_reject_id, payload::binary>>, key) do
+    case Peer.HashWire.decode_request(payload) do
+      {:ok, req} -> handle_hash_reject(key, req)
+      _ -> :protocol_error
+    end
+  end
+
   # BEP 3 forward-compat: unknown message *types* are ignored (libtorrent /
-  # qBittorrent do the same). BEP 52 `hash_request`/`hashes`/`hash_reject`
-  # (ids 21–23) hit this path today — treating them as protocol_error was
-  # tearing down otherwise-healthy peers via one_for_all + max_restarts:0.
-  # Malformed payloads of *known* ids still fall through to protocol_error.
   defp parse(<<id, _::binary>> = msg, key) when not is_known_wire_id(id) do
     log_wire(key, "ignored_unknown id=#{id} bytes=#{byte_size(msg)}", :debug)
     :ok

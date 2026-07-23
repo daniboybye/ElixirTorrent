@@ -1,6 +1,6 @@
 defmodule Peer.Controller.State do
-  alias Torrent.{Bitfield, PiecesStatistic, Uploader, Downloads}
-  alias Peer.{Sender, Controller.FastExtension}
+  alias Torrent.{Bitfield, PiecesStatistic, Uploader, Downloads, HashServe}
+  alias Peer.{Sender, Controller.FastExtension, HashWire, HashTransfer}
 
   import Peer, only: [make_key: 2]
 
@@ -17,6 +17,8 @@ defmodule Peer.Controller.State do
     :peer_reserved,
     :downloaded_at_connect,
     :ltep,
+    peer_v2_support?: false,
+    hash_requests: %{},
     requests: MapSet.new(),
     # Outbound block requests accepted by a piece worker (:ok from
     # Downloads.request/4) whose {:request, _} callback cast hasn't been
@@ -64,6 +66,8 @@ defmodule Peer.Controller.State do
           pieces_count: pos_integer(),
           socket: Peer.Transport.socket(),
           ltep: Peer.LTEP.Session.t() | nil,
+          peer_v2_support?: boolean(),
+          hash_requests: %{Peer.HashTransfer.ref() => map()},
           requests: MapSet.t(subpiece()),
           pending_requests: non_neg_integer(),
           rank: non_neg_integer(),
@@ -86,6 +90,7 @@ defmodule Peer.Controller.State do
   # a peer advertises a smaller reqq we honor it instead of overflowing its queue.
   @max_unanswered_requests 64
   @request_pipeline_depth 64
+  @max_pending_hash_requests 8
   # How long a peer may stay pinned to a piece with choke_me and zero bytes on
   # that pin before Swarm may reassign it. Endgame uses a shorter threshold so
   # scarce unchokes rotate across ALL remaining pieces instead of monopolizing
@@ -789,6 +794,170 @@ defmodule Peer.Controller.State do
       &MapSet.put(&1, index)
     )
     |> make_request
+  end
+
+  @spec handle_hash_request(t(), HashWire.t()) :: t()
+  def handle_hash_request(%__MODULE__{} = state, %HashWire{} = req) do
+    sender_key = key(state)
+
+    deliver = fn
+      {:hashes, hashes} ->
+        blob = IO.iodata_to_binary(hashes)
+
+        case HashWire.validate_hashes_payload(req, blob) do
+          :ok -> Sender.hashes(sender_key, req, blob)
+          _ -> Sender.hash_reject(sender_key, req)
+        end
+
+      :reject ->
+        Sender.hash_reject(sender_key, req)
+    end
+
+    _ = HashServe.serve(state.hash, req, sender_key, deliver)
+    state
+  end
+
+  @spec handle_hashes(t(), HashWire.t(), binary()) :: t() | {:error, :protocol_error, t()}
+  def handle_hashes(%__MODULE__{} = state, %HashWire{} = req, hashes_binary) do
+    case take_hash_request(state, req) do
+      {nil, _state} ->
+        state
+
+      {pending, state} ->
+        with :ok <- HashWire.validate_hashes_payload(req, hashes_binary),
+             {:ok, block_count} <- hash_verify_block_count(state.hash, req),
+             {:ok, {base, proof}} <- HashWire.split_hashes(req, hashes_binary),
+             all = base ++ proof,
+             true <-
+               Torrent.Merkle.verify_hashes(
+                 req.pieces_root,
+                 req.base_layer,
+                 req.index,
+                 req.length,
+                 req.proof_layers,
+                 all,
+                 block_count
+               ) do
+          HashTransfer.notify(pending.caller, pending.ref, {:ok, req, all})
+          state
+        else
+          _ ->
+            HashTransfer.notify(pending.caller, pending.ref, {:error, :protocol_error, req})
+            {:error, :protocol_error, state}
+        end
+    end
+  end
+
+  @spec handle_hash_reject(t(), HashWire.t()) :: t()
+  def handle_hash_reject(%__MODULE__{} = state, %HashWire{} = req) do
+    case take_hash_request(state, req) do
+      {nil, state} ->
+        state
+
+      {pending, state} ->
+        HashTransfer.notify(pending.caller, pending.ref, {:reject, req})
+        state
+    end
+  end
+
+  @doc false
+  @spec notify_hash_request_disconnect(t(), term()) :: :ok
+  def notify_hash_request_disconnect(%__MODULE__{hash_requests: requests}, _reason)
+      when map_size(requests) == 0,
+      do: :ok
+
+  def notify_hash_request_disconnect(%__MODULE__{} = state, _reason) do
+    Enum.each(state.hash_requests, fn {_key, pending} ->
+      Process.cancel_timer(pending.timer)
+      HashTransfer.notify(pending.caller, pending.ref, {:disconnect, pending.request})
+    end)
+
+    :ok
+  end
+
+  @doc false
+  @spec start_hash_request(t(), HashWire.t(), pid(), timeout()) ::
+          {:ok, reference(), t()} | {:error, term(), t()}
+  def start_hash_request(%__MODULE__{peer_v2_support?: false} = state, _req, _caller, _timeout) do
+    {:error, :peer_not_v2, state}
+  end
+
+  def start_hash_request(%__MODULE__{} = state, %HashWire{} = req, caller, timeout) do
+    req_key = HashTransfer.request_key(req)
+
+    cond do
+      Map.has_key?(state.hash_requests, req_key) ->
+        {:error, :already_pending, state}
+
+      map_size(state.hash_requests) >= @max_pending_hash_requests ->
+        {:error, :too_many_pending, state}
+
+      true ->
+        case HashServe.validate_outbound(state.hash, req) do
+          :ok ->
+            ref = make_ref()
+            timer = Process.send_after(self(), {:hash_request_timeout, ref}, timeout)
+            pending = %{ref: ref, request: req, caller: caller, timer: timer}
+            :ok = Sender.hash_request(key(state), req)
+
+            {:ok, ref,
+             %{
+               state
+               | hash_requests: Map.put(state.hash_requests, req_key, pending)
+             }}
+
+          {:error, reason} ->
+            {:error, reason, state}
+        end
+    end
+  end
+
+  @doc false
+  @spec drop_hash_request(t(), reference()) :: {map() | nil, t()}
+  def drop_hash_request(%__MODULE__{} = state, ref) do
+    case find_hash_request(state, ref) do
+      nil ->
+        {nil, state}
+
+      {key, pending} ->
+        Process.cancel_timer(pending.timer)
+        {pending, %{state | hash_requests: Map.delete(state.hash_requests, key)}}
+    end
+  end
+
+  defp take_hash_request(%__MODULE__{} = state, %HashWire{} = req) do
+    key = HashTransfer.request_key(req)
+
+    case Map.fetch(state.hash_requests, key) do
+      {:ok, pending} ->
+        Process.cancel_timer(pending.timer)
+        {pending, %{state | hash_requests: Map.delete(state.hash_requests, key)}}
+
+      :error ->
+        {nil, state}
+    end
+  end
+
+  defp find_hash_request(%__MODULE__{hash_requests: requests}, ref) do
+    Enum.find_value(requests, fn {key, pending} ->
+      if pending.ref == ref, do: {key, pending}
+    end)
+  end
+
+  defp hash_verify_block_count(hash, %HashWire{pieces_root: root}) do
+    case Torrent.FileHandle.context(hash) do
+      %{v2_merkle: %{files: files}} ->
+        case Enum.find(files, &(&1.pieces_root == root)) do
+          %{length: len} when is_integer(len) and len > 0 ->
+            {:ok, Torrent.Merkle.file_block_count(len)}
+
+          _ ->
+            :error
+        end
+
+      _ ->
+        :error
+    end
   end
 
   @spec send_allowed_fast(t()) :: t()

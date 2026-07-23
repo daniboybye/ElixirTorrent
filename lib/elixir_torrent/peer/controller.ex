@@ -225,6 +225,41 @@ defmodule Peer.Controller do
   def handle_extended(key, extended_id, payload),
     do: GenServer.cast(via(key), {:handle_extended, [extended_id, payload]})
 
+  @spec handle_hash_request(Peer.key(), Peer.HashWire.t()) :: :ok
+  def handle_hash_request(key, %Peer.HashWire{} = req),
+    do: GenServer.cast(via(key), {:handle_hash_request, [req]})
+
+  @spec handle_hashes(Peer.key(), Peer.HashWire.t(), binary()) :: :ok
+  def handle_hashes(key, %Peer.HashWire{} = req, hashes) when is_binary(hashes),
+    do: GenServer.cast(via(key), {:handle_hashes, [req, hashes]})
+
+  @spec handle_hash_reject(Peer.key(), Peer.HashWire.t()) :: :ok
+  def handle_hash_reject(key, %Peer.HashWire{} = req),
+    do: GenServer.cast(via(key), {:handle_hash_reject, [req]})
+
+  @doc """
+  Sends a correlated outbound BEP 52 hash request to a v2-capable peer.
+
+  Returns `{:ok, ref}`; results arrive as `{:peer_hash_transfer, ref, result}`.
+  """
+  @spec request_hashes(Peer.key(), Peer.HashWire.t(), keyword()) ::
+          {:ok, reference()} | {:error, term()}
+  def request_hashes(key, %Peer.HashWire{} = req, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 30_000)
+    GenServer.call(via(key), {:request_hashes, req, timeout, self()}, timeout + 5_000)
+  catch
+    :exit, {:timeout, _} -> {:error, :timeout}
+    :exit, {:noproc, _} -> {:error, :noproc}
+    :exit, _ -> {:error, :noproc}
+  end
+
+  @spec peer_v2_support?(Peer.key()) :: boolean()
+  def peer_v2_support?(key) do
+    GenServer.call(via(key), :peer_v2_support?)
+  catch
+    :exit, _ -> false
+  end
+
   @spec send_pex(Peer.key(), binary()) :: :ok
   def send_pex(key, payload) when is_binary(payload),
     do: GenServer.cast(via(key), {:send_pex, [payload]})
@@ -250,6 +285,7 @@ defmodule Peer.Controller do
        status: status,
        pieces_count: count,
        peer_reserved: reserved,
+       peer_v2_support?: Peer.v2_support?(reserved),
        downloaded_at_connect: downloaded,
        connected_at: now,
        last_block_at: now,
@@ -258,11 +294,13 @@ defmodule Peer.Controller do
   end
 
   def terminate({:shutdown, :protocol_error}, state) do
+    State.notify_hash_request_disconnect(state, :protocol_error)
     Torrent.PiecesStatistic.remove_peer(state.hash, state.bitfield, state.pieces_count)
     Acceptor.malicious_peer(state.id)
   end
 
   def terminate(reason, %State{} = state) do
+    State.notify_hash_request_disconnect(state, reason)
     # :shutdown / {:shutdown,_} are normal OTP stop paths (app teardown, swarm
     # cap eviction, supervisor restart). Logging them at :info floods mix test
     # outside ExUnit's per-test capture_log — Application children keep the
@@ -321,6 +359,17 @@ defmodule Peer.Controller do
   # terminate/2 running.
   def handle_info({:EXIT, _pid, :normal}, state), do: {:noreply, state}
   def handle_info({:EXIT, _pid, reason}, state), do: {:stop, reason, state}
+
+  def handle_info({:hash_request_timeout, ref}, state) do
+    case State.drop_hash_request(state, ref) do
+      {nil, state} ->
+        {:noreply, state}
+
+      {pending, state} ->
+        Peer.HashTransfer.notify(pending.caller, ref, {:timeout, pending.request})
+        {:noreply, state}
+    end
+  end
 
   def handle_call(:rank, _, state), do: {:reply, State.rank(state), state}
 
@@ -437,6 +486,16 @@ defmodule Peer.Controller do
   end
 
   def handle_call(:metadata_capable, _, state), do: {:reply, :error, state}
+
+  def handle_call(:peer_v2_support?, _, state),
+    do: {:reply, state.peer_v2_support?, state}
+
+  def handle_call({:request_hashes, req, timeout, caller}, _, state) do
+    case State.start_hash_request(state, req, caller, timeout) do
+      {:ok, ref, state} -> {:reply, {:ok, ref}, state}
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
+    end
+  end
 
   defp close_socket(socket) when is_port(socket) do
     _ = :gen_tcp.shutdown(socket, :write)
