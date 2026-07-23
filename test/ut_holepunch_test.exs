@@ -43,7 +43,9 @@ defmodule UtHolepunchTest do
     end
 
     test "IPv6 error round-trip (24 bytes with err_code)" do
-      encoded = UtHolepunch.encode(:error, @ipv6, @port, err_code: UtHolepunch.err_not_connected())
+      encoded =
+        UtHolepunch.encode(:error, @ipv6, @port, err_code: UtHolepunch.err_not_connected())
+
       assert byte_size(encoded) == 24
 
       assert {:ok, %{type: :error, ip: @ipv6, port: @port, err_code: 2}} =

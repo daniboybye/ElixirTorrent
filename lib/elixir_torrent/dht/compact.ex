@@ -90,7 +90,11 @@ defmodule DHT.Compact do
     decode_ipv6_peers(binary, [])
   end
 
-  defp decode_ipv6_peers(<<s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16, port::16, rest::binary>>, acc) do
+  defp decode_ipv6_peers(
+         <<s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16, port::16,
+           rest::binary>>,
+         acc
+       ) do
     decode_ipv6_peers(rest, [%Peer{ip: {s1, s2, s3, s4, s5, s6, s7, s8}, port: port} | acc])
   end
 
@@ -103,8 +107,8 @@ defmodule DHT.Compact do
   end
 
   defp decode_nodes6(
-         <<id::binary-size(20), s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16, port::16,
-           rest::binary>>,
+         <<id::binary-size(20), s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16,
+           port::16, rest::binary>>,
          acc
        ) do
     decode_nodes6(rest, [%{id: id, ip: {s1, s2, s3, s4, s5, s6, s7, s8}, port: port} | acc])
@@ -117,7 +121,8 @@ defmodule DHT.Compact do
           <<_::304>> | {:error, :unsupported_ip}
   def encode_node6(id, {s1, s2, s3, s4, s5, s6, s7, s8}, port)
       when byte_size(id) == 20 and is_integer(port) and port in 1..65535 do
-    <<id::binary-size(20), s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16, port::16>>
+    <<id::binary-size(20), s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16,
+      port::16>>
   end
 
   def encode_node6(_id, _ip, _port), do: {:error, :unsupported_ip}

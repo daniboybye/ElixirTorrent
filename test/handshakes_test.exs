@@ -8,8 +8,22 @@ defmodule HandshakesTest do
 
   setup do
     if :ets.info(:peer_dial_stats) != :undefined, do: :ets.delete_all_objects(:peer_dial_stats)
+
+    previous_dial_family_cap = Application.get_env(:elixir_torrent, :dial_family_cap)
+    previous_v6_dial_cap = Application.get_env(:elixir_torrent, :v6_dial_cap)
+    Application.put_env(:elixir_torrent, :dial_family_cap, true)
+    Application.put_env(:elixir_torrent, :v6_dial_cap, true)
+
+    on_exit(fn ->
+      restore_env(:dial_family_cap, previous_dial_family_cap)
+      restore_env(:v6_dial_cap, previous_v6_dial_cap)
+    end)
+
     :ok
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:elixir_torrent, key)
+  defp restore_env(key, value), do: Application.put_env(:elixir_torrent, key, value)
 
   describe "dial_transports/2" do
     test "IPv6 always tries TCP first" do

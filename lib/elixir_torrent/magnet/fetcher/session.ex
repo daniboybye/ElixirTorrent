@@ -113,7 +113,10 @@ defmodule Magnet.Fetcher.Session do
     end
   end
 
-  def handle_info({:DOWN, ref, :process, worker_pid, reason}, %{round_worker: {worker_pid, ref}} = state) do
+  def handle_info(
+        {:DOWN, ref, :process, worker_pid, reason},
+        %{round_worker: {worker_pid, ref}} = state
+      ) do
     state = %{state | round_worker: nil}
 
     if reason != :normal do

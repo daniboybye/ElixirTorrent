@@ -104,6 +104,8 @@ defmodule OrphanPieceWorkerTest do
       )
 
       assert [0] = Downloads.active_indices(hash)
+      piece_pid = Piece.whereis(hash, 0)
+      piece_ref = Process.monitor(piece_pid)
 
       {:ok, controller} = GenServer.start(Torrent.Controller, hash)
 
@@ -114,6 +116,7 @@ defmodule OrphanPieceWorkerTest do
       send(controller, :reconcile_pump)
 
       assert_receive :dealt, 1_000
+      assert_receive {:DOWN, ^piece_ref, :process, ^piece_pid, {:shutdown, :idle_orphan}}, 1_000
       refute Downloads.piece_active?(hash, 0)
     end)
   end

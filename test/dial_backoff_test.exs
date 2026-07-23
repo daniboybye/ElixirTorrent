@@ -10,7 +10,8 @@ defmodule Peer.DialBackoffTest do
 
   setup do
     # DialBackoff is a singleton GenServer started with the app; clear its tables.
-    if :ets.info(:peer_dial_backoff) != :undefined, do: :ets.delete_all_objects(:peer_dial_backoff)
+    if :ets.info(:peer_dial_backoff) != :undefined,
+      do: :ets.delete_all_objects(:peer_dial_backoff)
 
     if :ets.info(:peer_dial_productive) != :undefined,
       do: :ets.delete_all_objects(:peer_dial_productive)

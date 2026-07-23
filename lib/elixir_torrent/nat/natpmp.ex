@@ -29,12 +29,14 @@ defmodule NAT.NATPMP do
           {:ok, :inet.port_number(), :inet.port_number(), pos_integer()}
           | {:error, term()}
   def decode_map_response(
-        <<@version, _opcode, 0::16, internal_port::16, external_port::16, lifetime::32, _::binary>>
+        <<@version, _opcode, 0::16, internal_port::16, external_port::16, lifetime::32,
+          _::binary>>
       ) do
     {:ok, internal_port, external_port, lifetime}
   end
 
-  def decode_map_response(<<@version, _opcode, result_code::16, _::binary>>) when result_code != 0 do
+  def decode_map_response(<<@version, _opcode, result_code::16, _::binary>>)
+      when result_code != 0 do
     {:error, {:natpmp, result_code}}
   end
 

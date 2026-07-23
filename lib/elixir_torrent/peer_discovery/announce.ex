@@ -1,38 +1,36 @@
 defmodule PeerDiscovery.Announce do
   @enforce_keys [:torrent_pid, :hash]
-  defstruct [
-    torrent_pid: nil,
-    hash: nil,
-    tiers: [],
-    tier_index: 0,
-    requests: %{},
-    peers: %{},
-    dht_peers: [],
-    # BEP 9 § Magnet URI format — x.pe endpoints handed off from Magnet.Fetcher
-    # via PeerDiscovery.SeedPeers. Merged into the peer pool alongside tracker
-    # and DHT peers so magnet-supplied hints keep being tried across the whole
-    # torrent session, not only during metadata retrieval.
-    seed_peers: [],
-    private?: false,
-    # Under swarm target, up to @under_target_tier_fanout tiers announce concurrently
-    # (tier_index => in-flight tracker Task count). At/over target only one tier key
-    # is present — BEP tier preference preserved when the swarm is healthy.
-    tier_batches: %{},
-    # Highest tier index started in the current under-target fan-out wave; used to
-    # pick the next wave start after all batches complete with no peers.
-    fanout_high_tier: nil,
-    pex_snapshot: MapSet.new(),
-    last_tracker_announce_ms: nil,
-    last_dht_lookup_ms: nil,
-    tracker_interval_sec: nil,
-    tracker_min_interval_sec: nil,
-    disabled: MapSet.new(),
-    # BEP 48 § Scrape convention — cached per-tracker swarm health used to skip
-    # dead-swarm trackers at announce time. Keyed by announce URL.
-    # %{url => %{seeders: n, leechers: n, completed: n, ts_ms: mono_ms}}
-    scrape_stats: %{},
-    last_scrape_ms: nil
-  ]
+  defstruct torrent_pid: nil,
+            hash: nil,
+            tiers: [],
+            tier_index: 0,
+            requests: %{},
+            peers: %{},
+            dht_peers: [],
+            # BEP 9 § Magnet URI format — x.pe endpoints handed off from Magnet.Fetcher
+            # via PeerDiscovery.SeedPeers. Merged into the peer pool alongside tracker
+            # and DHT peers so magnet-supplied hints keep being tried across the whole
+            # torrent session, not only during metadata retrieval.
+            seed_peers: [],
+            private?: false,
+            # Under swarm target, up to @under_target_tier_fanout tiers announce concurrently
+            # (tier_index => in-flight tracker Task count). At/over target only one tier key
+            # is present — BEP tier preference preserved when the swarm is healthy.
+            tier_batches: %{},
+            # Highest tier index started in the current under-target fan-out wave; used to
+            # pick the next wave start after all batches complete with no peers.
+            fanout_high_tier: nil,
+            pex_snapshot: MapSet.new(),
+            last_tracker_announce_ms: nil,
+            last_dht_lookup_ms: nil,
+            tracker_interval_sec: nil,
+            tracker_min_interval_sec: nil,
+            disabled: MapSet.new(),
+            # BEP 48 § Scrape convention — cached per-tracker swarm health used to skip
+            # dead-swarm trackers at announce time. Keyed by announce URL.
+            # %{url => %{seeders: n, leechers: n, completed: n, ts_ms: mono_ms}}
+            scrape_stats: %{},
+            last_scrape_ms: nil
 
   use GenServer
   use Via
@@ -128,7 +126,8 @@ defmodule PeerDiscovery.Announce do
   end
 
   @doc false
-  @spec tracker_announce_allowed?(%__MODULE__{}, non_neg_integer()) :: :ok | {:wait, non_neg_integer()}
+  @spec tracker_announce_allowed?(%__MODULE__{}, non_neg_integer()) ::
+          :ok | {:wait, non_neg_integer()}
   def tracker_announce_allowed?(%__MODULE__{} = state, now_ms) do
     # Under target with no tracker peers yet, do not apply the 30 s floor across
     # tiers — an empty announce on tier N (rarbg.to → peers=[]) must not block
@@ -184,7 +183,11 @@ defmodule PeerDiscovery.Announce do
     do: parallel_tier_reschedule_sec(state, fallback_sec)
 
   @doc false
-  @spec parallel_tier_failure_advance_interval(%__MODULE__{}, non_neg_integer(), non_neg_integer()) ::
+  @spec parallel_tier_failure_advance_interval(
+          %__MODULE__{},
+          non_neg_integer(),
+          non_neg_integer()
+        ) ::
           non_neg_integer()
   def parallel_tier_failure_advance_interval(%__MODULE__{} = state, tier_index, fallback_sec),
     do: parallel_tier_failure_advance_sec(state, tier_index, fallback_sec)
@@ -416,7 +419,8 @@ defmodule PeerDiscovery.Announce do
             {:noreply, state}
 
           :ok ->
-            %Task{ref: ref} = Task.Supervisor.async_nolink(Requests, DHT, :get_peers, [state.hash])
+            %Task{ref: ref} =
+              Task.Supervisor.async_nolink(Requests, DHT, :get_peers, [state.hash])
 
             {:noreply,
              state
@@ -689,7 +693,11 @@ defmodule PeerDiscovery.Announce do
           {_state, tier_index, status} = resolve_announcable_tier(state, start_tier)
 
           if status == :ring_exhausted do
-            schedule_parallel_announce(state, tier_index, dead_tier_advance_sec(state, start_tier))
+            schedule_parallel_announce(
+              state,
+              tier_index,
+              dead_tier_advance_sec(state, start_tier)
+            )
           end
 
           {:noreply, state}
@@ -699,7 +707,7 @@ defmodule PeerDiscovery.Announce do
 
           state =
             Enum.reduce(started, %{state | fanout_high_tier: high_tier}, fn {tier_index, tier},
-                                                                           acc ->
+                                                                            acc ->
               start_parallel_tier(acc, tier_index, tier)
             end)
 
@@ -737,12 +745,30 @@ defmodule PeerDiscovery.Announce do
           MapSet.t(),
           [{non_neg_integer(), [String.t()]}]
         ) :: {%__MODULE__{}, [{non_neg_integer(), [String.t()]}]}
-  defp do_collect_fanout_tiers(state, _tier_index, max_count, _hops, _now_ms, _tier_count, _selected, acc)
+  defp do_collect_fanout_tiers(
+         state,
+         _tier_index,
+         max_count,
+         _hops,
+         _now_ms,
+         _tier_count,
+         _selected,
+         acc
+       )
        when length(acc) >= max_count do
     {state, Enum.reverse(acc)}
   end
 
-  defp do_collect_fanout_tiers(state, _tier_index, _max_count, hops, _now_ms, tier_count, _selected, acc)
+  defp do_collect_fanout_tiers(
+         state,
+         _tier_index,
+         _max_count,
+         hops,
+         _now_ms,
+         tier_count,
+         _selected,
+         acc
+       )
        when hops >= tier_count do
     {state, Enum.reverse(acc)}
   end
@@ -956,7 +982,11 @@ defmodule PeerDiscovery.Announce do
   # uses the under-target cadence to avoid hammering the full ring.
   @spec parallel_tier_failure_advance_sec(%__MODULE__{}, non_neg_integer(), non_neg_integer()) ::
           non_neg_integer()
-  defp parallel_tier_failure_advance_sec(%__MODULE__{hash: hash} = state, tier_index, fallback_sec) do
+  defp parallel_tier_failure_advance_sec(
+         %__MODULE__{hash: hash} = state,
+         tier_index,
+         fallback_sec
+       ) do
     next = next_tier_index(state.tiers, tier_index)
 
     cond do
@@ -1200,6 +1230,7 @@ defmodule PeerDiscovery.Announce do
       catch
         :exit, _ -> state.pex_snapshot
       end
+
     added = MapSet.difference(current, state.pex_snapshot) |> MapSet.to_list()
     dropped = MapSet.difference(state.pex_snapshot, current) |> MapSet.to_list()
 

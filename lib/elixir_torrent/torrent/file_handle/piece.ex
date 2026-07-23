@@ -32,6 +32,7 @@ defmodule Torrent.FileHandle.Piece do
   # next access lazily restarts it — completed/untouched pieces stop holding a
   # process entirely.
   @timeout_idle 30 * 1_000
+  @call_restart_attempts 50
   # Coalesce subpiece writes before hitting the disk. BitTorrent blocks are 16 KiB;
   # pipelined requests often fill a piece in bursts — flushing each block separately
   # costs one pwrite syscall per block. Batch contiguous ranges up to this ceiling
@@ -177,16 +178,26 @@ defmodule Torrent.FileHandle.Piece do
   end
 
   defp call(hash, index, msg, timeout) do
+    call(hash, index, msg, timeout, @call_restart_attempts)
+  end
+
+  defp call(hash, index, msg, timeout, attempts_left) do
     pid = ensure_started(hash, index)
 
     try do
       GenServer.call(pid, msg, timeout)
     catch
       # The piece idle-terminated between lookup and call (or was shutting down).
-      # Restart it and retry once — this is the steady-state path for a piece
-      # that has been idle past @timeout_idle.
-      :exit, {reason, _} when reason in [:noproc, :normal, :shutdown] ->
-        GenServer.call(ensure_started(hash, index), msg, timeout)
+      # Registry and DynamicSupervisor learn about that death asynchronously, so
+      # they can briefly hand back the same dead pid. Yield and retry until their
+      # process monitors have removed the stale registration/child.
+      :exit, {reason, _} when reason in [:noproc, :normal, :shutdown] and attempts_left > 0 ->
+        Process.sleep(1)
+        call(hash, index, msg, timeout, attempts_left - 1)
+
+      :exit, {{:shutdown, _reason}, _} when attempts_left > 0 ->
+        Process.sleep(1)
+        call(hash, index, msg, timeout, attempts_left - 1)
     end
   end
 

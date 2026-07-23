@@ -116,7 +116,8 @@ defmodule UTP.Connection do
   @spec close(socket_ref()) :: :ok
   def close({:utp, pid}), do: GenServer.cast(pid, :close)
 
-  @spec peername(socket_ref()) :: {:ok, {:inet.ip_address(), :inet.port_number()}} | {:error, term()}
+  @spec peername(socket_ref()) ::
+          {:ok, {:inet.ip_address(), :inet.port_number()}} | {:error, term()}
   def peername({:utp, pid}) do
     GenServer.call(pid, :peername)
   catch
@@ -309,10 +310,18 @@ defmodule UTP.Connection do
       state = process_acks(state, header, extensions)
 
       case header.type do
-        @st_reset -> shutdown(state, :reset)
-        @st_state -> handle_state_packet(state, header)
-        @st_data -> handle_data_packet(state, header, payload)
-        @st_fin -> handle_fin_packet(state, header, payload)
+        @st_reset ->
+          shutdown(state, :reset)
+
+        @st_state ->
+          handle_state_packet(state, header)
+
+        @st_data ->
+          handle_data_packet(state, header, payload)
+
+        @st_fin ->
+          handle_fin_packet(state, header, payload)
+
         @st_syn ->
           cond do
             state.role == :server and state.phase == :syn_recv ->
@@ -325,7 +334,8 @@ defmodule UTP.Connection do
               state
           end
 
-        _ -> state
+        _ ->
+          state
       end
     end
   end
@@ -492,7 +502,8 @@ defmodule UTP.Connection do
       |> Packet.selective_ack_acks(extensions)
       |> Enum.reduce(state, fn seq, acc -> ack_exact_seq(acc, seq) end)
 
-    if map_size(state.unacked) > 0 and header.ack_nr == state.last_peer_ack and state.dup_acks >= 3 do
+    if map_size(state.unacked) > 0 and header.ack_nr == state.last_peer_ack and
+         state.dup_acks >= 3 do
       retransmit_loss(state, Packet.seq_add(header.ack_nr, 1))
     else
       state
@@ -656,7 +667,13 @@ defmodule UTP.Connection do
             state.seq_nr
           end
 
-        %{state | unacked: unacked, cur_window: cur_window, seq_nr: seq_nr, last_send_ms: now_ms()}
+        %{
+          state
+          | unacked: unacked,
+            cur_window: cur_window,
+            seq_nr: seq_nr,
+            last_send_ms: now_ms()
+        }
 
       {:error, reason} ->
         Logger.debug(
@@ -778,7 +795,13 @@ defmodule UTP.Connection do
         send(state.owner, {:utp_closed, state.socket_ref})
       end
 
-      :ok = UTP.Dispatcher.unregister_pair(state.recv_conn_id, state.send_conn_id, state.peer_ip, state.peer_port)
+      :ok =
+        UTP.Dispatcher.unregister_pair(
+          state.recv_conn_id,
+          state.send_conn_id,
+          state.peer_ip,
+          state.peer_port
+        )
 
       Logger.debug(
         "[utp] closed peer=#{inspect({state.peer_ip, state.peer_port})} reason=#{inspect(reason)}"

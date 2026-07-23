@@ -13,7 +13,10 @@ defmodule UTPCorrectnessTest do
   #      and had no hard `max_window` ceiling.
   #   5. `transmit/5` reset tx_count to 1 on every retransmit, making the
   #      give-up branch (tx_count >= 10) unreachable.
-  use ExUnit.Case, async: true
+  # Uses the application-wide named Dispatcher/ETS table. In particular it
+  # must not overlap UTPDispatcherShutdownTest, which deliberately removes that
+  # table to reproduce application teardown ordering.
+  use ExUnit.Case, async: false
 
   alias UTP.{LEDBAT, Packet}
 
@@ -41,9 +44,10 @@ defmodule UTPCorrectnessTest do
 
     # Repeatedly grow with a huge peer_wnd — under the old code max_window
     # would ramp unbounded. Now it must be capped ~= 1 MiB.
-    led = Enum.reduce(1..200, led, fn _, acc ->
-      LEDBAT.grow_window(acc, acc.max_window, 10_000_000)
-    end)
+    led =
+      Enum.reduce(1..200, led, fn _, acc ->
+        LEDBAT.grow_window(acc, acc.max_window, 10_000_000)
+      end)
 
     assert led.max_window <= 1_048_576
   end

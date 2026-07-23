@@ -1,5 +1,7 @@
 defmodule Magnet.FetcherTest do
-  use ExUnit.Case, async: true
+  # These integration tests change the node-wide DHT config and inspect the
+  # live named DHT process. They must not overlap other async DHT consumers.
+  use ExUnit.Case, async: false
 
   test "run rejects trackerless magnets when DHT is disabled" do
     magnet = %Magnet{
@@ -62,7 +64,10 @@ defmodule Magnet.FetcherTest do
     assert Magnet.Fetcher.dead_leecher_round_failure?({:metadata_unavailable, [:peer_died]})
     assert Magnet.Fetcher.dead_leecher_round_failure?({:metadata_unavailable, [:no_ut_metadata]})
 
-    refute Magnet.Fetcher.dead_leecher_round_failure?({:metadata_unavailable, [:peer_died, :timeout]})
+    refute Magnet.Fetcher.dead_leecher_round_failure?(
+             {:metadata_unavailable, [:peer_died, :timeout]}
+           )
+
     refute Magnet.Fetcher.dead_leecher_round_failure?(:no_peers)
   end
 
@@ -108,10 +113,11 @@ defmodule Magnet.FetcherTest do
 
     selected = Magnet.Fetcher.select_peers_for_round(peers, attempts)
     assert length(selected) == 2
+
     assert Enum.any?(selected, fn
-      %Peer{ip: {2, 2, 2, 2}} -> true
-      _ -> false
-    end)
+             %Peer{ip: {2, 2, 2, 2}} -> true
+             _ -> false
+           end)
   end
 
   test "select_peers_for_round prefers ipv6 peers when truncating to cap" do
@@ -133,7 +139,7 @@ defmodule Magnet.FetcherTest do
   end
 
   test "announce_dht_for_metadata starts DHT announce lookup when enabled" do
-    hash = <<9::160>>
+    hash = :crypto.strong_rand_bytes(20)
 
     previous = Application.get_env(:elixir_torrent, :dht, [])
 
@@ -148,7 +154,7 @@ defmodule Magnet.FetcherTest do
   end
 
   test "discover_and_merge_peers announces to DHT before get_peers when enabled" do
-    hash = <<10::160>>
+    hash = :crypto.strong_rand_bytes(20)
 
     previous_dht = Application.get_env(:elixir_torrent, :dht, [])
 
@@ -203,16 +209,20 @@ defmodule Magnet.FetcherTest do
   end
 
   defp dht_announce_lookup?(hash) when is_binary(hash) do
-    %{lookups: lookups} = :sys.get_state(DHT)
+    %{lookups: lookups, announce_timers: announce_timers} = :sys.get_state(DHT)
 
-    Enum.any?(Map.values(lookups), fn
-      %{purpose: :announce, hash: ^hash} -> true
-      _ -> false
-    end)
+    Map.has_key?(announce_timers, hash) or
+      Enum.any?(Map.values(lookups), fn
+        %{purpose: :announce, hash: ^hash} -> true
+        _ -> false
+      end)
   end
 
   test "tracker_await_timeout_ms scales with tracker count" do
-    magnet = %Magnet{hash: <<0::160>>, trackers: List.duplicate("http://example.com/announce", 15)}
+    magnet = %Magnet{
+      hash: <<0::160>>,
+      trackers: List.duplicate("http://example.com/announce", 15)
+    }
 
     assert Magnet.Fetcher.tracker_await_timeout_ms(magnet) == 105_000
   end
@@ -314,6 +324,10 @@ defmodule TorrentPrivateTest do
 
     assert Torrent.private?(torrent)
     assert Torrent.private?(metadata)
-    refute Torrent.private?(%Torrent{torrent | metadata: put_in(metadata, ["info", "private"], 0)})
+
+    refute Torrent.private?(%Torrent{
+             torrent
+             | metadata: put_in(metadata, ["info", "private"], 0)
+           })
   end
 end

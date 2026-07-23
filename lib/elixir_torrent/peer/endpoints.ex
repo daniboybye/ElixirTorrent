@@ -66,7 +66,11 @@ defmodule Peer.Endpoints do
   end
 
   @impl true
-  def handle_call({:register, hash, ip, port, pid}, _, %{table: table, monitors: monitors} = state) do
+  def handle_call(
+        {:register, hash, ip, port, pid},
+        _,
+        %{table: table, monitors: monitors} = state
+      ) do
     key = endpoint_key(hash, ip, port)
 
     monitors =

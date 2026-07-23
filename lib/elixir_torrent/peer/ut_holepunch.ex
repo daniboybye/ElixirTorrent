@@ -114,7 +114,10 @@ defmodule Peer.UtHolepunch do
     {:ok, %{type: :error, ip: {a, b, c, d}, port: port, err_code: err_code}}
   end
 
-  def decode(<<1, @addr_ipv6, s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16, port::16>>) do
+  def decode(
+        <<1, @addr_ipv6, s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16,
+          port::16>>
+      ) do
     {:ok,
      %{
        type: :connect,
@@ -124,7 +127,10 @@ defmodule Peer.UtHolepunch do
      }}
   end
 
-  def decode(<<0, @addr_ipv6, s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16, port::16>>) do
+  def decode(
+        <<0, @addr_ipv6, s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16,
+          port::16>>
+      ) do
     {:ok,
      %{
        type: :rendezvous,
@@ -134,8 +140,10 @@ defmodule Peer.UtHolepunch do
      }}
   end
 
-  def decode(<<2, @addr_ipv6, s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16, port::16,
-             err_code::32>>) do
+  def decode(
+        <<2, @addr_ipv6, s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16, port::16,
+          err_code::32>>
+      ) do
     {:ok,
      %{
        type: :error,

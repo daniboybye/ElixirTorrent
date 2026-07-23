@@ -28,9 +28,24 @@ defmodule Magnet.Fetcher do
   # rows indefinitely (e.g. 7D2978A2 stuck since Jul 16).
   @max_fetch_lifetime_ms 24 * 60 * 60 * 1_000
 
+  defp fetcher_cfg(key, default) do
+    Application.get_env(:elixir_torrent, :magnet_fetcher, [])
+    |> Keyword.get(key, default)
+  end
+
   @doc false
   @spec max_fetch_lifetime_ms() :: pos_integer()
-  def max_fetch_lifetime_ms, do: @max_fetch_lifetime_ms
+  def max_fetch_lifetime_ms, do: fetcher_cfg(:max_fetch_lifetime_ms, @max_fetch_lifetime_ms)
+
+  defp metadata_peer_timeout_ms,
+    do: fetcher_cfg(:metadata_peer_timeout_ms, @metadata_peer_timeout_ms)
+
+  defp round_backoff_base_ms, do: fetcher_cfg(:round_backoff_base_ms, @round_backoff_base_ms)
+  defp round_backoff_step_ms, do: fetcher_cfg(:round_backoff_step_ms, @round_backoff_step_ms)
+  defp round_backoff_cap_ms, do: fetcher_cfg(:round_backoff_cap_ms, @round_backoff_cap_ms)
+
+  defp round_backoff_dead_leecher_ms,
+    do: fetcher_cfg(:round_backoff_dead_leecher_ms, @round_backoff_dead_leecher_ms)
 
   @type ref :: reference()
   @type progress :: Magnet.Fetcher.Session.progress()
@@ -163,10 +178,10 @@ defmodule Magnet.Fetcher do
 
   def round_backoff_ms(round, reason) when is_integer(round) and round > 0 do
     base =
-      min(@round_backoff_cap_ms, @round_backoff_base_ms + (round - 1) * @round_backoff_step_ms)
+      min(round_backoff_cap_ms(), round_backoff_base_ms() + (round - 1) * round_backoff_step_ms())
 
     if dead_leecher_round_failure?(reason) do
-      min(base, @round_backoff_dead_leecher_ms)
+      min(base, round_backoff_dead_leecher_ms())
     else
       base
     end
@@ -257,9 +272,7 @@ defmodule Magnet.Fetcher do
   def fetch_metadata_round(%Magnet{} = magnet, peers, announced_trackers) do
     hash_hex = Torrent.hex_encoded_hash(magnet.hash)
 
-    Logger.info(
-      "[magnet_fetch] metadata_start hash=#{hash_hex} peers=#{length(peers)}"
-    )
+    Logger.info("[magnet_fetch] metadata_start hash=#{hash_hex} peers=#{length(peers)}")
 
     _ = Magnet.Bootstrap.ensure(magnet)
     _ = Magnet.Bootstrap.offer_peers(magnet.hash, peers)
@@ -682,8 +695,12 @@ defmodule Magnet.Fetcher do
     end
   end
 
-  @spec merge_metadata_unavailable_errors(term(), term()) :: {:error, {:metadata_unavailable, [term()]}}
-  defp merge_metadata_unavailable_errors({:metadata_unavailable, swarm_failures}, :metadata_unavailable)
+  @spec merge_metadata_unavailable_errors(term(), term()) ::
+          {:error, {:metadata_unavailable, [term()]}}
+  defp merge_metadata_unavailable_errors(
+         {:metadata_unavailable, swarm_failures},
+         :metadata_unavailable
+       )
        when is_list(swarm_failures) do
     failures =
       (swarm_failures ++ [:metadata_unavailable])
@@ -712,7 +729,7 @@ defmodule Magnet.Fetcher do
           fn peer -> fetch_metadata_from_peer(magnet, peer, peers) end,
           max_concurrency: @max_connections,
           ordered: false,
-          timeout: @metadata_peer_timeout_ms,
+          timeout: metadata_peer_timeout_ms(),
           on_timeout: :kill_task
         )
         |> Enum.reduce_while(nil, fn
@@ -742,6 +759,12 @@ defmodule Magnet.Fetcher do
         {:error, :metadata_unavailable}
     end
   end
+
+  @doc false
+  @spec fetch_metadata_from_peer_for_test(Magnet.t(), Peer.t(), [Peer.t()]) ::
+          {:ok, Path.t(), boolean()} | {:error, term()}
+  def fetch_metadata_from_peer_for_test(magnet, primary, all_peers),
+    do: fetch_metadata_from_peer(magnet, primary, all_peers)
 
   @spec fetch_metadata_from_peer(Magnet.t(), Peer.t(), [Peer.t()]) ::
           {:ok, Path.t(), boolean()} | {:error, term()}

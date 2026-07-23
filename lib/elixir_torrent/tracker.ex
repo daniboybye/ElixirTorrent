@@ -109,9 +109,7 @@ defmodule Tracker do
         # resolve_hosts failures are DNS-class (:nxdomain / timeout / …). Dead
         # public UDP trackers are the common case — BEP 12 already hops tiers.
         # Debug only (same policy as PeerDiscovery.Announce expected failures).
-        Logger.debug(
-          "UDP tracker DNS resolution failed host=#{host} reason=#{inspect(reason)}"
-        )
+        Logger.debug("UDP tracker DNS resolution failed host=#{host} reason=#{inspect(reason)}")
 
         %Error{reason: {:dns, host, reason}, retry_in: "never"}
     end
@@ -187,9 +185,7 @@ defmodule Tracker do
       {:ok, socket} ->
         try do
           result =
-            udp_scrape(socket, ip, port, [hash],
-              max_udp_attempts: @scrape_udp_max_attempts
-            )
+            udp_scrape(socket, ip, port, [hash], max_udp_attempts: @scrape_udp_max_attempts)
 
           case result do
             %Error{} when rest != [] -> udp_scrape_hosts(rest, port, hash)
@@ -299,7 +295,9 @@ defmodule Tracker do
       |> then(fn acc ->
         Enum.reduce(v6_announces, acc, fn ip6_addr, a ->
           v6_url =
-            build_http_announce_query(hash, uploaded, downloaded, left, event, ipv6: Acceptor.ipv6_binary(ip6_addr))
+            build_http_announce_query(hash, uploaded, downloaded, left, event,
+              ipv6: Acceptor.ipv6_binary(ip6_addr)
+            )
             |> URI.encode_query()
             |> then(&(announce <> "?" <> &1))
 
@@ -339,7 +337,9 @@ defmodule Tracker do
 
   @spec maybe_put_announce_param(map(), String.t(), binary() | nil) :: map()
   defp maybe_put_announce_param(query, _key, nil), do: query
-  defp maybe_put_announce_param(query, key, value) when is_binary(value), do: Map.put(query, key, value)
+
+  defp maybe_put_announce_param(query, key, value) when is_binary(value),
+    do: Map.put(query, key, value)
 
   @spec with_connection_id(
           port(),
@@ -580,9 +580,7 @@ defmodule Tracker do
 
   @spec extract_js_redirect(binary()) :: {:ok, binary()} | :error
   defp extract_js_redirect(body) do
-    case Regex.run(~r/window\\.location\\.href\\s*=\\s*\"([^\"]+)\"/, body,
-           capture: :all_but_first
-         ) do
+    case Regex.run(~r/window\.location\.href\s*=\s*"([^"]+)"/, body, capture: :all_but_first) do
       [path] when is_binary(path) and byte_size(path) > 0 -> {:ok, path}
       _ -> :error
     end
@@ -595,6 +593,28 @@ defmodule Tracker do
     |> URI.merge(redirect)
     |> URI.to_string()
   end
+
+  @doc false
+  @spec extract_js_redirect_for_test(binary()) :: {:ok, binary()} | :error
+  def extract_js_redirect_for_test(body), do: extract_js_redirect(body)
+
+  @doc false
+  @spec absolute_redirect_for_test(binary(), binary()) :: binary()
+  def absolute_redirect_for_test(base_url, redirect), do: absolute_redirect(base_url, redirect)
+
+  @doc false
+  @spec decode_http_response_for_test(map()) :: Response.t() | Error.t()
+  def decode_http_response_for_test(map) when is_map(map), do: decode_http_response(map)
+
+  @doc false
+  @spec merge_http_announces_for_test([Response.t() | Error.t()]) :: Response.t() | Error.t()
+  def merge_http_announces_for_test(list) when is_list(list), do: merge_http_announces(list)
+
+  @doc false
+  @spec decode_http_scrape_body_for_test(binary(), Torrent.hash()) ::
+          scrape_result() | Error.t()
+  def decode_http_scrape_body_for_test(body, hash),
+    do: decode_http_scrape_body(body, hash)
 
   @spec decode_http_response(map()) :: Response.t() | Error.t()
   defp decode_http_response(%{"failure reason" => reason} = map) do
@@ -798,8 +818,20 @@ defmodule Tracker do
     else
       # The socket can be closed by a racing announce for the same tracker.
       case :gen_udp.send(socket, ip, port, packet) do
-        :ok -> do_udp_request_recv(socket, ip, port, packet, transaction_id, opts, attempt, max_attempts)
-        {:error, reason} -> %Error{reason: reason}
+        :ok ->
+          do_udp_request_recv(
+            socket,
+            ip,
+            port,
+            packet,
+            transaction_id,
+            opts,
+            attempt,
+            max_attempts
+          )
+
+        {:error, reason} ->
+          %Error{reason: reason}
       end
     end
   end
@@ -888,7 +920,13 @@ defmodule Tracker do
           {non_neg_integer(), non_neg_integer(), non_neg_integer(), 0..3},
           :inet | :inet6
         ) :: iodata()
-  defp encode_udp_announce(connection_id, transaction_id, hash, {uploaded, downloaded, left, event}, family) do
+  defp encode_udp_announce(
+         connection_id,
+         transaction_id,
+         hash,
+         {uploaded, downloaded, left, event},
+         family
+       ) do
     ip_field = udp_announce_ip_field(family)
 
     UDP.encode_announce(connection_id, transaction_id, hash, Peer.id(),

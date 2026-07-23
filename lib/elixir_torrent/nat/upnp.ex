@@ -16,7 +16,8 @@ defmodule NAT.UPnP do
   ]
 
   @doc false
-  @spec parse_device_services(String.t(), String.t()) :: {:ok, {String.t(), String.t()}} | {:error, term()}
+  @spec parse_device_services(String.t(), String.t()) ::
+          {:ok, {String.t(), String.t()}} | {:error, term()}
   def parse_device_services(body, location) when is_binary(body) and is_binary(location) do
     parse_control_url(body, location)
   end
@@ -53,7 +54,9 @@ defmodule NAT.UPnP do
     proto_str = if proto == :tcp, do: "TCP", else: "UDP"
     body = add_port_mapping_body(proto_str, port, port, lifetime_seconds, service_type)
 
-    case HTTPoison.post(control_url, body, soap_headers(service_type, "AddPortMapping"), recv_timeout: 4_000) do
+    case HTTPoison.post(control_url, body, soap_headers(service_type, "AddPortMapping"),
+           recv_timeout: 4_000
+         ) do
       {:ok, %HTTPoison.Response{status_code: 200, body: resp}} ->
         if String.contains?(resp, "AddPortMappingResponse") do
           :ok
@@ -76,7 +79,9 @@ defmodule NAT.UPnP do
     proto_str = if proto == :tcp, do: "TCP", else: "UDP"
     body = delete_port_mapping_body(proto_str, port, service_type)
 
-    case HTTPoison.post(control_url, body, soap_headers(service_type, "DeletePortMapping"), recv_timeout: 4_000) do
+    case HTTPoison.post(control_url, body, soap_headers(service_type, "DeletePortMapping"),
+           recv_timeout: 4_000
+         ) do
       {:ok, %HTTPoison.Response{status_code: 200, body: resp}} ->
         if String.contains?(resp, "DeletePortMappingResponse") do
           :ok
@@ -93,10 +98,13 @@ defmodule NAT.UPnP do
   end
 
   @spec get_external_ip(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
-  def get_external_ip(control_url, service_type) when is_binary(control_url) and is_binary(service_type) do
+  def get_external_ip(control_url, service_type)
+      when is_binary(control_url) and is_binary(service_type) do
     body = get_external_ip_body(service_type)
 
-    case HTTPoison.post(control_url, body, soap_headers(service_type, "GetExternalIPAddress"), recv_timeout: 4_000) do
+    case HTTPoison.post(control_url, body, soap_headers(service_type, "GetExternalIPAddress"),
+           recv_timeout: 4_000
+         ) do
       {:ok, %HTTPoison.Response{status_code: 200, body: resp}} ->
         case Regex.run(~r/<NewExternalIPAddress>([^<]+)<\/NewExternalIPAddress>/, resp) do
           [_, ip] when ip != "" -> {:ok, String.trim(ip)}

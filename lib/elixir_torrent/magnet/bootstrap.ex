@@ -167,6 +167,7 @@ defmodule Magnet.Bootstrap do
     }
   end
 
-  @spec via_name(Torrent.hash()) :: {:via, Registry, {Registry, {:magnet_bootstrap, Torrent.hash()}}}
+  @spec via_name(Torrent.hash()) ::
+          {:via, Registry, {Registry, {:magnet_bootstrap, Torrent.hash()}}}
   defp via_name(hash), do: {:via, Registry, {Registry, {:magnet_bootstrap, hash}}}
 end

@@ -66,7 +66,8 @@ defmodule Torrent.PiecesStatistic do
   @doc """
   Clears stale `:processing` marks left when a piece worker exited without finishing.
   """
-  @spec reconcile_stale_statuses(Torrent.hash(), (Torrent.index() -> boolean())) :: non_neg_integer()
+  @spec reconcile_stale_statuses(Torrent.hash(), (Torrent.index() -> boolean())) ::
+          non_neg_integer()
   def reconcile_stale_statuses(hash, piece_active?) when is_function(piece_active?, 1) do
     [count] = Torrent.get(hash, [:pieces_count])
 

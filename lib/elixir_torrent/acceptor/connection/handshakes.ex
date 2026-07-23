@@ -295,7 +295,8 @@ defmodule Acceptor.Connection.Handshakes do
         end
       end,
       max_concurrency: @max_concurrency,
-      timeout: @connect_timeout_v6_ms + @utp_connect_timeout_ms + @handshake_recv_timeout_ms + 2_000,
+      timeout:
+        @connect_timeout_v6_ms + @utp_connect_timeout_ms + @handshake_recv_timeout_ms + 2_000,
       on_timeout: :kill_task
     )
     |> Enum.reduce({0, %{}, [], %{inet: {0, 0}, inet6: {0, 0}}}, fn
@@ -323,7 +324,10 @@ defmodule Acceptor.Connection.Handshakes do
   @doc false
   @spec dial_reachability_outcome(term()) :: :ok | :skip | :fail
   def dial_reachability_outcome(:socket_handoff_failed), do: :ok
-  def dial_reachability_outcome(reason) when reason in [:already_connected, :not_connectable], do: :skip
+
+  def dial_reachability_outcome(reason) when reason in [:already_connected, :not_connectable],
+    do: :skip
+
   def dial_reachability_outcome(_reason), do: :fail
 
   @spec bump_fam_failure(fam_stats(), Peer.t(), term()) :: fam_stats()
@@ -935,7 +939,8 @@ defmodule Acceptor.Connection.Handshakes do
   @spec parse_handshake(binary()) ::
           {binary(), binary(), Peer.reserved()} | {:error, :invalid_handshake}
   defp parse_handshake(
-         <<@pstrlen, @pstr, reserved::bytes-size(8), hash::bytes-size(20), peer_id::bytes-size(20)>>
+         <<@pstrlen, @pstr, reserved::bytes-size(8), hash::bytes-size(20),
+           peer_id::bytes-size(20)>>
        ) do
     {hash, peer_id, reserved}
   end

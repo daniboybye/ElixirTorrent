@@ -32,6 +32,7 @@ defmodule DownloadPumpDeadlockTest do
 
     with_model(torrent, fn _ ->
       {:ok, pid} = start_piece_worker(hash, 0)
+
       on_exit(fn ->
         try do
           if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
@@ -57,6 +58,7 @@ defmodule DownloadPumpDeadlockTest do
 
     with_model(torrent, fn _ ->
       {:ok, pid} = start_piece_worker(hash, 0)
+
       on_exit(fn ->
         try do
           if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)

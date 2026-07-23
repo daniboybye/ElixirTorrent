@@ -135,9 +135,7 @@ defmodule Peer.ConnectionManager do
             evicted = evict_snub_peers(hash, connected)
 
             if evicted > 0 do
-              Logger.info(
-                "[peer_snub] hash=#{Torrent.hex_encoded_hash(hash)} n=#{evicted}"
-              )
+              Logger.info("[peer_snub] hash=#{Torrent.hex_encoded_hash(hash)} n=#{evicted}")
 
               %{state | last_snub_ms: now}
             else

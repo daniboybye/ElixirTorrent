@@ -11,7 +11,13 @@ defmodule IPv6AnnounceTest do
   describe "UDP tracker IPv6 announce encoding (BEP 15)" do
     test "encode_udp_announce_for_test uses ip_field=0 for inet6" do
       packet =
-        Tracker.encode_udp_announce_for_test(@connection_id, @transaction_id, @hash, @stats, :inet6)
+        Tracker.encode_udp_announce_for_test(
+          @connection_id,
+          @transaction_id,
+          @hash,
+          @stats,
+          :inet6
+        )
         |> IO.iodata_to_binary()
 
       # ip_field at byte offset 84 in the 98-byte BEP 15 announce packet
@@ -21,7 +27,13 @@ defmodule IPv6AnnounceTest do
 
     test "encode_udp_announce_for_test embeds IPv4 in ip_field for inet" do
       packet =
-        Tracker.encode_udp_announce_for_test(@connection_id, @transaction_id, @hash, @stats, :inet)
+        Tracker.encode_udp_announce_for_test(
+          @connection_id,
+          @transaction_id,
+          @hash,
+          @stats,
+          :inet
+        )
         |> IO.iodata_to_binary()
 
       # ip_field at byte offset 84 in the 98-byte BEP 15 announce packet

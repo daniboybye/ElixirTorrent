@@ -26,6 +26,19 @@ defmodule Magnet.Connection do
   # Large ut_metadata data messages are ~16 KiB; never use the 1s poll cap for body reads.
   @wire_body_timeout_ms 30_000
 
+  defp magnet_cfg(key, default) do
+    Application.get_env(:elixir_torrent, :magnet_connection, [])
+    |> Keyword.get(key, default)
+  end
+
+  defp recv_timeout_ms, do: magnet_cfg(:recv_timeout_ms, @recv_timeout)
+  defp unchoke_wait_ms, do: magnet_cfg(:unchoke_wait_ms, @unchoke_wait_ms)
+
+  defp controller_unchoke_poll_ms,
+    do: magnet_cfg(:controller_unchoke_poll_ms, @controller_unchoke_poll_ms)
+
+  defp unchoke_stable_ms, do: magnet_cfg(:unchoke_stable_ms, @unchoke_stable_ms)
+
   defstruct [
     :socket,
     :peer_key,
@@ -174,7 +187,9 @@ defmodule Magnet.Connection do
   @spec connect_tcp(:inet.ip_address(), :inet.port_number(), keyword()) ::
           {:ok, Peer.Transport.socket()} | {:error, term()}
   defp connect_tcp(ip, port, opts) do
-    case Peer.Transport.connect(ip, port, Keyword.put(opts, :transport, :tcp), @connect_timeout) do
+    # BEP 3 magnet dials use plain :gen_tcp — Peer.Transport.connect/4 would pass
+    # a :transport tag through to gen_tcp and raise :badarg on OTP 29+.
+    case :gen_tcp.connect(ip, port, opts, @connect_timeout) do
       {:ok, socket} when is_port(socket) ->
         :ok = Acceptor.apply_tcp_performance(socket)
         {:ok, socket}
@@ -231,7 +246,7 @@ defmodule Magnet.Connection do
   # independent of the piece choke; do not wait for unchoke).
   @spec wait_controller_ready(Peer.key(), map()) :: {:ok, map()} | {:error, term()}
   defp wait_controller_ready(key, info) do
-    deadline = System.monotonic_time(:millisecond) + @unchoke_wait_ms
+    deadline = System.monotonic_time(:millisecond) + unchoke_wait_ms()
     do_wait_controller_ready(key, info, deadline)
   end
 
@@ -272,7 +287,7 @@ defmodule Magnet.Connection do
         {:error, :metadata_unavailable}
 
       true ->
-        Process.sleep(@controller_unchoke_poll_ms)
+        Process.sleep(controller_unchoke_poll_ms())
         do_wait_controller_ready(key, info, deadline)
     end
   catch
@@ -316,7 +331,6 @@ defmodule Magnet.Connection do
       "[magnet_ut] handshake ok transport=#{transport} endpoint=#{inspect({ip, port})} peer_ut_id=#{inspect(peer_ut)} local_ut_id=#{inspect(local_ut)} metadata_size=#{inspect(metadata_size)}"
     )
   end
-
 
   defp log_ltep_ready_swarm(key, ltep, metadata_size) do
     peer_ut = Peer.LTEP.Session.peer_extension_id(ltep, @ut_metadata)
@@ -384,8 +398,11 @@ defmodule Magnet.Connection do
             recv_ut_metadata_response(conn, piece_index)
           end
 
-        {:error, _} = error -> error
-        other -> {:error, other}
+        {:error, _} = error ->
+          error
+
+        other ->
+          {:error, other}
       end
     else
       {:error, :no_ut_metadata}
@@ -469,7 +486,8 @@ defmodule Magnet.Connection do
   defp family_for_ip({_, _, _, _}), do: :inet
   defp family_for_ip({_, _, _, _, _, _, _, _}), do: :inet6
 
-  @spec handshake_exchange(t() | Peer.Transport.socket(), Torrent.hash()) :: :ok | {:error, term()}
+  @spec handshake_exchange(t() | Peer.Transport.socket(), Torrent.hash()) ::
+          :ok | {:error, term()}
   defp handshake_exchange(%__MODULE__{} = conn, hash), do: handshake_exchange(conn.socket, hash)
 
   defp handshake_exchange(socket, hash) do
@@ -513,7 +531,7 @@ defmodule Magnet.Connection do
   @spec recv_handshake(Peer.Transport.socket(), Torrent.hash()) ::
           {:ok, Peer.reserved()} | {:error, term()}
   defp recv_handshake(socket, expected_hash) do
-    case io_recv(socket, @handshake_length, @recv_timeout) do
+    case io_recv(socket, @handshake_length, recv_timeout_ms()) do
       {:ok,
        <<@pstrlen, @pstr, reserved::bytes-size(8), hash::bytes-size(20),
          _peer_id::bytes-size(20)>>} ->
@@ -553,7 +571,7 @@ defmodule Magnet.Connection do
   defp ensure_ready_for_ut_metadata(%__MODULE__{transport: :swarm} = conn), do: {:ok, conn}
 
   defp ensure_ready_for_ut_metadata(%__MODULE__{} = conn) do
-    deadline = System.monotonic_time(:millisecond) + @unchoke_wait_ms
+    deadline = System.monotonic_time(:millisecond) + unchoke_wait_ms()
 
     case drain_until(deadline, conn, :unchoke) do
       {:ok, conn} -> {:ok, conn}
@@ -654,7 +672,7 @@ defmodule Magnet.Connection do
           {:continue, t()} | {:ok, t()}
   defp maybe_return_stable_unchoke(:unchoke, %{unchoked?: true, unchoke_since: since} = conn)
        when is_integer(since) do
-    if System.monotonic_time(:millisecond) - since >= @unchoke_stable_ms,
+    if System.monotonic_time(:millisecond) - since >= unchoke_stable_ms(),
       do: {:ok, conn},
       else: {:continue, conn}
   end
@@ -684,7 +702,7 @@ defmodule Magnet.Connection do
 
   defp timeout_error(:unchoke, %{unchoked?: true, unchoke_since: since} = conn)
        when is_integer(since) do
-    if System.monotonic_time(:millisecond) - since >= @unchoke_stable_ms,
+    if System.monotonic_time(:millisecond) - since >= unchoke_stable_ms(),
       do: {:ok, conn},
       else: {:error, :choked}
   end
@@ -751,7 +769,7 @@ defmodule Magnet.Connection do
   @spec recv_ut_metadata_response(t(), non_neg_integer()) ::
           {:ok, binary(), pos_integer()} | {:reject, non_neg_integer()} | {:error, term()}
   defp recv_ut_metadata_response(%__MODULE__{} = conn, expected_piece) do
-    deadline = System.monotonic_time(:millisecond) + @recv_timeout
+    deadline = System.monotonic_time(:millisecond) + recv_timeout_ms()
     recv_ut_metadata_loop(conn, expected_piece, deadline)
   end
 
@@ -822,7 +840,14 @@ defmodule Magnet.Connection do
     end
   end
 
-  @spec log_ut_metadata_wire_rx(t(), term(), term(), term(), term(), :unchoke | :ut_metadata | :sync) ::
+  @spec log_ut_metadata_wire_rx(
+          t(),
+          term(),
+          term(),
+          term(),
+          term(),
+          :unchoke | :ut_metadata | :sync
+        ) ::
           :ok
   defp log_ut_metadata_wire_rx(conn, frame, ext_id, local_ut_id, peer_ut_id, mode \\ :ut_metadata)
 
@@ -844,9 +869,7 @@ defmodule Magnet.Connection do
 
   @spec log_recv_timeout(t(), non_neg_integer()) :: :ok
   defp log_recv_timeout(conn, expected_piece) do
-    Logger.warning(
-      "[magnet_ut] recv_timeout endpoint=#{endpoint(conn)} piece=#{expected_piece}"
-    )
+    Logger.warning("[magnet_ut] recv_timeout endpoint=#{endpoint(conn)} piece=#{expected_piece}")
   end
 
   @spec wire_hex(binary(), pos_integer()) :: String.t()

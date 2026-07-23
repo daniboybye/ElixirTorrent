@@ -339,7 +339,9 @@ defmodule Torrent.WebSeed do
   # `info["length"]`) cumulatively and cut out the segments that touch
   # [begin_byte, end_byte].
   @doc false
-  @spec span_files(map(), non_neg_integer(), non_neg_integer()) :: [%{path: [String.t()], offset: non_neg_integer(), length: pos_integer()}]
+  @spec span_files(map(), non_neg_integer(), non_neg_integer()) :: [
+          %{path: [String.t()], offset: non_neg_integer(), length: pos_integer()}
+        ]
   def span_files(%{"length" => length, "name" => name}, begin_byte, end_byte) do
     seg_end = min(end_byte, length - 1)
 
@@ -358,8 +360,12 @@ defmodule Torrent.WebSeed do
         cursor = cursor + file_len
 
         cond do
-          file_end < begin_byte -> {acc, cursor}
-          file_begin > end_byte -> {acc, cursor}
+          file_end < begin_byte ->
+            {acc, cursor}
+
+          file_begin > end_byte ->
+            {acc, cursor}
+
           true ->
             overlap_begin = max(begin_byte, file_begin)
             overlap_end = min(end_byte, file_end)
@@ -429,7 +435,10 @@ defmodule Torrent.WebSeed do
                                                                                                    n
                                                                                                } ->
       failures = n + 1
-      delay = min(@error_backoff_base_ms * Integer.pow(2, min(failures - 1, 6)), @error_backoff_max_ms)
+
+      delay =
+        min(@error_backoff_base_ms * Integer.pow(2, min(failures - 1, 6)), @error_backoff_max_ms)
+
       %{failures: failures, next_ok_at_ms: now + delay}
     end)
   end

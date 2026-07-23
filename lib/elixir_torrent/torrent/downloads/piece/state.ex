@@ -69,7 +69,11 @@ defmodule Torrent.Downloads.Piece.State do
 
   # A prior attempt moved every subpiece into in-flight requests but never finished.
   # Re-queue them instead of telling the controller the piece is done.
-  def download(%__MODULE__{waiting: [], requests: requests} = state, downloaded, requests_are_dealt)
+  def download(
+        %__MODULE__{waiting: [], requests: requests} = state,
+        downloaded,
+        requests_are_dealt
+      )
       when requests != [] do
     waiting = Enum.map(requests, & &1.subpiece)
     Enum.each(requests, &cancel_request/1)
@@ -336,7 +340,9 @@ defmodule Torrent.Downloads.Piece.State do
 
   # Peer request timeouts re-queue blocks into waiting but previously left the
   # overall stall timer cancelled, so the worker could live forever in active_indices.
-  defp restart_stall_timer(%__MODULE__{mode: nil, timer: nil, waiting: [_ | _], requests: []} = state) do
+  defp restart_stall_timer(
+         %__MODULE__{mode: nil, timer: nil, waiting: [_ | _], requests: []} = state
+       ) do
     %{state | timer: new_stall_timer()}
   end
 

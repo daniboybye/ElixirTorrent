@@ -148,7 +148,7 @@ defmodule TorrentControllerParallelTest do
     choked_configs =
       if choked_count > 0 do
         for i <- 1..choked_count do
-          [id: <<(100 + i)::160>>, choke_me: true, bitfield: :all]
+          [id: <<100 + i::160>>, choke_me: true, bitfield: :all]
         end
       else
         []

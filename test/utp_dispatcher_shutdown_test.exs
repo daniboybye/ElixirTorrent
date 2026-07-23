@@ -2,15 +2,17 @@ defmodule UTPDispatcherShutdownTest do
   use ExUnit.Case, async: false
 
   setup do
-    unless Process.whereis(UTP.Dispatcher) do
-      {:ok, _} = UTP.Dispatcher.start_link([])
-    end
+    {:ok, _} = Application.ensure_all_started(:elixir_torrent)
 
     on_exit(fn ->
       if :ets.info(:utp_connections) == :undefined do
-        if pid = Process.whereis(UTP.Dispatcher), do: GenServer.stop(pid)
-
-        assert wait_for(fn -> :ets.info(:utp_connections) != :undefined end)
+        # Restart the complete application instead of manually stopping its
+        # permanent Dispatcher child. A child-only restart contributes to the
+        # top supervisor's restart intensity and can make it shut the whole
+        # application down several tests later, depending on suite order.
+        :ok = Application.stop(:elixir_torrent)
+        {:ok, _} = Application.ensure_all_started(:elixir_torrent)
+        assert :ets.info(:utp_connections) != :undefined
       end
     end)
 
@@ -26,14 +28,5 @@ defmodule UTPDispatcherShutdownTest do
 
     assert :ok = UTP.Dispatcher.unregister(1, ip, port)
     assert :ok = UTP.Dispatcher.unregister_pair(1, 2, ip, port)
-  end
-
-  defp wait_for(fun, attempts \\ 50) do
-    if fun.() or attempts == 0 do
-      fun.()
-    else
-      Process.sleep(10)
-      wait_for(fun, attempts - 1)
-    end
   end
 end

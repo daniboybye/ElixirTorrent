@@ -70,7 +70,8 @@ defmodule Torrents do
 
   Trackerless magnets (no `tr=` and no DHT) return `{:error, :missing_trackers}`.
   """
-  @spec download_magnet(String.t(), keyword()) :: DynamicSupervisor.on_start_child() | {:error, term()}
+  @spec download_magnet(String.t(), keyword()) ::
+          DynamicSupervisor.on_start_child() | {:error, term()}
   def download_magnet(magnet_uri, opts \\ []) when is_binary(magnet_uri) and is_list(opts) do
     with {:ok, %Magnet{} = magnet} <- Magnet.parse(magnet_uri),
          {:ok, ref} <- Magnet.Fetcher.run(magnet),

@@ -95,7 +95,7 @@ defmodule Peer.MSE.Handshake do
   # A -> B step 3: HASH('req1',S), HASH('req2',SKEY) xor HASH('req3',S),
   # ENCRYPT(VC, crypto_provide, len(PadC)=0, len(IA), IA).
   defp build_initiator_request(s, info_hash, cipher, ia) do
-    provide = <<0::24, (MSE.crypto_plaintext() ||| MSE.crypto_rc4())>>
+    provide = <<0::24, MSE.crypto_plaintext() ||| MSE.crypto_rc4()>>
     ia = IO.iodata_to_binary(ia)
     plain = <<@vc::binary, provide::binary, 0::16, byte_size(ia)::16, ia::binary>>
 
@@ -126,7 +126,12 @@ defmodule Peer.MSE.Handshake do
   hash to a known torrent hash (or `nil` if we don't serve it). Returns the
   ciphers plus `leftover` = the peer's decrypted initial BT handshake (`IA`).
   """
-  @spec respond(Transport.socket(), (binary(), binary() -> Torrent.hash() | nil), timeout(), binary()) ::
+  @spec respond(
+          Transport.socket(),
+          (binary(), binary() -> Torrent.hash() | nil),
+          timeout(),
+          binary()
+        ) ::
           {:ok, result()} | {:error, term()}
   def respond(socket, resolve, timeout \\ 15_000, prefix \\ <<>>) do
     keys = MSE.generate_keypair()

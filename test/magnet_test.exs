@@ -56,7 +56,10 @@ defmodule MagnetTest do
 
     incoming = %Magnet{
       hash: hash,
-      trackers: ["udp://tracker.coppersurfer.tk:6969/announce", "udp://tracker.opentrackr.org:1337/announce"],
+      trackers: [
+        "udp://tracker.coppersurfer.tk:6969/announce",
+        "udp://tracker.opentrackr.org:1337/announce"
+      ],
       display_name: nil,
       x_pe_peers: []
     }

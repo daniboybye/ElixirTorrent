@@ -117,7 +117,9 @@ defmodule Peer.Transport do
 
   @spec controlling_process(socket(), pid()) :: :ok | {:error, term()}
   def controlling_process({:mse, inner, _}, pid), do: controlling_process(inner, pid)
-  def controlling_process({:utp, _} = socket, pid), do: UTP.Socket.controlling_process(socket, pid)
+
+  def controlling_process({:utp, _} = socket, pid),
+    do: UTP.Socket.controlling_process(socket, pid)
 
   def controlling_process(socket, pid) when is_port(socket),
     do: :gen_tcp.controlling_process(socket, pid)

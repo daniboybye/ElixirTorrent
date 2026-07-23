@@ -281,7 +281,9 @@ defmodule Peer.LTEPTest do
           {len, message}
         end)
 
-      {:ok, client} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, packet: :raw])
+      {:ok, client} =
+        :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, packet: :raw])
+
       payload = Magnet.UtMetadata.encode_request(0)
       assert :ok = Peer.LTEP.send_extended(client, 7, payload)
       :gen_tcp.close(client)

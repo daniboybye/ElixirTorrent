@@ -5,7 +5,11 @@ defmodule MagnetMetadataPeerTest do
     peer_hs = %Peer.LTEP.Handshake{m: %{"ut_metadata" => 2}, metadata_size: 4096}
     ltep = Peer.LTEP.Session.new() |> Peer.LTEP.Session.apply_peer_handshake(peer_hs)
 
-    refute Magnet.Bootstrap.metadata_peer_eligible?(%{ltep: ltep, metadata_size: nil, seeder?: false})
+    refute Magnet.Bootstrap.metadata_peer_eligible?(%{
+             ltep: ltep,
+             metadata_size: nil,
+             seeder?: false
+           })
 
     assert Magnet.Bootstrap.metadata_peer_eligible?(%{
              ltep: ltep,
@@ -24,7 +28,16 @@ defmodule MagnetMetadataPeerTest do
     peer_hs = %Peer.LTEP.Handshake{m: %{"ut_metadata" => 2}, metadata_size: nil}
     ltep = Peer.LTEP.Session.new() |> Peer.LTEP.Session.apply_peer_handshake(peer_hs)
 
-    assert Magnet.Bootstrap.metadata_peer_candidate?(%{ltep: ltep, metadata_size: nil, seeder?: false})
-    refute Magnet.Bootstrap.metadata_peer_eligible?(%{ltep: ltep, metadata_size: nil, seeder?: false})
+    assert Magnet.Bootstrap.metadata_peer_candidate?(%{
+             ltep: ltep,
+             metadata_size: nil,
+             seeder?: false
+           })
+
+    refute Magnet.Bootstrap.metadata_peer_eligible?(%{
+             ltep: ltep,
+             metadata_size: nil,
+             seeder?: false
+           })
   end
 end

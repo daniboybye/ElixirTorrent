@@ -36,6 +36,7 @@ defmodule NAT.PortMapper do
     # NAT-type detection is one-shot: mapping behaviour is a stable property of
     # the NAT, so we classify it once shortly after boot and log the verdict.
     Process.send_after(self(), :detect_nat_type, @startup_delay_ms + @nat_detect_delay_ms)
+
     {:ok,
      %{
        failures: 0,
@@ -89,7 +90,9 @@ defmodule NAT.PortMapper do
     end
 
     Process.send_after(self(), :map_ports, next_ms)
-    {:noreply, %{state | failures: failures, method_failures: method_failures, dead_methods: dead}}
+
+    {:noreply,
+     %{state | failures: failures, method_failures: method_failures, dead_methods: dead}}
   end
 
   @spec log_nat_type() :: :ok
@@ -262,9 +265,7 @@ defmodule NAT.PortMapper do
         end
 
       {:error, reason} ->
-        Logger.info(
-          "[nat] failed proto=#{proto} port=#{port} via=upnp reason=#{inspect(reason)}"
-        )
+        Logger.info("[nat] failed proto=#{proto} port=#{port} via=upnp reason=#{inspect(reason)}")
 
         {:error, reason}
     end

@@ -130,7 +130,10 @@ defmodule Peer.DialStats do
   end
 
   # Integer form of `rate_v6 >= @prefer_ratio * rate_v4` with both totals >= @min_sample.
-  @spec prefer_inet6_rate?({non_neg_integer(), non_neg_integer()}, {non_neg_integer(), non_neg_integer()}) ::
+  @spec prefer_inet6_rate?(
+          {non_neg_integer(), non_neg_integer()},
+          {non_neg_integer(), non_neg_integer()}
+        ) ::
           boolean()
   defp prefer_inet6_rate?({ok4, fail4}, {ok6, fail6}) do
     total4 = ok4 + fail4

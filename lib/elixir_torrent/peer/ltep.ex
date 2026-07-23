@@ -210,7 +210,9 @@ defmodule Peer.LTEP do
   end
 
   @type framed ::
-          :keepalive | {:standard, pos_integer(), binary()} | {:extended, non_neg_integer(), binary()}
+          :keepalive
+          | {:standard, pos_integer(), binary()}
+          | {:extended, non_neg_integer(), binary()}
 
   @spec recv_framed_message(:gen_tcp.socket(), non_neg_integer()) ::
           {:ok, framed()} | {:error, term()}

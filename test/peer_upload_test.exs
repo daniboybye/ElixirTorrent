@@ -107,7 +107,11 @@ defmodule PeerUploadTest do
         )
 
       on_exit(fn ->
-        if Process.alive?(sender_pid), do: GenServer.stop(sender_pid, :normal, 1_000)
+        try do
+          if Process.alive?(sender_pid), do: GenServer.stop(sender_pid, :normal, 1_000)
+        catch
+          :exit, _ -> :ok
+        end
       end)
 
       state =
@@ -137,7 +141,8 @@ defmodule PeerUploadTest do
     assert source =~ "Peer.ConnectionManager.offer_peers(state.hash, [%Peer{ip: ip, port: port}])"
     assert source =~ "Peer.ConnectionManager.kick(state.hash)"
     # kick-alone is a no-op when dial_done already removed the peer from the queue.
-    refute source =~ ~r/mark_productive\(state\.hash, ip, port\)\s*\n\s*Peer\.ConnectionManager\.kick/
+    refute source =~
+             ~r/mark_productive\(state\.hash, ip, port\)\s*\n\s*Peer\.ConnectionManager\.kick/
   end
 
   test "handle_request stays choked without serving when peer is choked" do

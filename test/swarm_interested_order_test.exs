@@ -41,7 +41,10 @@ defmodule SwarmInterestedOrderTest do
       leecher_pid = add_mock_peer(hash, leecher_id, bitfield: partial_bitfield(4, 0))
       seeder_pid = add_mock_peer(hash, seeder_id, bitfield: :all)
 
-      assert Swarm.sort_peers_seeders_first([leecher_pid, seeder_pid]) == [seeder_pid, leecher_pid]
+      assert Swarm.sort_peers_seeders_first([leecher_pid, seeder_pid]) == [
+               seeder_pid,
+               leecher_pid
+             ]
     end)
   end
 

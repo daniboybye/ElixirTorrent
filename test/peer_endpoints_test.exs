@@ -12,7 +12,12 @@ defmodule PeerEndpointsTest do
   end
 
   test "registered?/3 tracks live peer processes" do
-    peer = spawn(fn -> receive do :stop -> :ok end end)
+    peer =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
 
     refute Peer.Endpoints.registered?(@hash, {9, 9, 9, 9}, 6881)
 
@@ -26,8 +31,19 @@ defmodule PeerEndpointsTest do
   end
 
   test "list/1 returns registered endpoints" do
-    peer_a = spawn(fn -> receive do :stop -> :ok end end)
-    peer_b = spawn(fn -> receive do :stop -> :ok end end)
+    peer_a =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    peer_b =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
 
     :ok = Peer.Endpoints.register(@hash, {1, 2, 3, 4}, 6881, peer_a)
     :ok = Peer.Endpoints.register(@hash, {5, 6, 7, 8}, 6882, peer_b)

@@ -16,7 +16,9 @@ defmodule DHT.Lookup do
   @type shortlist_entry :: %{id: RoutingTable.node_id(), queried?: boolean()}
 
   @doc "Build an initial shortlist of up to `@k` closest nodes from the routing table."
-  @spec initial_shortlist(RoutingTable.t() | DHT.RoutingTables.t(), target()) :: [shortlist_entry()]
+  @spec initial_shortlist(RoutingTable.t() | DHT.RoutingTables.t(), target()) :: [
+          shortlist_entry()
+        ]
   def initial_shortlist(%{v4: _, v6: _} = tables, target) do
     tables
     |> DHT.RoutingTables.closest(target, @k)

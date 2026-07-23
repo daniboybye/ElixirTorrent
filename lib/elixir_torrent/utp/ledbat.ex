@@ -34,13 +34,11 @@ defmodule UTP.LEDBAT do
   # packets, i.e. slow-start start point (libutp: MIN_WINDOW_SIZE * 2ish).
   @initial_max_window 3_000
 
-  defstruct [
-    max_window: @initial_max_window,
-    base_delay: nil,
-    delay_samples: [],
-    last_off_target: 0,
-    slow_start: true
-  ]
+  defstruct max_window: @initial_max_window,
+            base_delay: nil,
+            delay_samples: [],
+            last_off_target: 0,
+            slow_start: true
 
   @type t :: %__MODULE__{
           max_window: non_neg_integer(),
@@ -54,7 +52,8 @@ defmodule UTP.LEDBAT do
   def new, do: %__MODULE__{}
 
   @spec record_delay(t(), non_neg_integer()) :: t()
-  def record_delay(%__MODULE__{} = state, timestamp_difference_us) when timestamp_difference_us >= 0 do
+  def record_delay(%__MODULE__{} = state, timestamp_difference_us)
+      when timestamp_difference_us >= 0 do
     now_ms = System.monotonic_time(:millisecond)
 
     samples =

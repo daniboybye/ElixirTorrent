@@ -43,15 +43,17 @@ defmodule DHT.BEP42 do
 
   defp mask_ip({a, b, c, d}, r) do
     {m0, m1, m2, m3} = @v4_mask
-    <<Bitwise.bor(Bitwise.band(a, m0), Bitwise.bsl(r, 5)), Bitwise.band(b, m1), Bitwise.band(c, m2),
-      Bitwise.band(d, m3)>>
+
+    <<Bitwise.bor(Bitwise.band(a, m0), Bitwise.bsl(r, 5)), Bitwise.band(b, m1),
+      Bitwise.band(c, m2), Bitwise.band(d, m3)>>
   end
 
   defp mask_ip({a, b, c, d, e, f, g, h}, r) do
     {m0, m1, m2, m3, m4, m5, m6, m7} = @v6_mask
-    <<Bitwise.bor(Bitwise.band(a, m0), Bitwise.bsl(r, 5)), Bitwise.band(b, m1), Bitwise.band(c, m2),
-      Bitwise.band(d, m3), Bitwise.band(e, m4), Bitwise.band(f, m5), Bitwise.band(g, m6),
-      Bitwise.band(h, m7)>>
+
+    <<Bitwise.bor(Bitwise.band(a, m0), Bitwise.bsl(r, 5)), Bitwise.band(b, m1),
+      Bitwise.band(c, m2), Bitwise.band(d, m3), Bitwise.band(e, m4), Bitwise.band(f, m5),
+      Bitwise.band(g, m6), Bitwise.band(h, m7)>>
   end
 
   # CRC32C (Castagnoli) — BEP 42 mandates this polynomial, not IEEE CRC32.

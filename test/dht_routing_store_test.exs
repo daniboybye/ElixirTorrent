@@ -39,7 +39,9 @@ defmodule DHT.RoutingStoreTest do
     assert RoutingTable.node_count(loaded.v4) == 2
     assert RoutingTable.node_count(loaded.v6) == 1
 
-    ids = (RoutingTable.entries(loaded.v4) ++ RoutingTable.entries(loaded.v6)) |> Enum.map(& &1.id)
+    ids =
+      (RoutingTable.entries(loaded.v4) ++ RoutingTable.entries(loaded.v6)) |> Enum.map(& &1.id)
+
     assert :binary.copy(<<0x01>>, 20) in ids
     assert :binary.copy(<<0x03>>, 20) in ids
   end

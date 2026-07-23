@@ -35,8 +35,7 @@ defmodule HTTPTrackerIPv6Test do
   describe "BEP 7 peers6 parsing" do
     test "to_peers_v6 decodes 18-byte compact IPv6 peer records" do
       bin =
-        <<0x26, 0x02, 0x00, 0x2d, 0x40, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x42,
-          0x1A, 0xE1>>
+        <<0x26, 0x02, 0x00, 0x2D, 0x40, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x42, 0x1A, 0xE1>>
 
       peers = UDP.parse_compact_peers(bin, :inet6)
       assert length(peers) == 1
@@ -48,8 +47,7 @@ defmodule HTTPTrackerIPv6Test do
   describe "BEP 32 DHT compact IPv6 peers" do
     test "decode_ipv6_peers parses 18-byte values entries" do
       bin =
-        <<0x26, 0x02, 0x00, 0x2d, 0x40, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x42,
-          0x1A, 0xE1>>
+        <<0x26, 0x02, 0x00, 0x2D, 0x40, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x42, 0x1A, 0xE1>>
 
       peers = DHT.Compact.decode_ipv6_peers(bin)
       assert length(peers) == 1

@@ -119,7 +119,15 @@ defmodule Peer.DialBackoff do
     :error, _ -> false
   end
 
-  @expected_dial_failures [:timeout, :closed, :econnrefused, :ehostunreach, :enetunreach, :handshake_timeout, :churn]
+  @expected_dial_failures [
+    :timeout,
+    :closed,
+    :econnrefused,
+    :ehostunreach,
+    :enetunreach,
+    :handshake_timeout,
+    :churn
+  ]
 
   @spec record(Torrent.hash(), :inet.ip_address(), :inet.port_number(), term()) :: :ok
   def record(hash, ip, port, reason) do

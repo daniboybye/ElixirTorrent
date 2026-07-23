@@ -56,7 +56,8 @@ defmodule UTPZombieTest do
     port = 20_002
     recv_id = 21_002
 
-    assert {:ok, {:utp, pid} = ref_sock} = Connection.start_client(udp, ip, port, conn_id: recv_id)
+    assert {:ok, {:utp, pid} = ref_sock} =
+             Connection.start_client(udp, ip, port, conn_id: recv_id)
 
     owner =
       spawn(fn ->

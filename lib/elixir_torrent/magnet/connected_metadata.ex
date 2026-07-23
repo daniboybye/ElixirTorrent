@@ -20,6 +20,25 @@ defmodule Magnet.ConnectedMetadata do
   @wait_max_ms 120_000
   @wait_poll_ms 200
 
+  defp connected_cfg(key, default) do
+    Application.get_env(:elixir_torrent, :magnet_connected_metadata, [])
+    |> Keyword.get(key, default)
+  end
+
+  defp max_peers, do: connected_cfg(:max_peers, @max_peers)
+  defp metadata_parallel, do: connected_cfg(:metadata_parallel, @metadata_parallel)
+  defp min_peers_for_round, do: connected_cfg(:min_peers_for_round, @min_peers_for_round)
+  defp min_peers_gather_ms, do: connected_cfg(:min_peers_gather_ms, @min_peers_gather_ms)
+  defp peer_timeout_ms, do: connected_cfg(:peer_timeout_ms, @peer_timeout_ms)
+  defp ltep_metadata_wait_ms, do: connected_cfg(:ltep_metadata_wait_ms, @ltep_metadata_wait_ms)
+  defp wait_for_peers_ms, do: connected_cfg(:wait_for_peers_ms, @wait_for_peers_ms)
+
+  defp wait_extend_on_connect_ms,
+    do: connected_cfg(:wait_extend_on_connect_ms, @wait_extend_on_connect_ms)
+
+  defp wait_max_ms, do: connected_cfg(:wait_max_ms, @wait_max_ms)
+  defp wait_poll_ms, do: connected_cfg(:wait_poll_ms, @wait_poll_ms)
+
   @spec fetch(Magnet.t(), [String.t()]) ::
           {:ok, Path.t(), [String.t()], boolean()} | {:error, term()}
   def fetch(%Magnet{} = magnet, announced_trackers) do
@@ -31,20 +50,18 @@ defmodule Magnet.ConnectedMetadata do
       Logger.info("[magnet_swarm] no_metadata_peers hash=#{hash_hex}")
       {:error, :no_swarm_metadata_peers}
     else
-      peer_count = min(length(keys), @max_peers)
+      peer_count = min(length(keys), max_peers())
 
-      Logger.info(
-        "[magnet_swarm] metadata_start hash=#{hash_hex} swarm_peers=#{peer_count}"
-      )
+      Logger.info("[magnet_swarm] metadata_start hash=#{hash_hex} swarm_peers=#{peer_count}")
 
       {result, failures} =
         keys
-        |> Enum.take(@max_peers)
+        |> Enum.take(max_peers())
         |> Task.async_stream(
           fn key -> fetch_from_peer(magnet, key) end,
-          max_concurrency: @metadata_parallel,
+          max_concurrency: metadata_parallel(),
           ordered: false,
-          timeout: @peer_timeout_ms,
+          timeout: peer_timeout_ms(),
           on_timeout: :kill_task
         )
         |> Enum.reduce_while({{:error, :metadata_unavailable}, []}, fn
@@ -73,7 +90,8 @@ defmodule Magnet.ConnectedMetadata do
           err
 
         {:error, _} ->
-          normalized_failures = failures |> Enum.reverse() |> Enum.map(&normalize_failure/1) |> Enum.uniq()
+          normalized_failures =
+            failures |> Enum.reverse() |> Enum.map(&normalize_failure/1) |> Enum.uniq()
 
           if normalized_failures != [] do
             Logger.info(
@@ -123,7 +141,10 @@ defmodule Magnet.ConnectedMetadata do
       end
     else
       false ->
-        Logger.info("[magnet_swarm] metadata_peer_skip endpoint=#{endpoint} reason=no_ut_metadata")
+        Logger.info(
+          "[magnet_swarm] metadata_peer_skip endpoint=#{endpoint} reason=no_ut_metadata"
+        )
+
         {:error, :no_ut_metadata}
 
       {:error, :metadata_size_pending} ->
@@ -203,7 +224,7 @@ defmodule Magnet.ConnectedMetadata do
         {:ok, info}
 
       true ->
-        deadline = System.monotonic_time(:millisecond) + @ltep_metadata_wait_ms
+        deadline = System.monotonic_time(:millisecond) + ltep_metadata_wait_ms()
         do_wait_for_ut_metadata(key, info, deadline)
     end
   end
@@ -219,7 +240,7 @@ defmodule Magnet.ConnectedMetadata do
         {:error, :metadata_size_pending}
 
       true ->
-        Process.sleep(@wait_poll_ms)
+        Process.sleep(wait_poll_ms())
 
         case safe_metadata_capable(key) do
           {:ok, info} -> do_wait_for_ut_metadata(key, info, deadline)
@@ -231,8 +252,9 @@ defmodule Magnet.ConnectedMetadata do
   @spec wait_metadata_peer_keys(Torrent.hash()) :: [Peer.key()]
   defp wait_metadata_peer_keys(hash) do
     started_ms = System.monotonic_time(:millisecond)
-    deadline = started_ms + @wait_for_peers_ms
-    max_deadline = started_ms + @wait_max_ms
+    deadline = started_ms + wait_for_peers_ms()
+    max_deadline = started_ms + wait_max_ms()
+
     do_wait_metadata_peer_keys(
       hash,
       deadline,
@@ -256,15 +278,15 @@ defmodule Magnet.ConnectedMetadata do
 
     deadline =
       if count > last_count do
-        extend_wait_deadline(deadline, max_deadline, @wait_extend_on_connect_ms)
+        extend_wait_deadline(deadline, max_deadline, wait_extend_on_connect_ms())
       else
         deadline
       end
 
-    gather_deadline = started_ms + @min_peers_gather_ms
+    gather_deadline = started_ms + min_peers_gather_ms()
 
     cond do
-      length(keys) >= @min_peers_for_round ->
+      length(keys) >= min_peers_for_round() ->
         keys
 
       keys != [] and (now >= gather_deadline or now >= deadline) ->
@@ -274,7 +296,7 @@ defmodule Magnet.ConnectedMetadata do
         []
 
       true ->
-        Process.sleep(@wait_poll_ms)
+        Process.sleep(wait_poll_ms())
         do_wait_metadata_peer_keys(hash, deadline, max_deadline, count, started_ms)
     end
   end

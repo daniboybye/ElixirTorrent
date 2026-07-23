@@ -115,7 +115,8 @@ defmodule Peer.Sender do
   end
 
   @doc false
-  @spec socket_recv(Peer.key(), non_neg_integer(), timeout()) :: {:ok, binary()} | {:error, term()}
+  @spec socket_recv(Peer.key(), non_neg_integer(), timeout()) ::
+          {:ok, binary()} | {:error, term()}
   def socket_recv(key, len, timeout) do
     timeout = if is_integer(timeout), do: max(timeout, 0), else: timeout
     call_timeout = if is_integer(timeout), do: timeout + 5_000, else: timeout
@@ -240,11 +241,17 @@ defmodule Peer.Sender do
 
   # MSE: active-mode data is tagged with the inner (raw) socket and is ciphertext;
   # decrypt with the inbound RC4 stream before buffering.
-  def handle_info({:tcp, raw, data}, %__MODULE__{socket: {:mse, raw, ciphers}, active: false} = state) do
+  def handle_info(
+        {:tcp, raw, data},
+        %__MODULE__{socket: {:mse, raw, ciphers}, active: false} = state
+      ) do
     buffer_inbound(state, Peer.MSE.crypt(ciphers.recv, data))
   end
 
-  def handle_info({:utp, raw, data}, %__MODULE__{socket: {:mse, raw, ciphers}, active: false} = state) do
+  def handle_info(
+        {:utp, raw, data},
+        %__MODULE__{socket: {:mse, raw, ciphers}, active: false} = state
+      ) do
     buffer_inbound(state, Peer.MSE.crypt(ciphers.recv, data))
   end
 
@@ -321,7 +328,9 @@ defmodule Peer.Sender do
     case take_message(buffer) do
       {:ok, message, rest} ->
         case parse(message, key) do
-          :ok -> drain_inbound(%{state | buffer: rest})
+          :ok ->
+            drain_inbound(%{state | buffer: rest})
+
           :protocol_error ->
             Acceptor.malicious_peer(Peer.key_to_id(key))
             {:stop, {:shutdown, :protocol_error}, %{state | buffer: rest}}

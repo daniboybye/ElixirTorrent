@@ -21,7 +21,10 @@ defmodule NAT.PortMapperTest do
 
     test "ok on either proto resets the method counter", %{state: state} do
       partial = %{natpmp_tcp: :ok, natpmp_udp: {:error, :timeout}, upnp_tcp: :ok, upnp_udp: :ok}
-      {mf, dead} = PortMapper.update_method_state(%{state | method_failures: %{natpmp: 3, upnp: 3}}, partial)
+
+      {mf, dead} =
+        PortMapper.update_method_state(%{state | method_failures: %{natpmp: 3, upnp: 3}}, partial)
+
       assert mf == %{natpmp: 0, upnp: 0}
       assert dead == MapSet.new()
     end
@@ -54,7 +57,11 @@ defmodule NAT.PortMapperTest do
     end
 
     test "dead methods are not touched again", %{state: state} do
-      state = %{state | dead_methods: MapSet.new([:natpmp]), method_failures: %{natpmp: 99, upnp: 0}}
+      state = %{
+        state
+        | dead_methods: MapSet.new([:natpmp]),
+          method_failures: %{natpmp: 99, upnp: 0}
+      }
 
       # Even a fresh ok on the dead method leaves it dead (we won't re-attempt
       # until the process restarts).
@@ -65,7 +72,8 @@ defmodule NAT.PortMapperTest do
       assert MapSet.member?(dead, :natpmp)
     end
 
-    test "skipped protos count as non-ok — a dead method's counter is unaffected because we branch on membership first", %{state: state} do
+    test "skipped protos count as non-ok — a dead method's counter is unaffected because we branch on membership first",
+         %{state: state} do
       # Sanity: if upnp is dead and its protos come back :skipped, the counter
       # branch never runs so nothing regresses.
       state = %{state | dead_methods: MapSet.new([:upnp]), method_failures: %{natpmp: 0, upnp: 3}}

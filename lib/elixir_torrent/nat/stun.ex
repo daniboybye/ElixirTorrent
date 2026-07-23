@@ -53,7 +53,8 @@ defmodule NAT.Stun do
 
   @doc false
   @spec put_mapping(mapping()) :: :ok
-  def put_mapping(mapping) when mapping in [:endpoint_independent, :endpoint_dependent, :unknown] do
+  def put_mapping(mapping)
+      when mapping in [:endpoint_independent, :endpoint_dependent, :unknown] do
     :persistent_term.put(@mapping_key, mapping)
   end
 
@@ -139,7 +140,8 @@ defmodule NAT.Stun do
   @doc false
   @spec decode_reflexive(binary(), binary()) :: {:ok, reflexive()} | {:error, term()}
   def decode_reflexive(
-        <<@binding_success::16, len::16, @magic_cookie::32, txid::binary-size(12), attrs::binary>>,
+        <<@binding_success::16, len::16, @magic_cookie::32, txid::binary-size(12),
+          attrs::binary>>,
         txid
       )
       when byte_size(attrs) >= len do

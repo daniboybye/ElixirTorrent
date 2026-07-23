@@ -8,7 +8,12 @@ defmodule TorrentInfoHashTest do
   # finds peers. Regression: prove parse_file! slices the raw bytes.
 
   defp write_tmp!(bytes) do
-    path = Path.join(System.tmp_dir!(), "elixir_torrent_test_#{System.unique_integer([:positive])}.torrent")
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "elixir_torrent_test_#{System.unique_integer([:positive])}.torrent"
+      )
+
     File.write!(path, bytes)
     on_exit_delete(path)
     path
@@ -31,10 +36,14 @@ defmodule TorrentInfoHashTest do
 
     IO.iodata_to_binary([
       "d",
-      bstr("name"), bstr("hello"),
-      bstr("length"), bint(42),
-      bstr("piece length"), bint(16_384),
-      bstr("pieces"), bstr(pieces),
+      bstr("name"),
+      bstr("hello"),
+      bstr("length"),
+      bint(42),
+      bstr("piece length"),
+      bint(16_384),
+      bstr("pieces"),
+      bstr(pieces),
       "e"
     ])
   end
@@ -46,8 +55,10 @@ defmodule TorrentInfoHashTest do
     file_bytes =
       IO.iodata_to_binary([
         "d",
-        bstr("announce"), bstr("http://tracker.example.com/announce"),
-        bstr("info"), info_blob,
+        bstr("announce"),
+        bstr("http://tracker.example.com/announce"),
+        bstr("info"),
+        info_blob,
         "e"
       ])
 
@@ -70,7 +81,8 @@ defmodule TorrentInfoHashTest do
     file_bytes =
       IO.iodata_to_binary([
         "d",
-        bstr("info"), info_blob,
+        bstr("info"),
+        info_blob,
         "e"
       ])
 

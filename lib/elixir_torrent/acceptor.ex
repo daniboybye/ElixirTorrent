@@ -8,8 +8,7 @@ defmodule Acceptor do
       id: __MODULE__,
       type: :supervisor,
       start:
-        {Supervisor, :start_link,
-         [[IpCache, BlackList, Connection], [strategy: :one_for_one]]}
+        {Supervisor, :start_link, [[IpCache, BlackList, Connection], [strategy: :one_for_one]]}
     }
   end
 
@@ -109,7 +108,11 @@ defmodule Acceptor do
   end
 
   @doc false
-  @spec all_global_ips() :: %{inet: :inet.ip4_address() | nil, inet6: :inet.ip6_address() | nil, inet6_all: [:inet.ip6_address()]}
+  @spec all_global_ips() :: %{
+          inet: :inet.ip4_address() | nil,
+          inet6: :inet.ip6_address() | nil,
+          inet6_all: [:inet.ip6_address()]
+        }
   def all_global_ips() do
     case :persistent_term.get(@ip_cache_key, nil) do
       nil -> compute_all_global_ips()
@@ -118,7 +121,11 @@ defmodule Acceptor do
   end
 
   @doc false
-  @spec compute_all_global_ips() :: %{inet: :inet.ip4_address() | nil, inet6: :inet.ip6_address() | nil, inet6_all: [:inet.ip6_address()]}
+  @spec compute_all_global_ips() :: %{
+          inet: :inet.ip4_address() | nil,
+          inet6: :inet.ip6_address() | nil,
+          inet6_all: [:inet.ip6_address()]
+        }
   def compute_all_global_ips() do
     case :inet.getifaddrs() do
       {:ok, ifs} ->

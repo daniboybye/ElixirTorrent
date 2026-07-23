@@ -185,7 +185,9 @@ defmodule DHT do
       )
 
       if socket_v6 && ip6 do
-        Logger.info("[dht] socket family=inet6 port=#{port} bind=#{Acceptor.format_ip(ip6)} v6only=true")
+        Logger.info(
+          "[dht] socket family=inet6 port=#{port} bind=#{Acceptor.format_ip(ip6)} v6only=true"
+        )
       end
 
       Logger.info(
@@ -297,7 +299,10 @@ defmodule DHT do
 
   def handle_info({:udp_error, socket, reason}, state)
       when socket == state.socket_v4 or socket == state.socket_v6 do
-    Logger.warning("DHT UDP error family=#{socket_family(state, socket)} reason=#{inspect(reason)}")
+    Logger.warning(
+      "DHT UDP error family=#{socket_family(state, socket)} reason=#{inspect(reason)}"
+    )
+
     {:noreply, state}
   end
 
@@ -1014,7 +1019,13 @@ defmodule DHT do
     end
   end
 
-  @spec record_lookup_announce_token(t(), map() | nil, :inet.ip_address(), :inet.port_number(), binary()) ::
+  @spec record_lookup_announce_token(
+          t(),
+          map() | nil,
+          :inet.ip_address(),
+          :inet.port_number(),
+          binary()
+        ) ::
           t()
   defp record_lookup_announce_token(state, pending, ip, port, token) do
     case pending do
@@ -1126,7 +1137,8 @@ defmodule DHT do
     end
   end
 
-  @spec open_sockets_auto_port() :: {:ok, port(), port() | nil, :inet.port_number()} | {:error, term()}
+  @spec open_sockets_auto_port() ::
+          {:ok, port(), port() | nil, :inet.port_number()} | {:error, term()}
   defp open_sockets_auto_port do
     Enum.find_value(Acceptor.port_range(), {:error, :no_udp_port}, fn number ->
       case open_sockets_on_port(number) do
@@ -1197,7 +1209,9 @@ defmodule DHT do
   defp maybe_bind_socket(socket), do: bind_socket(socket)
 
   @spec select_socket(t(), :inet | :inet6) :: port() | nil
-  defp select_socket(%__MODULE__{socket_v6: socket_v6}, :inet6) when is_port(socket_v6), do: socket_v6
+  defp select_socket(%__MODULE__{socket_v6: socket_v6}, :inet6) when is_port(socket_v6),
+    do: socket_v6
+
   defp select_socket(%__MODULE__{socket_v4: socket_v4}, :inet6), do: socket_v4
   defp select_socket(%__MODULE__{socket_v4: socket_v4}, :inet), do: socket_v4
   defp select_socket(%__MODULE__{socket_v4: socket_v4}, _), do: socket_v4
@@ -1209,7 +1223,9 @@ defmodule DHT do
   end
 
   @spec socket_family(t(), port()) :: :inet | :inet6
-  defp socket_family(%__MODULE__{socket_v6: socket_v6}, socket) when socket == socket_v6, do: :inet6
+  defp socket_family(%__MODULE__{socket_v6: socket_v6}, socket) when socket == socket_v6,
+    do: :inet6
+
   defp socket_family(%__MODULE__{}, _socket), do: :inet
 
   @spec get_peers_args(Torrent.hash()) :: keyword()
@@ -1238,7 +1254,13 @@ defmodule DHT do
     |> maybe_reply_nodes(:v6, tables, target, want)
   end
 
-  @spec maybe_reply_nodes(map(), RoutingTables.family(), RoutingTables.t(), RoutingTable.node_id(), [String.t()] | nil) ::
+  @spec maybe_reply_nodes(
+          map(),
+          RoutingTables.family(),
+          RoutingTables.t(),
+          RoutingTable.node_id(),
+          [String.t()] | nil
+        ) ::
           map()
   defp maybe_reply_nodes(acc, family, tables, target, want) do
     if include_want_family?(want, family) do

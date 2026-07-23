@@ -443,7 +443,8 @@ defmodule PeerDiscoveryAnnounceTest do
       assert_receive {:parallel_announce, 1}, 100
 
       # tier=1 must not hit tracker_announce_allowed? 30s floor after a failed nxdomain.
-      assert :ok = Announce.tracker_announce_allowed?(new_state, System.monotonic_time(:millisecond))
+      assert :ok =
+               Announce.tracker_announce_allowed?(new_state, System.monotonic_time(:millisecond))
     end
 
     test "dead tier advance with interval 0 starts first live tier synchronously" do
@@ -498,9 +499,9 @@ defmodule PeerDiscoveryAnnounceTest do
       assert new_state.tier_batches == %{2 => 1}
 
       assert Enum.any?(new_state.requests, fn
-        {_ref, {announce, 2, 0}} -> announce == live
-        _ -> false
-      end)
+               {_ref, {announce, 2, 0}} -> announce == live
+               _ -> false
+             end)
     end
 
     test "empty announce response advances to next tier immediately under target" do
@@ -547,7 +548,9 @@ defmodule PeerDiscoveryAnnounceTest do
       assert new_state.last_tracker_announce_ms == nil
       refute Announce.tier_batches_active?(new_state)
       assert_receive {:parallel_announce, 1}, 100
-      assert :ok = Announce.tracker_announce_allowed?(new_state, System.monotonic_time(:millisecond))
+
+      assert :ok =
+               Announce.tracker_announce_allowed?(new_state, System.monotonic_time(:millisecond))
     end
 
     test "successful announce with peers still enforces min-interval floor" do
@@ -634,7 +637,7 @@ defmodule PeerDiscoveryAnnounceTest do
       dead = for i <- 0..6, do: "udp://dead#{i}.example:6969/announce"
       live = "udp://live7.example:6969/announce"
 
-      tiers = (for d <- dead, do: [d]) ++ [[live]]
+      tiers = for(d <- dead, do: [d]) ++ [[live]]
 
       state =
         base_state(
@@ -703,9 +706,7 @@ defmodule PeerDiscoveryAnnounceTest do
       announce = "http://tracker.example.com/opaque"
 
       state =
-        base_state(
-          requests: %{ref => {:scrape, announce}}
-        )
+        base_state(requests: %{ref => {:scrape, announce}})
 
       error = %Error{reason: :not_scrapeable, retry_in: "never"}
       new_state = Announce.dispatch_task_message(state, {ref, error})

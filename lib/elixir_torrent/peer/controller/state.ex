@@ -584,37 +584,42 @@ defmodule Peer.Controller.State do
   end
 
   defp do_serve_request(state, index, begin, length) do
-      allowed_while_choked? = FastExtension.upload?(state.fast_extension, index)
+    allowed_while_choked? = FastExtension.upload?(state.fast_extension, index)
 
+    log_upload(
+      state,
+      "request index=#{index} begin=#{begin} len=#{length} choked=#{state.choke}",
+      :debug
+    )
+
+    if state.choke and state.fast_extension != nil and not allowed_while_choked? do
       log_upload(
         state,
-        "request index=#{index} begin=#{begin} len=#{length} choked=#{state.choke}",
+        "reject index=#{index} begin=#{begin} len=#{length} reason=choked",
         :debug
       )
 
-      if state.choke and state.fast_extension != nil and not allowed_while_choked? do
-        log_upload(state, "reject index=#{index} begin=#{begin} len=#{length} reason=choked", :debug)
-        Sender.reject(key(state), index, begin, length)
+      Sender.reject(key(state), index, begin, length)
+    end
+
+    if not state.choke or allowed_while_choked? do
+      pid = self()
+      sender_key = key(state)
+
+      callback = fn block ->
+        Sender.piece(sender_key, index, begin, block)
+
+        log_upload(
+          state,
+          "piece_sent index=#{index} begin=#{begin} len=#{byte_size(block)}",
+          :debug
+        )
+
+        GenServer.cast(pid, {:upload, [length]})
       end
 
-      if not state.choke or allowed_while_choked? do
-        pid = self()
-        sender_key = key(state)
-
-        callback = fn block ->
-          Sender.piece(sender_key, index, begin, block)
-
-          log_upload(
-            state,
-            "piece_sent index=#{index} begin=#{begin} len=#{byte_size(block)}",
-            :debug
-          )
-
-          GenServer.cast(pid, {:upload, [length]})
-        end
-
-        Uploader.request(state.hash, state.id, index, begin, length, callback)
-      end
+      Uploader.request(state.hash, state.id, index, begin, length, callback)
+    end
 
     state
   end
@@ -1001,7 +1006,8 @@ defmodule Peer.Controller.State do
   end
 
   @spec sync_status_from_model(t()) :: t()
-  defp sync_status_from_model(%__MODULE__{status: status} = state) when is_integer(status), do: state
+  defp sync_status_from_model(%__MODULE__{status: status} = state) when is_integer(status),
+    do: state
 
   defp sync_status_from_model(%__MODULE__{} = state) do
     case Torrent.get(state.hash, :peer_status) do
