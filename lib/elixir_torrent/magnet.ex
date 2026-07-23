@@ -143,12 +143,9 @@ defmodule Magnet do
         {:ok, v1, v2, :hybrid}
 
       {nil, _v2} ->
-        # Pure BEP 52 magnets carry only a btmh xt. Serving them without any
-        # v1 identifier means every DHT/tracker/wire lookup would use the
-        # truncated SHA-256 — which needs the full v2 stack (merkle
-        # verification, hash-request extension messages, piece layers). None
-        # of that has landed yet, so reject cleanly instead of accepting a
-        # link we cannot actually fetch.
+        # The magnet bootstrap is still keyed by a v1 btih and verifies BEP 9
+        # metadata with SHA-1. A btmh-only link needs truncated-v2 discovery
+        # plus SHA-256 metadata verification before it can enter that pipeline.
         {:error, :v2_only_unsupported}
 
       {:error, _} = error ->
