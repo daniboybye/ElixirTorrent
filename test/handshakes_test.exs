@@ -90,6 +90,23 @@ defmodule HandshakesTest do
     end
   end
 
+  describe "dial_reachability_outcome/1" do
+    test "socket_handoff_failed counts as family ok (endpoint completed BT handshake)" do
+      assert Handshakes.dial_reachability_outcome(:socket_handoff_failed) == :ok
+    end
+
+    test "already_connected and not_connectable are neutral skips" do
+      assert Handshakes.dial_reachability_outcome(:already_connected) == :skip
+      assert Handshakes.dial_reachability_outcome(:not_connectable) == :skip
+    end
+
+    test "genuine connect/handshake failures still count as fail" do
+      for reason <- [:timeout, :closed, :handshake_failed, :handshake_timeout, :econnrefused] do
+        assert Handshakes.dial_reachability_outcome(reason) == :fail
+      end
+    end
+  end
+
   describe "select_peers_to_dial/2" do
     test "caps peers per batch" do
       # Non-critical (>= 12 connected) so sole v4 is not probe-capped — this

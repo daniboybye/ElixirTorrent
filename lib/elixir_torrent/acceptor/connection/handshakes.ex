@@ -315,14 +315,24 @@ defmodule Acceptor.Connection.Handshakes do
   defp increment_failure(failures, reason),
     do: Map.update(failures, reason, 1, &(&1 + 1))
 
-  # Reachability accounting for Peer.DialStats. Outcomes that don't reflect
-  # whether the endpoint is reachable (we were already connected, or it was never
-  # dialable) are excluded so they can't depress a family's success rate.
-  @non_reachability_reasons [:already_connected, :not_connectable]
+  # Dial outcome → Peer.DialStats family bump. :socket_handoff_failed is emitted
+  # only after TCP/uTP connect and the BitTorrent handshake succeeded; the peer
+  # proved reachable and local OTP churn (register/handoff/activate) failed.
+  # Count that as a family :ok so v4/v6 yield isn't poisoned by our own process
+  # wiring. :already_connected / :not_connectable are neutral (:skip).
+  @doc false
+  @spec dial_reachability_outcome(term()) :: :ok | :skip | :fail
+  def dial_reachability_outcome(:socket_handoff_failed), do: :ok
+  def dial_reachability_outcome(reason) when reason in [:already_connected, :not_connectable], do: :skip
+  def dial_reachability_outcome(_reason), do: :fail
 
   @spec bump_fam_failure(fam_stats(), Peer.t(), term()) :: fam_stats()
-  defp bump_fam_failure(fam, _peer, reason) when reason in @non_reachability_reasons, do: fam
-  defp bump_fam_failure(fam, peer, _reason), do: bump_fam(fam, peer, :fail)
+  defp bump_fam_failure(fam, peer, reason) do
+    case dial_reachability_outcome(reason) do
+      :skip -> fam
+      outcome -> bump_fam(fam, peer, outcome)
+    end
+  end
 
   @spec bump_fam(fam_stats(), Peer.t(), :ok | :fail) :: fam_stats()
   defp bump_fam(fam, peer, outcome) do

@@ -53,10 +53,11 @@ defmodule Peer.DialBackoff do
   # transient (timeout/closed) blocks may be re-added under target.
   @sticky_reasons [:churn | @hard_failures]
 
-  # These outcomes don't reflect endpoint reachability (we were already
-  # connected, or the peer wasn't dialable to begin with) — don't count them
-  # toward the fail threshold and don't write a block row for them.
-  @non_reachability_reasons [:already_connected, :not_connectable]
+  # These outcomes don't reflect endpoint reachability — don't count them toward
+  # the fail threshold and don't write a block row. :socket_handoff_failed means
+  # connect+handshake succeeded and only local handoff failed; Endpoints already
+  # records :churn when registration happened, so DialBackoff must not double-block.
+  @non_reachability_reasons [:already_connected, :not_connectable, :socket_handoff_failed]
 
   def child_spec(_) do
     %{

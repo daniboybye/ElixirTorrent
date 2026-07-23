@@ -225,7 +225,12 @@ defmodule Peer.ConnectionManager do
   defp record_failures(hash, {ok_count, failures, failed_peers}, connected) do
     Enum.each(failed_peers, fn {peer, reason} ->
       Peer.DialBackoff.record(hash, peer.ip, peer.port, reason)
-      Peer.Holepunch.maybe_request(hash, peer, reason)
+
+      # Handoff failure means the endpoint completed the BT handshake — NAT punch
+      # would target an already reachable host; genuine connect/handshake fails still punch.
+      unless reason == :socket_handoff_failed do
+        Peer.Holepunch.maybe_request(hash, peer, reason)
+      end
     end)
 
     if ok_count > 0 or map_size(failures) > 0 do

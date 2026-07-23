@@ -75,9 +75,10 @@ defmodule Peer.DialStats do
   @doc """
   Record the aggregate outcome of a batch of same-family dials.
 
-  `ok` and `fail` count genuine connect/handshake outcomes only; callers must
-  exclude non-reachability results (e.g. `:already_connected`, `:not_connectable`)
-  so they can't depress a family's measured success rate.
+  `ok` and `fail` measure whether the address family reached and completed the
+  BitTorrent handshake. Callers exclude neutral outcomes (`:already_connected`,
+  `:not_connectable`) and count post-handshake local handoff failures as `ok`,
+  so OTP ownership churn cannot depress a family's measured network yield.
   """
   @spec record(Torrent.hash(), :inet | :inet6, non_neg_integer(), non_neg_integer()) :: :ok
   def record(_hash, _family, 0, 0), do: :ok

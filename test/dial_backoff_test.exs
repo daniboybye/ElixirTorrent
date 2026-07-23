@@ -88,6 +88,26 @@ defmodule Peer.DialBackoffTest do
     assert DialBackoff.filter([p], @hash, 0) == [p]
   end
 
+  test "socket_handoff_failed does not write a backoff row (endpoint was reachable; churn handled elsewhere)" do
+    p = peer(7, 6887)
+
+    for _ <- 1..10 do
+      DialBackoff.record(@hash, p.ip, p.port, :socket_handoff_failed)
+    end
+
+    _ = :sys.get_state(DialBackoff)
+    assert DialBackoff.filter([p], @hash, 0) == [p]
+    refute DialBackoff.blocked?(@hash, p.ip, p.port)
+  end
+
+  test "genuine handshake failures still block the endpoint" do
+    p = peer(8, 6888)
+    DialBackoff.record(@hash, p.ip, p.port, :handshake_timeout)
+    _ = :sys.get_state(DialBackoff)
+
+    assert DialBackoff.filter([p], @hash, 0) == []
+  end
+
   test "min_count resurrection prefers soft-blocked v6 over v4 when allowed is mostly v4" do
     allowed_v4_a = peer(10, 6890)
     allowed_v4_b = peer(11, 6891)
