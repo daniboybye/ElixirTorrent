@@ -163,7 +163,13 @@ defmodule Torrent.Downloads.Piece do
   # already fired earlier via State.do_request when the last subpiece was
   # handed out, so we skip that path.
   def terminate(:normal, _state), do: :ok
-  def terminate(_reason, state), do: fire_dealt(state)
+
+  def terminate(_reason, state) do
+    # Abnormal exit must drop peer-side reqq slots — controller accounting
+    # survives piece-worker death and otherwise blocks the request pipeline.
+    State.release_in_flight_requests(state)
+    fire_dealt(state)
+  end
 
   # Verify-failed: hash-check on assembled piece was wrong. Same rationale as
   # :timeout above — free the pump slot before dying. Keep the state alive on

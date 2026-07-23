@@ -301,7 +301,13 @@ defmodule Torrent.Downloads.Piece.State do
       PiecesStatistic.set(state.hash, state.index, nil)
     end
 
-    Enum.each(requests, &cancel_request/1)
+    Enum.each(requests, fn %Request{peer_id: peer_id, subpiece: {begin, length}} = request ->
+      cancel_request(request)
+      # Timeouts/rejects re-queue blocks locally but must release the peer
+      # controller's reqq accounting — otherwise stale MapSet entries block
+      # the download pipeline even though this worker no longer tracks them.
+      Peer.cancel(state.hash, peer_id, state.index, begin, length)
+    end)
 
     state
     |> Map.update!(:waiting, &requeue_rejected(&1, state, requests))
@@ -388,5 +394,16 @@ defmodule Torrent.Downloads.Piece.State do
   defp cancel_stall_timer(%__MODULE__{timer: timer} = state) do
     cancel_timer(timer, :timeout)
     %{state | timer: nil}
+  end
+
+  @doc false
+  @spec release_in_flight_requests(t()) :: :ok
+  def release_in_flight_requests(%__MODULE__{} = state) do
+    Enum.each(state.requests, fn %Request{peer_id: peer_id, subpiece: {begin, length}} = request ->
+      cancel_request(request)
+      Peer.cancel(state.hash, peer_id, state.index, begin, length)
+    end)
+
+    :ok
   end
 end

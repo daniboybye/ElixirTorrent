@@ -177,14 +177,13 @@ defmodule Peer.Controller.State do
   end
 
   def interested(%__MODULE__{} = state, index) do
-    # Status change → reset the pending-request counter. Any pending casts
-    # sent under the old piece belong to a different piece worker and their
-    # responses (if any) will still land in `state.request/4` and decrement
-    # naturally; the counter is a best-effort throttle, not a strict tally.
-    # Resetting here prevents leakage if the previous pin was on a drained
-    # or dead piece and its worker silently dropped our casts.
-    state = apply_pin(%__MODULE__{state | pending_requests: 0}, index)
-    check_interested(state)
+    # Repinning changes which piece index we pull from. BEP 3 request slots
+    # (reqq) are per connection — ghost in-flight entries for the old index
+    # saturate full_requests_queue?/1 and block fresh requests on the new pin.
+    state
+    |> clear_in_flight_requests()
+    |> apply_pin(index)
+    |> check_interested()
   end
 
   @spec first_message(t(), non_neg_integer()) :: t()
@@ -1061,6 +1060,19 @@ defmodule Peer.Controller.State do
   end
 
   def stale_useless_pin?(_), do: false
+
+  # Flush wire cancels + piece-worker rejects before repin or disconnect.
+  # Mirrors handle_choke/1 local cleanup but also sends cancels — we are
+  # actively switching pieces, not being choked by the remote peer.
+  @spec clear_in_flight_requests(t()) :: t()
+  defp clear_in_flight_requests(%__MODULE__{} = state) do
+    Enum.each(state.requests, fn {index, begin, length} ->
+      Sender.cancel(key(state), index, begin, length)
+      Downloads.reject(state.hash, index, state.id, begin, length)
+    end)
+
+    %{state | requests: MapSet.new(), pending_requests: 0}
+  end
 
   @spec apply_pin(t(), Torrent.index()) :: t()
   defp apply_pin(%__MODULE__{} = state, index) do
