@@ -18,13 +18,15 @@ defmodule Peer.Controller.State do
     :downloaded_at_connect,
     :ltep,
     requests: MapSet.new(),
-    # Outbound Downloads.request casts we've fired but whose piece-worker
-    # callback hasn't come back yet. Counted alongside `requests` in
-    # full_requests_queue?/1 so a peer with reqq=16 never has more than 16
-    # requests in flight, even during the initial fill_request_pipeline sweep
-    # (which used to fire @request_pipeline_depth=64 casts before any of the
-    # response casts landed to grow `requests`). Reset on choke and on status
-    # change to avoid leakage in edge cases (piece drained, endgame skip).
+    # Outbound block requests accepted by a piece worker (:ok from
+    # Downloads.request/4) whose {:request, _} callback cast hasn't been
+    # processed yet. Counted alongside `requests` in full_requests_queue?/1
+    # so a peer advertising BEP 10 reqq=N never has more than N requests in
+    # flight — including the gap between piece-worker ack and the controller
+    # processing the callback cast (fill_request_pipeline can queue several
+    # ack'd requests before their casts drain). Not incremented for :noop
+    # (waiting=[], endgame skip) or :error (dead worker). Reset on choke and
+    # status change.
     pending_requests: 0,
     rank: 0,
     # Monotonic ms at connect — used by ConnectionManager to evict peers that
@@ -341,8 +343,8 @@ defmodule Peer.Controller.State do
       log_download(state, "request_sent index=#{index} begin=#{begin} len=#{length}", :debug)
     end
 
-    # A piece-worker callback has arrived; the outbound-cast round-trip we
-    # counted in `pending_requests` is now realized in `state.requests`.
+    # Piece-worker callback cast has been queued; the sync :ok ack we counted in
+    # `pending_requests` is now realized in `state.requests` as we process it.
     # Decrement (clamped at 0) so we don't double-count the pipeline.
     state
     |> decrement_pending()
@@ -412,7 +414,7 @@ defmodule Peer.Controller.State do
     end)
 
     # Peer choked us → they will drop any queued requests. Reset both the
-    # in-flight set and the pending-cast counter so we can re-fill the
+    # in-flight set and the pending-ack counter so we can re-fill the
     # pipeline from zero on the next unchoke.
     %__MODULE__{state | choke_me: true, requests: MapSet.new(), pending_requests: 0}
   end
@@ -426,12 +428,32 @@ defmodule Peer.Controller.State do
   end
 
   defp fill_request_pipeline(state) do
-    Enum.reduce(1..@request_pipeline_depth, state, fn _, st ->
-      if full_requests_queue?(st), do: throw(st)
-      do_make_request(st)
-    end)
-  catch
-    :throw, st -> st
+    do_fill_request_pipeline(state, @request_pipeline_depth)
+  end
+
+  # Stop when do_make_request makes no progress (noop/error skip/choked) so a
+  # drained pin does not hammer the piece worker @request_pipeline_depth times.
+  # Each :ok ack still advances pending_requests until reqq is satisfied.
+  defp do_fill_request_pipeline(state, 0), do: state
+
+  defp do_fill_request_pipeline(state, remaining) do
+    if full_requests_queue?(state) do
+      state
+    else
+      before = pipeline_progress_snapshot(state)
+      after_st = do_make_request(state)
+
+      if pipeline_progress_snapshot(after_st) == before do
+        after_st
+      else
+        do_fill_request_pipeline(after_st, remaining - 1)
+      end
+    end
+  end
+
+  @spec pipeline_progress_snapshot(t()) :: {term(), non_neg_integer(), non_neg_integer()}
+  defp pipeline_progress_snapshot(%__MODULE__{} = state) do
+    {state.status, state.pending_requests, MapSet.size(state.requests)}
   end
 
   @spec handle_interested(t()) :: t()
@@ -830,7 +852,14 @@ defmodule Peer.Controller.State do
             log_download(state, "request_skip piece_dead index=#{index}", :debug)
             clear_pin(state)
 
-          _ ->
+          :noop ->
+            # Piece alive but nothing to hand out (waiting=[], endgame cap).
+            # Do not touch pending_requests — pre-ack cast used to inflate
+            # reqq here and false-saturate fill_request_pipeline.
+            log_download(state, "request_skip piece_drained index=#{index}", :debug)
+            state
+
+          :ok ->
             log_download(state, "request_queued index=#{index}", :debug)
             increment_pending(state)
         end
@@ -1000,13 +1029,10 @@ defmodule Peer.Controller.State do
   end
 
   @spec full_requests_queue?(t()) :: boolean()
-  # Counts both in-flight (`requests`) AND pending outbound casts we haven't
-  # yet heard back on. Before this counted only `requests`, and
-  # fill_request_pipeline could fire @request_pipeline_depth casts before any
-  # of the piece-worker callbacks landed to grow `requests` — so a peer
-  # advertising reqq=16 would receive up to 64 in-flight block requests,
-  # tripping their queue guard and silently dropping our requests. See
-  # `pending_requests` in the struct.
+  # Counts in-flight wire requests (`requests`) plus piece-worker :ok acks not
+  # yet processed into `requests` (`pending_requests`). Before pending existed,
+  # fill_request_pipeline could queue many blocks before callbacks landed —
+  # exceeding BEP 10 reqq and getting requests silently dropped by peers.
   defp full_requests_queue?(state),
     do:
       MapSet.size(state.requests) + state.pending_requests >=

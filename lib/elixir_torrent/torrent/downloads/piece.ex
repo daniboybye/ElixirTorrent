@@ -32,17 +32,23 @@ defmodule Torrent.Downloads.Piece do
     do: GenServer.cast(pid, {:download, [downloaded, requests_are_dealt]})
 
   @spec request(Torrent.hash(), Torrent.index(), Peer.id(), callback_peer_request()) ::
-          :ok | :error
+          :ok | :noop | :error
   def request(hash, index, peer_id, callback) do
-    # Resolve the via-name up front. A plain GenServer.cast to a dead
-    # via-name silently succeeds (Registry lookup misses → cast is dropped),
-    # which lets a peer pin its status to an index whose worker died and
-    # never learn about it. Return :error so the caller can unpin and pick
-    # a fresh piece on the next reconcile edge.
+    # Synchronous, bounded ack — no disk/network on this path (pure in-memory
+    # piece state). Return :error when the worker is gone so the peer can
+    # unpin; :noop when waiting=[] (drained/endgame skip) so the controller
+    # does not inflate pending_requests without a wire callback; :ok when a
+    # block was queued and the callback will cast {:request, _} to the peer
+    # controller (BEP 10 reqq accounting — see Peer.Controller.State).
     case GenServer.whereis(key(index, hash)) do
-      nil -> :error
-      pid -> GenServer.cast(pid, {:request, [peer_id, callback]})
+      nil ->
+        :error
+
+      pid ->
+        GenServer.call(pid, {:request, [peer_id, callback]}, 5_000)
     end
+  catch
+    :exit, _ -> :error
   end
 
   # Cheap "does this piece still have unclaimed subpieces?" probe. Used by
@@ -156,6 +162,12 @@ defmodule Torrent.Downloads.Piece do
     {:reply, state.requests != [], state}
   end
 
+  # Sync ack for Downloads.request/4 — see request/4 above.
+  def handle_call({:request, [peer_id, callback]}, _from, state) do
+    new_state = State.request(state, peer_id, callback)
+    {:reply, request_reply(state, new_state), new_state}
+  end
+
   # terminate/2 fallback for any non-normal exit (crash, {:shutdown, _}, etc.).
   # The controller pump is edge-triggered — every abnormal death must produce
   # an edge or the active-pieces slot leaks and the pump can starve. Normal
@@ -220,4 +232,13 @@ defmodule Torrent.Downloads.Piece do
 
   @spec key(Torrent.index(), Torrent.hash()) :: GenServer.name()
   defp key(index, hash), do: via({index, hash})
+
+  # Accepted requests append to `requests` and invoke the peer callback; noop
+  # paths (waiting=[], endgame redundancy cap) leave the list unchanged.
+  @spec request_reply(State.t(), State.t()) :: :ok | :noop
+  defp request_reply(%{requests: reqs}, %{requests: new_reqs})
+       when length(new_reqs) > length(reqs),
+       do: :ok
+
+  defp request_reply(_, _), do: :noop
 end

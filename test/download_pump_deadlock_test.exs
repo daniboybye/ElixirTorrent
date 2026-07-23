@@ -17,13 +17,109 @@ defmodule DownloadPumpDeadlockTest do
   end
 
   # Sub-part (d): a piece-worker via-name that no longer resolves must NOT
-  # silently swallow a request cast — the peer has to learn about it and
+  # silently swallow a request — the peer has to learn about it and
   # unpin its status so the pump can re-pin to a live piece.
   test "Downloads.request/4 returns :error when the piece worker is dead" do
     hash = :crypto.strong_rand_bytes(20)
     # No Piece worker has ever been started for this {index, hash}.
     assert :error =
              Downloads.request(hash, 5, Peer.id(), fn _idx, _begin, _len -> :ok end)
+  end
+
+  test "Downloads.request/4 returns :noop when piece worker waiting=[] " do
+    hash = :crypto.strong_rand_bytes(20)
+    torrent = sample_torrent(hash, 4)
+
+    with_model(torrent, fn _ ->
+      {:ok, pid} = start_piece_worker(hash, 0)
+      on_exit(fn ->
+        try do
+          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      Torrent.Downloads.Piece.download(pid, fn -> :ok end, fn -> :ok end)
+
+      :sys.replace_state(pid, fn state -> %{state | waiting: [], requests: []} end)
+
+      assert :noop =
+               Downloads.request(hash, 0, Peer.id(), fn _i, _b, _l ->
+                 flunk("noop path must not invoke callback")
+               end)
+    end)
+  end
+
+  test "Downloads.request/4 returns :noop on endgame redundancy cap" do
+    hash = :crypto.strong_rand_bytes(20)
+    torrent = sample_torrent(hash, 4)
+
+    with_model(torrent, fn _ ->
+      {:ok, pid} = start_piece_worker(hash, 0)
+      on_exit(fn ->
+        try do
+          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      Torrent.Downloads.Piece.download(pid, fn -> :ok end, fn -> :ok end)
+
+      capped =
+        for n <- 1..3 do
+          %Torrent.Downloads.Piece.Request{
+            peer_id: <<n::160>>,
+            subpiece: {0, 16_384},
+            timer: nil
+          }
+        end
+
+      :sys.replace_state(pid, fn state ->
+        %{
+          state
+          | mode: :endgame,
+            waiting: [{0, 16_384}],
+            requests: capped
+        }
+      end)
+
+      assert :noop =
+               Downloads.request(hash, 0, Peer.id(), fn _i, _b, _l ->
+                 flunk("endgame redundancy cap must not invoke callback")
+               end)
+    end)
+  end
+
+  test "Downloads.request/4 returns :ok when piece worker hands out a block" do
+    hash = :crypto.strong_rand_bytes(20)
+    torrent = sample_torrent(hash, 4)
+    parent = self()
+
+    with_model(torrent, fn _ ->
+      {:ok, pid} = start_piece_worker(hash, 0)
+      peer_id = Peer.id()
+      _peer_pid = ensure_peer_registered(hash, peer_id)
+
+      on_exit(fn ->
+        try do
+          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      Torrent.Downloads.Piece.download(pid, fn -> :ok end, fn -> :ok end)
+
+      assert :ok =
+               Downloads.request(hash, 0, peer_id, fn idx, begin, len ->
+                 send(parent, {:requested, idx, begin, len})
+               end)
+
+      assert_receive {:requested, 0, 0, 16_384}, 500
+      cleanup_workers(pid, _peer_pid)
+    end)
   end
 
   # Sub-part (e) infrastructure: probe used by Swarm.assign_peer_to_piece?
@@ -102,7 +198,7 @@ defmodule DownloadPumpDeadlockTest do
 
   # Sub-part (f): the choke handler must reset the pending-request counter
   # so the pipeline can refill from zero on the next unchoke. Otherwise a
-  # peer whose Downloads.request casts were counted but whose responses
+  # peer whose Downloads.request acks were counted but whose responses
   # never landed (e.g. the piece was drained) sits with a permanently
   # over-full guard.
   test "handle_choke resets pending_requests to 0" do
@@ -187,4 +283,50 @@ defmodule DownloadPumpDeadlockTest do
     :ok = Torrent.PiecesStatistic.init(torrent)
     fun.(torrent)
   end
+
+  defp start_piece_worker(hash, index) do
+    name = {:via, Registry, {Registry, {{index, hash}, Torrent.Downloads.Piece}}}
+
+    GenServer.start(Torrent.Downloads.Piece, {hash, index}, name: name)
+  end
+
+  defp ensure_peer_registered(hash, id) do
+    key = Peer.make_key(hash, id)
+    via = {:via, Registry, {Registry, {key, Peer}}}
+
+    case GenServer.whereis(via) do
+      nil ->
+        {:ok, pid} = __MODULE__.DummyPeer.start_link(via)
+        pid
+
+      pid ->
+        pid
+    end
+  end
+
+  defp cleanup_workers(piece_pid, peer_pid \\ nil) do
+    try do
+      if Process.alive?(piece_pid), do: GenServer.stop(piece_pid, :normal, 1_000)
+    catch
+      :exit, _ -> :ok
+    end
+
+    if peer_pid do
+      try do
+        if Process.alive?(peer_pid), do: GenServer.stop(peer_pid, :normal, 1_000)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+  end
+end
+
+defmodule DownloadPumpDeadlockTest.DummyPeer do
+  @moduledoc false
+  use GenServer
+
+  def start_link(name), do: GenServer.start_link(__MODULE__, nil, name: name)
+
+  @impl true
+  def init(_), do: {:ok, nil}
 end

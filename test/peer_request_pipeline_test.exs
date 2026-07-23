@@ -4,6 +4,7 @@ defmodule PeerRequestPipelineTest do
   use ExUnit.Case, async: false
 
   alias Peer.Controller.State, as: PeerState
+  alias Torrent.Downloads
   alias Torrent.Downloads.Piece.{Request, State}
 
   @piece_len 16_384
@@ -53,6 +54,227 @@ defmodule PeerRequestPipelineTest do
         assert new_state.status == 1
         assert new_state.requests == requests
         assert new_state.pending_requests == 2
+      end)
+    end
+  end
+
+  describe "Downloads.request/4 ack prevents pending_requests inflation" do
+    test ":noop when piece worker has waiting=[] — does not inflate controller pending" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 3)
+
+      with_model(torrent, fn _ ->
+        {:ok, piece_pid} = start_piece_worker(hash, 0)
+        _peer_pid = ensure_peer_registered(hash, @peer_a)
+        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+
+        on_exit(fn -> stop_piece(piece_pid) end)
+
+        :sys.replace_state(piece_pid, fn state ->
+          %{state | waiting: [], requests: []}
+        end)
+
+        state =
+          base_peer_state(hash, @peer_a)
+          |> Map.put(:status, 0)
+          |> Map.put(:interested, true)
+          |> Map.put(:choke_me, false)
+
+        after_unchoke = PeerState.handle_unchoke(state)
+
+        assert after_unchoke.pending_requests == 0
+        assert MapSet.size(after_unchoke.requests) == 0
+        cleanup_workers(piece_pid, _peer_pid)
+      end)
+    end
+
+    test "handle_unchoke :ok ack increments pending before callback is applied" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 3)
+
+      with_model(torrent, fn _ ->
+        {:ok, piece_pid} = start_piece_worker(hash, 0)
+        _peer_pid = ensure_peer_registered(hash, @peer_a)
+        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        on_exit(fn -> stop_piece(piece_pid) end)
+
+        state =
+          base_peer_state(hash, @peer_a)
+          |> Map.put(:status, 0)
+          |> Map.put(:interested, true)
+          |> Map.put(:choke_me, false)
+
+        # Pure State call runs in this process. Piece worker callback casts to
+        # self() but GenServer semantics (N/A here) / process mailbox ordering
+        # guarantees we inspect returned state before any cast is handled.
+        after_unchoke = PeerState.handle_unchoke(state)
+
+        assert after_unchoke.pending_requests == 1
+        assert MapSet.size(after_unchoke.requests) == 0
+
+        after_request = PeerState.request(after_unchoke, 0, 0, @piece_len)
+
+        assert after_request.pending_requests == 0
+        assert MapSet.size(after_request.requests) == 1
+        flush_request_casts()
+        cleanup_workers(piece_pid, _peer_pid)
+      end)
+    end
+
+    test "fill_request_pipeline stops on noop — drained unchoke does not loop to depth" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 3)
+
+      with_model(torrent, fn _ ->
+        {:ok, piece_pid} = start_piece_worker(hash, 1)
+        _peer_pid = ensure_peer_registered(hash, @peer_a)
+        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        on_exit(fn -> stop_piece(piece_pid) end)
+
+        :sys.replace_state(piece_pid, fn state ->
+          %{state | waiting: [], requests: []}
+        end)
+
+        state =
+          base_peer_state(hash, @peer_a)
+          |> Map.put(:status, 1)
+          |> Map.put(:interested, true)
+          |> Map.put(:choke_me, false)
+
+        after_unchoke = PeerState.handle_unchoke(state)
+
+        assert after_unchoke.pending_requests == 0
+        assert MapSet.size(after_unchoke.requests) == 0
+        assert after_unchoke.status == 1
+        cleanup_workers(piece_pid, _peer_pid)
+      end)
+    end
+
+    test "fill_request_pipeline fills to reqq cap then stops on noop" do
+      hash = :crypto.strong_rand_bytes(20)
+      reqq = 3
+      # 4 subpieces per piece index → pipeline can accept 3 :ok acks then noop.
+      torrent = sample_torrent(hash, 3, 4 * @piece_len)
+
+      with_model(torrent, fn _ ->
+        {:ok, piece_pid} = start_piece_worker(hash, 0)
+        _peer_pid = ensure_peer_registered(hash, @peer_a)
+        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        on_exit(fn -> stop_piece(piece_pid) end)
+
+        state =
+          base_peer_state(hash, @peer_a)
+          |> Map.put(:status, 0)
+          |> Map.put(:interested, true)
+          |> Map.put(:choke_me, false)
+          |> Map.put(:ltep, %Peer.LTEP.Session{peer: %{reqq: reqq}})
+
+        after_unchoke = PeerState.handle_unchoke(state)
+
+        assert after_unchoke.pending_requests == reqq
+        assert MapSet.size(after_unchoke.requests) == 0
+        flush_request_casts()
+        cleanup_workers(piece_pid, _peer_pid)
+      end)
+    end
+
+    test ":error when worker is dead — pending stays zero and queue is not saturated" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 3)
+
+      with_model(torrent, fn _ ->
+        state =
+          base_peer_state(hash, @peer_a)
+          |> Map.put(:status, 99)
+          |> Map.put(:interested, true)
+          |> Map.put(:choke_me, false)
+          |> Map.put(:ltep, %Peer.LTEP.Session{peer: %{reqq: 2}})
+
+        after_unchoke = PeerState.handle_unchoke(state)
+
+        assert after_unchoke.pending_requests == 0
+        assert MapSet.size(after_unchoke.requests) == 0
+        assert is_nil(after_unchoke.status)
+      end)
+    end
+
+    test "endgame redundancy cap returns :noop — pending stays zero" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 3, @piece_len, left: @piece_len)
+
+      with_model(torrent, fn _ ->
+        {:ok, piece_pid} = start_piece_worker(hash, 0)
+        _peer_pid = ensure_peer_registered(hash, @peer_a)
+        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        on_exit(fn -> stop_piece(piece_pid) end)
+
+        capped_requests =
+          for n <- 1..3 do
+            %Request{
+              peer_id: <<n::160>>,
+              subpiece: {0, @piece_len},
+              timer: nil
+            }
+          end
+
+        :sys.replace_state(piece_pid, fn state ->
+          %{
+            state
+            | mode: :endgame,
+              waiting: [{0, @piece_len}],
+              requests: capped_requests
+          }
+        end)
+
+        assert :noop =
+                 Downloads.request(hash, 0, @peer_a, fn _i, _b, _l ->
+                   flunk("endgame redundancy cap must not invoke callback")
+                 end)
+
+        state =
+          base_peer_state(hash, @peer_a)
+          |> Map.put(:status, 0)
+          |> Map.put(:interested, true)
+          |> Map.put(:choke_me, false)
+
+        after_unchoke = PeerState.handle_unchoke(state)
+        assert after_unchoke.pending_requests == 0
+        assert MapSet.size(after_unchoke.requests) == 0
+        cleanup_workers(piece_pid, _peer_pid)
+      end)
+    end
+
+    test "drained piece cannot false-saturate reqq guard across repeated unchokes" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 3)
+      reqq = 2
+
+      with_model(torrent, fn _ ->
+        {:ok, piece_pid} = start_piece_worker(hash, 1)
+        _peer_pid = ensure_peer_registered(hash, @peer_a)
+        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        on_exit(fn -> stop_piece(piece_pid) end)
+
+        :sys.replace_state(piece_pid, fn state ->
+          %{state | waiting: [], requests: []}
+        end)
+
+        state =
+          base_peer_state(hash, @peer_a)
+          |> Map.put(:status, 1)
+          |> Map.put(:interested, true)
+          |> Map.put(:choke_me, false)
+          |> Map.put(:ltep, %Peer.LTEP.Session{peer: %{reqq: reqq}})
+
+        after_many =
+          Enum.reduce(1..(reqq + 3), state, fn _, st ->
+            PeerState.handle_unchoke(%{st | choke_me: true})
+            |> PeerState.handle_unchoke()
+          end)
+
+        assert after_many.pending_requests == 0
+        assert MapSet.size(after_many.requests) == 0
+        cleanup_workers(piece_pid, _peer_pid)
       end)
     end
   end
@@ -166,24 +388,25 @@ defmodule PeerRequestPipelineTest do
 
   ## helpers -----------------------------------------------------------------
 
-  defp sample_torrent(hash, pieces_count) do
+  defp sample_torrent(hash, pieces_count, piece_len \\ @piece_len, opts \\ []) do
+    left = Keyword.get(opts, :left, pieces_count * piece_len)
     bitfield = Torrent.Bitfield.make(pieces_count)
 
     %Torrent{
       hash: hash,
-      metadata: %{"info" => %{"name" => "test", "piece length" => @piece_len}},
-      left: pieces_count * @piece_len,
+      metadata: %{"info" => %{"name" => "test", "piece length" => piece_len}},
+      left: left,
       last_index: pieces_count - 1,
-      last_piece_length: @piece_len,
+      last_piece_length: piece_len,
       bitfield: bitfield,
       peer_status: nil
     }
   end
 
-  defp base_peer_state(hash) do
+  defp base_peer_state(hash, id \\ Peer.id()) do
     struct!(PeerState, %{
       hash: hash,
-      id: Peer.id(),
+      id: id,
       fast_extension: nil,
       status: nil,
       pieces_count: 4,
@@ -233,4 +456,57 @@ defmodule PeerRequestPipelineTest do
       end
     end
   end
+
+  defp start_piece_worker(hash, index) do
+    name = {:via, Registry, {Registry, {{index, hash}, Torrent.Downloads.Piece}}}
+
+    GenServer.start(Torrent.Downloads.Piece, {hash, index}, name: name)
+  end
+
+  defp ensure_peer_registered(hash, id) do
+    key = Peer.make_key(hash, id)
+    via = {:via, Registry, {Registry, {key, Peer}}}
+
+    case GenServer.whereis(via) do
+      nil ->
+        {:ok, pid} = __MODULE__.DummyPeer.start_link(via)
+        pid
+
+      pid ->
+        pid
+    end
+  end
+
+  defp cleanup_workers(piece_pid, peer_pid \\ nil) do
+    stop_piece(piece_pid)
+    if peer_pid, do: stop_piece(peer_pid)
+  end
+
+  defp stop_piece(pid) do
+    try do
+      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+    catch
+      :exit, _ -> :ok
+    end
+  end
+
+  # Piece-worker callbacks cast to self() during pure State tests; drain any
+  # {$gen_cast, {:request, _}} messages left in the mailbox.
+  defp flush_request_casts do
+    receive do
+      _ -> flush_request_casts()
+    after
+      0 -> :ok
+    end
+  end
+end
+
+defmodule PeerRequestPipelineTest.DummyPeer do
+  @moduledoc false
+  use GenServer
+
+  def start_link(name), do: GenServer.start_link(__MODULE__, nil, name: name)
+
+  @impl true
+  def init(_), do: {:ok, nil}
 end
