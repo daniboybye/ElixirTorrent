@@ -2,12 +2,35 @@ defmodule Torrent.FileHandle do
   use Supervisor, type: :supervisor
   use Via
 
-  alias __MODULE__.Piece
-  alias Torrent.{Model, PathLayout}
+  alias __MODULE__.{Piece, Store, PieceSupervisor}
 
   @doc """
-  FileHandle controls File.io_device() 
-  and do not need to be closed manually
+  FileHandle owns the File.io_device()s for a torrent and hands out per-piece
+  read/write/verify access.
+
+  Historically this supervisor eagerly started ONE `Piece` GenServer per piece
+  (`0..last_index`) at torrent load. A single large torrent has tens of
+  thousands of pieces, so a busy node accumulated ~19k idle piece processes that
+  only hibernated. They were bounded (not a leak) but a hard scale ceiling and
+  unlike libtorrent/qBittorrent, which keep piece state in compact structures.
+
+  Now pieces are started **lazily / on demand**:
+
+    * `Store` opens every file's io_device ONCE and publishes the small,
+      immutable "context" (all_files/piece_length/pieces_hash/last_index/…)
+      needed to derive any piece's slice. It is the owner process for the shared
+      io_devices and lives for the torrent's lifetime.
+    * `PieceSupervisor` is a `DynamicSupervisor` that starts a `Piece` process
+      the first time a given piece is read/written/checked and reuses it while
+      it stays alive.
+    * A `Piece` **terminates** after an idle timeout instead of hibernating
+      forever, so completed/untouched pieces stop holding a process. The next
+      access transparently restarts it from `context/1`.
+
+  Children use `:rest_for_one`: if `Store` crashes (and its io_devices die with
+  it) the `PieceSupervisor` is torn down too, so no `Piece` can keep reading
+  through a stale, dead io_device — the next access rebuilds against the freshly
+  reopened handles.
   """
 
   @spec start_link(Torrent.hash()) :: Supervisor.on_start()
@@ -15,98 +38,97 @@ defmodule Torrent.FileHandle do
     do: Supervisor.start_link(__MODULE__, hash, name: via(hash))
 
   defdelegate check?(hash, index), to: Piece
+  defdelegate check?(hash, index, context), to: Piece
 
   defdelegate read(hash, index, begin, length), to: Piece
 
   defdelegate write(hash, index, begin, block), to: Piece
+  defdelegate flush(hash, index), to: Piece
 
   def init(hash) do
-    [metadata, last_index, last_piece_length, download_dir] =
-      Model.get(hash, [:metadata, :last_index, :last_piece_length, :download_dir])
+    children = [
+      # Store must come first: it opens the io_devices and publishes the shared
+      # context. PieceSupervisor (and every Piece) depends on that context, so
+      # :rest_for_one guarantees pieces are wiped and rebuilt if Store restarts.
+      {Store, hash},
+      {PieceSupervisor, hash}
+    ]
 
-    download_dir = download_dir || File.cwd!()
-
-    all_files = init_files(metadata["info"], download_dir)
-    length = metadata["info"]["piece length"]
-    pieces_hash = metadata["info"]["pieces"]
-
-    last_piece =
-      make_piece(
-        last_index,
-        last_piece_length,
-        length,
-        all_files,
-        hash,
-        pieces_hash
-      )
-
-    0..(last_index - 1)
-    |> Enum.map(&make_piece(&1, length, length, all_files, hash, pieces_hash))
-    |> (&[last_piece | &1]).()
-    |> Supervisor.init(strategy: :one_for_one)
+    Supervisor.init(children, strategy: :rest_for_one)
   end
 
-  defp make_piece(index, length, piece_length, all_files, torrent_hash, pieces_hash) do
-    {offset, files} = files_for_index(index, all_files, piece_length, length)
+  @doc """
+  `:persistent_term` key under which `Store` publishes the shared context.
 
-    piece = %Piece{
-      offset: offset,
-      files: files,
-      length: length,
-      hash: binary_part(pieces_hash, index * 20, 20)
-    }
+  We use `:persistent_term` (not a GenServer call per access) because the
+  context is written once per torrent load and then read on the hot path from
+  arbitrary caller processes — piece starts and the resume verify tasks — with
+  no copying. The trade-off is that writing/erasing it triggers a global GC
+  scan, which is why `Store` only touches it on load and teardown.
+  """
+  @spec context_key(Torrent.hash()) :: {module(), Torrent.hash()}
+  def context_key(hash), do: {__MODULE__, hash}
 
-    name = Piece.key(torrent_hash, index)
+  @doc "Shared, immutable per-torrent context published by `Store`, or nil during teardown."
+  @spec context(Torrent.hash()) :: map() | nil
+  def context(hash), do: :persistent_term.get(context_key(hash), nil)
 
-    Supervisor.child_spec({Piece, {piece, name}}, id: index)
+  @doc "Via name of the per-torrent `Piece` DynamicSupervisor."
+  @spec piece_supervisor(Torrent.hash()) :: GenServer.name()
+  def piece_supervisor(hash), do: PieceSupervisor.name(hash)
+
+  @doc """
+  Derive a `%Piece{}` for `index` purely from the shared context (no I/O and no
+  process). Used both when lazily starting a `Piece` and by the resume verify
+  path, which re-hashes on-disk pieces without ever starting a `Piece` process.
+
+  Returns `:error` when the context is gone (torrent teardown race).
+  """
+  @spec piece_struct(Torrent.hash(), Torrent.index()) :: {:ok, Piece.t()} | :error
+  def piece_struct(hash, index) do
+    case context(hash) do
+      nil ->
+        :error
+
+      ctx ->
+        this_length =
+          if index == ctx.last_index, do: ctx.last_piece_length, else: ctx.piece_length
+
+        {offset, files} = files_for_index(index, ctx.all_files, ctx.piece_length, this_length)
+
+        {:ok,
+         %Piece{
+           offset: offset,
+           files: files,
+           length: this_length,
+           hash: binary_part(ctx.pieces_hash, index * 20, 20)
+         }}
+    end
   end
 
-  defp init_files(%{"files" => files} = info, download_dir) do
-    files
-    |> Enum.map(&Map.fetch!(&1, "length"))
-    |> Enum.scan(&(&1 + &2))
-    |> Enum.zip(Enum.map(files, &open_file(info, &1, download_dir)))
+  @doc """
+  Hash-verify a piece straight off disk, WITHOUT starting a `Piece` process.
+
+  This is how resume checks on-disk pieces: it reuses the exact `Piece.check/4`
+  (formerly `do_check`) side effects — `Model`/`PiecesStatistic` updates and the
+  `:resume`/`:download` logging distinction — but runs in a plain (transient)
+  caller/task instead of spinning up one long-lived process per piece.
+  """
+  @spec verify(Torrent.hash(), Torrent.index(), :download | :resume) :: boolean()
+  def verify(hash, index, context) do
+    case piece_struct(hash, index) do
+      {:ok, piece} -> Piece.check(hash, index, piece, context)
+      :error -> false
+    end
   end
 
-  defp init_files(%{"length" => length, "name" => name} = info, download_dir) do
-    [{length, open_file(info, %{"length" => length, "path" => [name]}, download_dir)}]
-  end
-
-  defp open_file(info, %{"length" => length, "path" => path}, download_dir) do
-    name =
-      info
-      |> PathLayout.layout_path(path)
-      |> then(&Path.join([download_dir | &1]))
-
-    pid =
-      case File.stat(name) do
-        {:ok, %File.Stat{size: ^length}} ->
-          File.open!(name, [:binary, :read, :write])
-
-        {:ok, _} ->
-          File.rm!(name)
-          allocate_file(name, length)
-
-        {:error, :enoent} ->
-          allocate_file(name, length)
-      end
-
-    {pid, length}
-  end
-
-  defp allocate_file(name, length) do
-    name
-    |> Path.dirname()
-    |> File.mkdir_p!()
-
-    File.touch!(name)
-
-    pid = File.open!(name, [:binary, :read, :write])
-    :file.pwrite(pid, {:bof, length - 1}, <<0>>)
-
-    pid
-  end
-
+  # Slice `all_files` down to the {io_device, length} tuples spanning `index`,
+  # plus the byte offset of the piece inside the first of those files. Pure list
+  # arithmetic over the cumulative end-offsets Store built with Enum.scan/2.
+  #
+  # `piece_len` is the NORMAL piece length (used to locate the piece's start),
+  # while `length` is THIS piece's real length (normal, or last_piece_length for
+  # the final piece), used to find where the piece ends.
   defp files_for_index(index, files, piece_len, length) do
     begin_offset = index * piece_len
 

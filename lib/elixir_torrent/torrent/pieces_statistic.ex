@@ -126,12 +126,26 @@ defmodule Torrent.PiecesStatistic do
   def remove_peer(_hash, nil, _pieces_count), do: :ok
   def remove_peer(_hash, :none, _pieces_count), do: :ok
 
+  # Runs from Peer.Controller.terminate/2, which can outlive the torrent's
+  # table during shutdown — a vanished table is a no-op, not an error.
   def remove_peer(hash, :all, pieces_count) do
-    dec_all(hash, pieces_count - 1)
+    case table_ref_safe(hash) do
+      nil -> :ok
+      ref -> Enum.each(0..(pieces_count - 1), &dec_counter(ref, &1))
+    end
+
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   def remove_peer(hash, bitfield, pieces_count) when is_binary(bitfield) do
-    indices_dec(bitfield, pieces_count, table_ref(hash))
+    case table_ref_safe(hash) do
+      nil -> :ok
+      ref -> indices_dec(bitfield, pieces_count, ref)
+    end
+  rescue
+    ArgumentError -> :ok
   end
 
   @spec availability(Torrent.hash(), Torrent.index()) :: non_neg_integer()
@@ -141,8 +155,15 @@ defmodule Torrent.PiecesStatistic do
     :exit, _ -> 0
   end
 
-  def get_status(hash, index),
-    do: :ets.lookup_element(table_ref(hash), index, 3)
+  # nil when the torrent's table is missing (magnet handoff window, shutdown).
+  def get_status(hash, index) do
+    case table_ref_safe(hash) do
+      nil -> nil
+      ref -> :ets.lookup_element(ref, index, 3)
+    end
+  rescue
+    ArgumentError -> nil
+  end
 
   def have?(hash, index), do: get_status(hash, index) === :complete
 
@@ -194,6 +215,13 @@ defmodule Torrent.PiecesStatistic do
   defp table_ref(hash) do
     [{_pid, ref}] = Registry.lookup(Registry, key(hash))
     ref
+  end
+
+  defp table_ref_safe(hash) do
+    case Registry.lookup(Registry, key(hash)) do
+      [{_pid, ref}] -> ref
+      [] -> nil
+    end
   end
 
   defp choice_rare({_, _, status}, acc) when status in [:complete, :processing],
