@@ -106,10 +106,25 @@ defmodule Tracker do
         merge_http_announces(responses)
 
       {:error, reason} ->
-        Logger.warning("UDP tracker DNS resolution failed host=#{host} reason=#{inspect(reason)}")
+        # resolve_hosts failures are DNS-class (:nxdomain / timeout / …). Dead
+        # public UDP trackers are the common case — BEP 12 already hops tiers.
+        # Debug only (same policy as PeerDiscovery.Announce expected failures).
+        Logger.debug(
+          "UDP tracker DNS resolution failed host=#{host} reason=#{inspect(reason)}"
+        )
+
         %Error{reason: {:dns, host, reason}, retry_in: "never"}
     end
   end
+
+  @doc false
+  @spec expected_dns_failure?(term()) :: boolean()
+  def expected_dns_failure?(reason)
+      when reason in [:nxdomain, :timeout, :econnrefused, :ehostunreach, :enetunreach],
+      do: true
+
+  def expected_dns_failure?({:nxdomain, _}), do: true
+  def expected_dns_failure?(_), do: false
 
   @scrape_http_timeout_ms 15_000
   @scrape_udp_max_attempts 2

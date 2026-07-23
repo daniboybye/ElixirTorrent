@@ -25,12 +25,31 @@ defmodule Peer do
   end
 
   def start_link(hash, id, socket, reserved) do
+    # Both children are temporary + significant: when either exits (tcp_closed,
+    # graceful disconnect, protocol_error), auto_shutdown tears the peer tree
+    # down cleanly. Previously a zero restart-intensity limit + permanent
+    # children abused the intensity limiter for the same effect — every Sender
+    # :normal then surfaced as an opaque Controller :shutdown at Endpoints.
     children = [
-      {Sender, [hash, id, socket]},
-      {Controller, [hash, id, socket, reserved]}
+      %{
+        id: Sender,
+        start: {Sender, :start_link, [[hash, id, socket]]},
+        restart: :temporary,
+        significant: true
+      },
+      %{
+        id: Controller,
+        start: {Controller, :start_link, [[hash, id, socket, reserved]]},
+        restart: :temporary,
+        significant: true
+      }
     ]
 
-    opts = [name: vm(hash, id), strategy: :one_for_all, max_restarts: 0]
+    opts = [
+      name: vm(hash, id),
+      strategy: :one_for_all,
+      auto_shutdown: :any_significant
+    ]
 
     Supervisor.start_link(children, opts)
   end

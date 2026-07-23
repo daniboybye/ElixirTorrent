@@ -9,7 +9,7 @@ defmodule PeerSenderWireTest do
 
   test "known_wire_id?/1 rejects BEP 52 hash_* and other future ids" do
     # BEP 52 § hash messages — must be ignored until phase 4 implements them,
-    # not treated as protocol_error (would kill the peer under one_for_all).
+    # not treated as protocol_error (would kill the peer via auto_shutdown).
     refute Peer.Sender.known_wire_id?(21)
     refute Peer.Sender.known_wire_id?(22)
     refute Peer.Sender.known_wire_id?(23)

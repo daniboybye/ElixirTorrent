@@ -53,6 +53,10 @@ defmodule IPv6AnnounceTest do
 
     test "fails only when both A and AAAA resolution fail" do
       assert {:error, :nxdomain} = Tracker.resolve_hosts("this-host-should-not-exist.invalid.")
+
+      assert Tracker.expected_dns_failure?(:nxdomain)
+      assert Tracker.expected_dns_failure?(:timeout)
+      refute Tracker.expected_dns_failure?(:einval)
     end
   end
 

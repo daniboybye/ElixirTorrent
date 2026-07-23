@@ -1,5 +1,6 @@
 defmodule Peer.Sender do
-  use GenServer, restart: :permanent
+  # restart overridden to :temporary in Peer.start_link (auto_shutdown tree).
+  use GenServer, restart: :temporary
   use Via
   use Peer.Const
 
@@ -271,13 +272,16 @@ defmodule Peer.Sender do
     drain_inbound(%{state | buffer: state.buffer <> data})
   end
 
-  def handle_info({:tcp_closed, _}, state), do: {:stop, :normal, state}
+  # {:shutdown, :connection_closed} (not bare :normal): Peer supervisor uses
+  # auto_shutdown on significant children — a distinct shutdown reason keeps
+  # Sender terminate logs / future Endpoints mapping readable vs protocol_error.
+  def handle_info({:tcp_closed, _}, state), do: {:stop, {:shutdown, :connection_closed}, state}
 
-  def handle_info({:utp_closed, _}, state), do: {:stop, :normal, state}
+  def handle_info({:utp_closed, _}, state), do: {:stop, {:shutdown, :connection_closed}, state}
 
-  def handle_info({:tcp_error, _, _}, state), do: {:stop, :normal, state}
+  def handle_info({:tcp_error, _, _}, state), do: {:stop, {:shutdown, :connection_closed}, state}
 
-  def handle_info({:utp_error, _, _}, state), do: {:stop, :normal, state}
+  def handle_info({:utp_error, _, _}, state), do: {:stop, {:shutdown, :connection_closed}, state}
 
   def handle_info(:timeout, state), do: do_send(state, [])
 
