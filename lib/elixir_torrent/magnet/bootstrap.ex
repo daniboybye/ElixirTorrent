@@ -50,7 +50,8 @@ defmodule Magnet.Bootstrap do
 
   @spec offer_peers(Torrent.hash(), [Peer.t()]) :: :ok
   def offer_peers(hash, peers) when is_binary(hash) and is_list(peers) do
-    Acceptor.handshakes(peers, hash)
+    _ = Peer.ConnectionManager.offer_peers(hash, peers)
+    _ = Peer.ConnectionManager.kick(hash)
     :ok
   catch
     :exit, _ -> :ok
@@ -69,7 +70,7 @@ defmodule Magnet.Bootstrap do
   defp metadata_key(pid) when is_pid(pid) do
     with key when is_tuple(key) <- Peer.get_key(pid),
          {:ok, info} <- safe_metadata_capable(key) do
-      if metadata_peer_eligible?(info) do
+      if metadata_peer_candidate?(info) do
         [key]
       else
         log_metadata_skip(key, info, :not_eligible)
@@ -107,11 +108,15 @@ defmodule Magnet.Bootstrap do
     )
   end
 
+  @spec metadata_peer_candidate?(map()) :: boolean()
+  def metadata_peer_candidate?(info) when is_map(info) do
+    Peer.LTEP.Session.peer_supports?(info.ltep, Magnet.UtMetadata.extension_name())
+  end
+
   @spec metadata_peer_eligible?(map()) :: boolean()
   def metadata_peer_eligible?(info) when is_map(info) do
-    ut_ok = Peer.LTEP.Session.peer_supports?(info.ltep, Magnet.UtMetadata.extension_name())
-    has_metadata = is_integer(info.metadata_size) and info.metadata_size > 0
-    ut_ok and (has_metadata or info.seeder? == true)
+    metadata_peer_candidate?(info) and
+      ((is_integer(info.metadata_size) and info.metadata_size > 0) or info.seeder? == true)
   end
 
   @spec start_link(%Magnet{}) :: Supervisor.on_start()
@@ -131,6 +136,7 @@ defmodule Magnet.Bootstrap do
     children = [
       {Model, torrent},
       {Swarm, hash},
+      {Peer.ConnectionManager, hash}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

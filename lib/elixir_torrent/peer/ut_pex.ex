@@ -10,6 +10,10 @@ defmodule Peer.UtPex do
 
   @extension_name "ut_pex"
 
+  # BEP 11 per-peer flag bits in `added.f` / `added6.f` (one byte per compact peer):
+  # 0x01 encrypted, 0x02 seed, 0x04 utp, 0x08 holepunch, 0x10 outgoing (reachability).
+  @flag_seed 0x02
+
   @type endpoint :: {:inet.ip_address(), :inet.port_number()}
 
   @doc false
@@ -18,6 +22,9 @@ defmodule Peer.UtPex do
 
   @doc """
   Decodes an inbound ut_pex payload and dials any new connectable peers.
+
+  BEP 11 seed-flagged peers (`added.f` bit `@flag_seed`) are offered for dial before
+  non-seeds so we prefer seeders when peer slots are scarce (CGNAT outbound dials).
   """
   @spec ingest(Torrent.hash(), binary()) :: :ok
   def ingest(hash, payload) when is_binary(payload) do
@@ -25,14 +32,16 @@ defmodule Peer.UtPex do
       {:ok, added, _dropped} ->
         peers =
           added
-          |> Enum.map(&%Peer{ip: elem(&1, 0), port: elem(&1, 1)})
+          |> prioritize_seed_peers()
           |> Enum.filter(&Acceptor.Connection.Handshakes.connectable_peer?/1)
 
         if peers != [] do
           require Logger
 
+          seed_count = Enum.count(peers, &(&1.seed == true))
+
           Logger.info(
-            "[ut_pex] ingest hash=#{Torrent.hex_encoded_hash(hash)} added=#{length(peers)}"
+            "[ut_pex] ingest hash=#{Torrent.hex_encoded_hash(hash)} added=#{length(peers)} seeds=#{seed_count}"
           )
 
           Acceptor.handshakes(peers, hash)
@@ -43,6 +52,12 @@ defmodule Peer.UtPex do
       :error ->
         :ok
     end
+  end
+
+  @doc false
+  @spec prioritize_seed_peers([Peer.t()]) :: [Peer.t()]
+  def prioritize_seed_peers(peers) when is_list(peers) do
+    Enum.sort_by(peers, fn %Peer{seed: seed} -> seed != true end)
   end
 
   @doc """
@@ -83,17 +98,25 @@ defmodule Peer.UtPex do
   end
 
   @doc false
-  @spec decode(binary()) :: {:ok, [endpoint()], [endpoint()]} | :error
+  @spec decode(binary()) :: {:ok, [Peer.t()], [Peer.t()]} | :error
   def decode(payload) when is_binary(payload) do
     case Bento.decode(payload) do
       {:ok, dict} when is_map(dict) ->
         added =
-          decode_ipv4(Map.get(dict, "added", <<>>)) ++
-            decode_ipv6(Map.get(dict, "added6", <<>>))
+          decode_peers_with_flags(
+            Map.get(dict, "added", <<>>),
+            Map.get(dict, "added.f"),
+            :inet
+          ) ++
+            decode_peers_with_flags(
+              Map.get(dict, "added6", <<>>),
+              Map.get(dict, "added6.f"),
+              :inet6
+            )
 
         dropped =
-          decode_ipv4(Map.get(dict, "dropped", <<>>)) ++
-            decode_ipv6(Map.get(dict, "dropped6", <<>>))
+          decode_peers_without_flags(Map.get(dict, "dropped", <<>>), :inet) ++
+            decode_peers_without_flags(Map.get(dict, "dropped6", <<>>), :inet6)
 
         {:ok, added, dropped}
 
@@ -126,18 +149,39 @@ defmodule Peer.UtPex do
     end)
   end
 
-  @spec decode_ipv4(binary()) :: [endpoint()]
-  defp decode_ipv4(bin) when is_binary(bin) do
-    bin
-    |> UDP.parse_compact_peers(:inet)
-    |> Enum.map(&{&1.ip, &1.port})
+  @spec decode_peers_with_flags(binary(), binary() | nil, :inet | :inet6) :: [Peer.t()]
+  defp decode_peers_with_flags(<<>>, _flags_bin, _family), do: []
+
+  defp decode_peers_with_flags(compact, flags_bin, family) do
+    has_flags? = is_binary(flags_bin) and flags_bin != <<>>
+
+    compact
+    |> UDP.parse_compact_peers(family)
+    |> Enum.with_index()
+    |> Enum.map(fn {peer, idx} ->
+      flag = if has_flags?, do: flags_byte(flags_bin, idx), else: 0
+
+      seed =
+        if has_flags? do
+          Bitwise.band(flag, @flag_seed) != 0
+        end
+
+      %Peer{ip: peer.ip, port: peer.port, seed: seed}
+    end)
   end
 
-  @spec decode_ipv6(binary()) :: [endpoint()]
-  defp decode_ipv6(bin) when is_binary(bin) do
-    bin
-    |> UDP.parse_compact_peers(:inet6)
-    |> Enum.map(&{&1.ip, &1.port})
+  @spec decode_peers_without_flags(binary(), :inet | :inet6) :: [Peer.t()]
+  defp decode_peers_without_flags(<<>>, _family), do: []
+
+  defp decode_peers_without_flags(compact, family) do
+    compact
+    |> UDP.parse_compact_peers(family)
+    |> Enum.map(fn peer -> %Peer{ip: peer.ip, port: peer.port} end)
+  end
+
+  @spec flags_byte(binary(), non_neg_integer()) :: byte()
+  defp flags_byte(flags_bin, idx) when idx >= 0 do
+    if byte_size(flags_bin) > idx, do: :binary.at(flags_bin, idx), else: 0
   end
 
   @spec flags([endpoint()]) :: binary()

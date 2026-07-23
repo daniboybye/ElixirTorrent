@@ -49,7 +49,8 @@ defmodule Magnet.Fetcher.Session do
           peer_attempts: %{},
           announced_trackers: [],
           round_timer: nil,
-          round_worker: nil
+          round_worker: nil,
+          started_at_ms: System.monotonic_time(:millisecond)
         }
 
         send(self(), :run_round)
@@ -63,50 +64,18 @@ defmodule Magnet.Fetcher.Session do
 
   @impl true
   def handle_info(:run_round, state) do
-    round = state.round + 1
-    hash_hex = Torrent.hex_encoded_hash(state.magnet.hash)
+    if fetch_expired?(state) do
+      hash_hex = Torrent.hex_encoded_hash(state.magnet.hash)
 
-    {known_peers, peers_new, announced_trackers} =
-      Fetcher.discover_and_merge_peers(state.magnet, state.stats, state.known_peers)
+      Logger.warning(
+        "[magnet_fetch] expired hash=#{hash_hex} rounds=#{state.round} lifetime_ms=#{Fetcher.max_fetch_lifetime_ms()}"
+      )
 
-    announced_trackers =
-      (state.announced_trackers ++ announced_trackers) |> Enum.uniq()
-
-    peers = Fetcher.select_peers_for_round(known_peers, state.peer_attempts)
-
-    Logger.info(
-      "[magnet_fetch] round=#{round} hash=#{hash_hex} peers_known=#{map_size(known_peers)} peers_new=#{peers_new} tried=#{length(peers)}"
-    )
-
-    progress = %{
-      round: round,
-      peers_known: map_size(known_peers),
-      peers_new: peers_new,
-      peers_tried: length(peers),
-      status: "fetching metadata"
-    }
-
-    notify_progress(state, progress)
-
-    peer_attempts = Fetcher.mark_peers_attempted(state.peer_attempts, peers)
-
-    parent = self()
-
-    round_worker =
-      spawn_monitor(fn ->
-        result = Fetcher.fetch_metadata_round(state.magnet, peers, announced_trackers)
-        send(parent, {:round_result, result})
-      end)
-
-    {:noreply,
-     %{
-       state
-       | round: round,
-         known_peers: known_peers,
-         peer_attempts: peer_attempts,
-         announced_trackers: announced_trackers,
-         round_worker: round_worker
-     }}
+      notify_done(state, {:error, :timeout})
+      {:stop, :normal, state}
+    else
+      do_run_round(state)
+    end
   end
 
   def handle_info({:round_result, result}, state) do
@@ -119,8 +88,8 @@ defmodule Magnet.Fetcher.Session do
         Logger.info("[magnet_fetch] metadata_ok hash=#{hash_hex} round=#{round}")
         Fetcher.announce_stopped(state.magnet.hash, trackers)
 
-        if not private? and DHT.enabled?() do
-          :ok = DHT.announce(state.magnet.hash, Acceptor.port())
+        if not private? do
+          :ok = Fetcher.announce_dht_for_metadata(state.magnet.hash)
         end
 
         :ok = Fetcher.on_metadata_ok(state.magnet, path)
@@ -132,7 +101,7 @@ defmodule Magnet.Fetcher.Session do
         {:stop, :normal, state}
 
       {:error, _reason} ->
-        backoff = Fetcher.round_backoff_ms(round)
+        backoff = Fetcher.round_backoff_ms(round, elem(result, 1))
 
         Logger.info(
           "[magnet_fetch] round_retry hash=#{hash_hex} round=#{round} backoff_ms=#{backoff}"
@@ -236,6 +205,53 @@ defmodule Magnet.Fetcher.Session do
 
   defp kill_round_worker(_state), do: :ok
 
+  defp do_run_round(state) do
+    round = state.round + 1
+    hash_hex = Torrent.hex_encoded_hash(state.magnet.hash)
+
+    {known_peers, peers_new, announced_trackers} =
+      Fetcher.discover_and_merge_peers(state.magnet, state.stats, state.known_peers)
+
+    announced_trackers =
+      (state.announced_trackers ++ announced_trackers) |> Enum.uniq()
+
+    peers = Fetcher.select_peers_for_round(known_peers, state.peer_attempts)
+
+    Logger.info(
+      "[magnet_fetch] round=#{round} hash=#{hash_hex} peers_known=#{map_size(known_peers)} peers_new=#{peers_new} tried=#{length(peers)}"
+    )
+
+    progress = %{
+      round: round,
+      peers_known: map_size(known_peers),
+      peers_new: peers_new,
+      peers_tried: length(peers),
+      status: "fetching metadata"
+    }
+
+    notify_progress(state, progress)
+
+    peer_attempts = Fetcher.mark_peers_attempted(state.peer_attempts, peers)
+
+    parent = self()
+
+    round_worker =
+      spawn_monitor(fn ->
+        result = Fetcher.fetch_metadata_round(state.magnet, peers, announced_trackers)
+        send(parent, {:round_result, result})
+      end)
+
+    {:noreply,
+     %{
+       state
+       | round: round,
+         known_peers: known_peers,
+         peer_attempts: peer_attempts,
+         announced_trackers: announced_trackers,
+         round_worker: round_worker
+     }}
+  end
+
   @spec notify_progress(map(), progress()) :: :ok
   defp notify_progress(%{caller: caller, ref: ref}, progress) when is_pid(caller) do
     if Process.alive?(caller) do
@@ -257,4 +273,10 @@ defmodule Magnet.Fetcher.Session do
   end
 
   defp notify_done(_state, _result), do: :ok
+
+  @spec fetch_expired?(map()) :: boolean()
+  defp fetch_expired?(%{started_at_ms: started_at_ms}) do
+    elapsed = System.monotonic_time(:millisecond) - started_at_ms
+    elapsed >= Fetcher.max_fetch_lifetime_ms()
+  end
 end

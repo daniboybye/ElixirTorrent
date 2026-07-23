@@ -192,16 +192,18 @@ defmodule Magnet.UtMetadata do
   Decodes assembled metadata bytes into an info dictionary and verifies SHA-1.
 
   BEP 9: the transferred blob is the bencoded info dictionary; its SHA-1 must equal
-  the magnet info-hash (BEP 3).
+  the magnet info-hash (BEP 3). Returns the raw blob alongside the decoded map so
+  callers can persist the exact wire bytes (see `Magnet.build_torrent!/2`).
   """
-  @spec decode_and_verify_info(binary(), Torrent.hash()) :: {:ok, map()} | {:error, term()}
+  @spec decode_and_verify_info(binary(), Torrent.hash()) ::
+          {:ok, map(), binary()} | {:error, term()}
   def decode_and_verify_info(metadata_blob, expected_hash)
       when is_binary(metadata_blob) and is_binary(expected_hash) do
     hash = :crypto.hash(:sha, metadata_blob)
 
     if hash == expected_hash do
       case Bento.decode(metadata_blob) do
-        {:ok, info} when is_map(info) -> {:ok, info}
+        {:ok, info} when is_map(info) -> {:ok, info, metadata_blob}
         _ -> {:error, :invalid_info}
       end
     else

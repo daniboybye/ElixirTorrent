@@ -10,7 +10,7 @@ defmodule Peer.LTEP.Extensions do
   Extension modules active for magnet metadata connections and completed-torrent peers.
   """
   @spec all() :: [module()]
-  def all, do: [Peer.UtHolepunch.Extension, Peer.UtPex.Extension, Magnet.UtMetadata.Extension]
+  def all, do: [Peer.UtPex.Extension, Magnet.UtMetadata.Extension]
 
   @doc """
   LTEP extensions to advertise on a normal peer connection for `hash`.

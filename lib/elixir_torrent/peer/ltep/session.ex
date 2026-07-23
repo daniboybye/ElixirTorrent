@@ -9,6 +9,13 @@ defmodule Peer.LTEP.Session do
 
   alias Peer.LTEP.{Extension, Handshake}
 
+  # BEP 10 `reqq`: how many pending `request` messages *from* the peer we accept
+  # without dropping. Torrent.Uploader spawns a Task per request (no internal cap),
+  # so this is a courtesy advertisement, not an enforced limit. 500 matches
+  # qBittorrent's default; libtorrent uses 250. Peers that respect it will keep
+  # deeper request pipelines to us → better upload throughput on high-BDP links.
+  @local_reqq 500
+
   defstruct local_m: %{},
             peer: %Handshake{},
             extensions: []
@@ -38,7 +45,8 @@ defmodule Peer.LTEP.Session do
   @doc """
   Encodes our outbound extension handshake (BEP 10 § handshake message).
 
-  Includes `m`, client version `v`, and any extension-specific top-level keys.
+  Includes `m`, client version `v`, our accepted `reqq` (BEP 10 queue depth),
+  listen `p`/`ipv4`/`ipv6`, and any extension-specific top-level keys.
   """
   @spec outbound_handshake(t(), keyword()) :: binary()
   def outbound_handshake(%__MODULE__{} = session, opts \\ []) do
@@ -51,13 +59,19 @@ defmodule Peer.LTEP.Session do
       |> Map.merge(Keyword.get(opts, :extra_fields, %{}))
 
     base =
-      %Handshake{m: session.local_m, v: client_version}
+      %Handshake{m: session.local_m, v: client_version, reqq: @local_reqq}
       |> Handshake.to_map()
       |> Map.merge(address_fields())
       |> Map.merge(extra_fields)
 
     base |> Handshake.from_map() |> Handshake.encode()
   end
+
+  @doc """
+  Our advertised BEP 10 `reqq` (accepted inbound `request` queue depth).
+  """
+  @spec local_reqq() :: pos_integer()
+  def local_reqq, do: @local_reqq
 
   @doc false
   @spec address_fields() :: map()

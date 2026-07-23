@@ -57,7 +57,7 @@ defmodule Magnet.Connection do
   """
   @spec open(Peer.t(), Torrent.hash()) :: {:ok, t()} | {:error, term()}
   def open(%Peer{} = peer, hash) do
-    opts = Acceptor.socket_options(family_for_ip(peer.ip))
+    opts = Acceptor.connect_options(family_for_ip(peer.ip))
 
     case connect_tcp(peer.ip, peer.port, opts) do
       {:ok, socket} ->
@@ -155,7 +155,7 @@ defmodule Magnet.Connection do
   end
 
   @doc false
-  @spec fetch_info(t(), Torrent.hash()) :: {:ok, map()} | {:error, term()}
+  @spec fetch_info(t(), Torrent.hash()) :: {:ok, map(), binary()} | {:error, term()}
   def fetch_info(%__MODULE__{} = conn, hash), do: download_all_pieces(conn, hash)
 
   @spec do_open_with_transport(Peer.t(), Torrent.hash(), Peer.Transport.socket(), transport()) ::
@@ -248,9 +248,18 @@ defmodule Magnet.Connection do
 
         {:ok, Map.put(info, :metadata_size, metadata_size)}
 
-      metadata_seeder?(info) and System.monotonic_time(:millisecond) >= deadline ->
+      metadata_seeder?(info) ->
         Logger.info(
           "[magnet_ut] controller_ready transport=swarm endpoint=peer=#{Peer.log_key(key)} metadata_size=unknown seeder=true unchoked=#{inspect(info.unchoked?)}"
+        )
+
+        {:ok, info}
+
+      Peer.LTEP.Session.peer_supports?(info.ltep, @ut_metadata) ->
+        # BEP 9: ut_metadata peers may omit metadata_size in LTEP; probe piece 0 and
+        # learn total_size from the data message (download_all_pieces/2 nil clause).
+        Logger.info(
+          "[magnet_ut] controller_ready transport=swarm endpoint=peer=#{Peer.log_key(key)} metadata_size=unknown ut_metadata=true unchoked=#{inspect(info.unchoked?)}"
         )
 
         {:ok, info}
@@ -383,7 +392,7 @@ defmodule Magnet.Connection do
     end
   end
 
-  @spec fetch_metadata(Peer.t(), Torrent.hash()) :: {:ok, map()} | {:error, term()}
+  @spec fetch_metadata(Peer.t(), Torrent.hash()) :: {:ok, map(), binary()} | {:error, term()}
   def fetch_metadata(peer, hash) do
     with {:ok, conn} <- open(peer, hash),
          result <- download_all_pieces(conn, hash),
@@ -392,7 +401,7 @@ defmodule Magnet.Connection do
     end
   end
 
-  @spec download_all_pieces(t(), Torrent.hash()) :: {:ok, map()} | {:error, term()}
+  @spec download_all_pieces(t(), Torrent.hash()) :: {:ok, map(), binary()} | {:error, term()}
   defp download_all_pieces(%__MODULE__{metadata_size: nil} = conn, hash) do
     # Learn total size from the first data message (BEP 9 § data includes total_size).
     case request_piece(conn, 0) do
@@ -419,7 +428,7 @@ defmodule Magnet.Connection do
           %{non_neg_integer() => binary()},
           non_neg_integer()
         ) ::
-          {:ok, map()} | {:error, term()}
+          {:ok, map(), binary()} | {:error, term()}
   defp fetch_remaining(conn, hash, total_size, pieces, next_index) do
     count = Magnet.UtMetadata.piece_count(total_size)
 

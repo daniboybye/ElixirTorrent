@@ -163,43 +163,49 @@ defmodule Peer.LTEP do
 
   defp recv_until_peer_handshake(socket, deadline) when is_port(socket) do
     now = System.monotonic_time(:millisecond)
-    if now >= deadline, do: {:error, :timeout}
 
-    poll = min(deadline - now, 5_000)
+    if now >= deadline do
+      {:error, :timeout}
+    else
+      poll = min(deadline - now, 5_000)
 
-    case recv_framed_message(socket, poll) do
-      {:ok, {:extended, @handshake_id, payload}} ->
-        {:ok, payload}
+      case recv_framed_message(socket, poll) do
+        {:ok, {:extended, @handshake_id, payload}} ->
+          {:ok, payload}
 
-      {:ok, _} ->
-        recv_until_peer_handshake(socket, deadline)
+        {:ok, _} ->
+          recv_until_peer_handshake(socket, deadline)
 
-      {:error, :timeout} ->
-        recv_until_peer_handshake(socket, deadline)
+        {:error, :timeout} ->
+          recv_until_peer_handshake(socket, deadline)
 
-      {:error, _} = error ->
-        error
+        {:error, _} = error ->
+          error
+      end
     end
   end
 
   defp recv_until_peer_handshake(key, deadline) when is_tuple(key) do
     now = System.monotonic_time(:millisecond)
-    if now >= deadline, do: {:error, :timeout}
 
-    poll = min(deadline - now, 5_000)
+    if now >= deadline do
+      {:error, :timeout}
+    else
+      poll = min(deadline - now, 5_000)
 
-    case recv_framed_message(key, poll) do
-      {:ok, {:extended, @handshake_id, payload}} ->
-        {:ok, payload}
+      case recv_framed_message(key, poll) do
+        {:ok, {:extended, @handshake_id, payload}} ->
+          {:ok, payload}
 
-      {:ok, _} ->
-        recv_until_peer_handshake(key, deadline)
+        {:ok, _} ->
+          recv_until_peer_handshake(key, deadline)
 
-      {:error, :timeout} ->
-        recv_until_peer_handshake(key, deadline)
+        {:error, :timeout} ->
+          recv_until_peer_handshake(key, deadline)
 
-      {:error, _} = error ->
-        error
+        {:error, _} = error ->
+          error
+      end
     end
   end
 

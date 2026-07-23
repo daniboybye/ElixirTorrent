@@ -142,14 +142,13 @@ defmodule ElixirTorrent do
           "magnet:?xt=urn:btih:abc...&tr=udp%3A%2F%2Ftracker.example.com%3A80%2Fannounce"
         )
   """
-  @spec download_magnet(String.t()) :: {:ok, pid()} | {:error, term()}
-  def download_magnet(magnet_uri) when is_binary(magnet_uri) do
-    case Torrents.download_magnet(magnet_uri) do
+  @spec download_magnet(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def download_magnet(magnet_uri, opts \\ []) when is_binary(magnet_uri) and is_list(opts) do
+    case Torrents.download_magnet(magnet_uri, opts) do
       {:ok, pid} -> {:ok, pid}
       other -> other
     end
   end
-
 
   @doc """
   Returns selected runtime stats for a running torrent process.

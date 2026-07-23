@@ -9,7 +9,11 @@ defmodule Peer.UtPexTest do
 
     payload = UtPex.encode(added, dropped)
     assert is_binary(payload)
-    assert {:ok, ^added, ^dropped} = UtPex.decode(payload)
+    assert {:ok, decoded_added, decoded_dropped} = UtPex.decode(payload)
+
+    assert Enum.map(decoded_added, &{&1.ip, &1.port}) == added
+    assert Enum.map(decoded_dropped, &{&1.ip, &1.port}) == dropped
+    assert Enum.all?(decoded_added, &(&1.seed == false))
   end
 
   test "decode ignores unknown keys" do
@@ -20,6 +24,40 @@ defmodule Peer.UtPexTest do
         "foo" => "bar"
       })
 
-    assert {:ok, [{{1, 2, 3, 4}, 6881}], []} = UtPex.decode(raw)
+    assert {:ok, [%Peer{ip: {1, 2, 3, 4}, port: 6881, seed: false}], []} = UtPex.decode(raw)
+  end
+
+  test "decode marks BEP 11 seed flag (0x02) on added peers" do
+    raw =
+      Bento.encode!(%{
+        "added" => <<1, 2, 3, 4, 0x1A, 0xE1, 5, 6, 7, 8, 0x50, 0x0C>>,
+        "added.f" => <<0x02, 0x00>>
+      })
+
+    assert {:ok, peers, []} = UtPex.decode(raw)
+    assert length(peers) == 2
+
+    assert [
+             %Peer{ip: {1, 2, 3, 4}, port: 6881, seed: true},
+             %Peer{ip: {5, 6, 7, 8}, port: 20_492, seed: false}
+           ] = peers
+  end
+
+  test "decode leaves seed nil when added.f is absent" do
+    raw = Bento.encode!(%{"added" => <<1, 2, 3, 4, 0x1A, 0xE1>>})
+
+    assert {:ok, [%Peer{ip: {1, 2, 3, 4}, port: 6881, seed: nil}], []} = UtPex.decode(raw)
+  end
+
+  test "prioritize_seed_peers dials BEP 11 seed-flagged peers first" do
+    peers = [
+      %Peer{ip: {1, 1, 1, 1}, port: 6881, seed: false},
+      %Peer{ip: {2, 2, 2, 2}, port: 6882, seed: true},
+      %Peer{ip: {3, 3, 3, 3}, port: 6883, seed: nil},
+      %Peer{ip: {4, 4, 4, 4}, port: 6884, seed: true}
+    ]
+
+    assert [%Peer{seed: true}, %Peer{seed: true}, %Peer{seed: false}, %Peer{seed: nil}] =
+             UtPex.prioritize_seed_peers(peers)
   end
 end

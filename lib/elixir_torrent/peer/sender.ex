@@ -147,9 +147,6 @@ defmodule Peer.Sender do
         buffer = absorb_kernel_buffer(socket, state.buffer)
         {:reply, :ok, %{state | active: false, buffer: buffer}, @timeout}
 
-      {:error, {:unsupported_opts, [active: false]}} ->
-        {:reply, :ok, %{state | active: false}, @timeout}
-
       {:error, reason} ->
         {:reply, {:error, reason}, state, @timeout}
     end
@@ -160,7 +157,7 @@ defmodule Peer.Sender do
   end
 
   def handle_call({:socket_send_raw, data}, _, %__MODULE__{socket: socket} = state) do
-    {:reply, Peer.Transport.send(socket, data), state, @timeout}
+    {:reply, Peer.Transport.safe_send(socket, data), state, @timeout}
   end
 
   # Used during magnet swarm metadata fetch (Sender inactive) and LTEP startup.
@@ -242,12 +239,28 @@ defmodule Peer.Sender do
 
   # MSE: active-mode data is tagged with the inner (raw) socket and is ciphertext;
   # decrypt with the inbound RC4 stream before buffering.
+  def handle_info({:tcp, raw, data}, %__MODULE__{socket: {:mse, raw, ciphers}, active: false} = state) do
+    buffer_inbound(state, Peer.MSE.crypt(ciphers.recv, data))
+  end
+
+  def handle_info({:utp, raw, data}, %__MODULE__{socket: {:mse, raw, ciphers}, active: false} = state) do
+    buffer_inbound(state, Peer.MSE.crypt(ciphers.recv, data))
+  end
+
   def handle_info({:tcp, raw, data}, %__MODULE__{socket: {:mse, raw, ciphers}} = state) do
     drain_inbound(%{state | buffer: state.buffer <> Peer.MSE.crypt(ciphers.recv, data)})
   end
 
   def handle_info({:utp, raw, data}, %__MODULE__{socket: {:mse, raw, ciphers}} = state) do
     drain_inbound(%{state | buffer: state.buffer <> Peer.MSE.crypt(ciphers.recv, data)})
+  end
+
+  def handle_info({:tcp, socket, data}, %{socket: socket, active: false} = state) do
+    buffer_inbound(state, data)
+  end
+
+  def handle_info({:utp, socket, data}, %{socket: socket, active: false} = state) do
+    buffer_inbound(state, data)
   end
 
   def handle_info({:tcp, socket, data}, %{socket: socket} = state) do
@@ -268,7 +281,37 @@ defmodule Peer.Sender do
 
   def handle_info(:timeout, state), do: do_send(state, [])
 
+  def terminate(reason, %__MODULE__{key: key}) do
+    case reason do
+      :normal ->
+        Logger.debug(
+          "[peer_sender] stopped peer=#{Peer.log_key(key)} hash=#{Torrent.hex_encoded_hash(Peer.key_to_hash(key))} reason=normal"
+        )
+
+      {:shutdown, _} = r ->
+        Logger.debug(
+          "[peer_sender] stopped peer=#{Peer.log_key(key)} hash=#{Torrent.hex_encoded_hash(Peer.key_to_hash(key))} reason=#{inspect(r)}"
+        )
+
+      _ ->
+        Logger.warning(
+          "[peer_sender] stopped peer=#{Peer.log_key(key)} hash=#{Torrent.hex_encoded_hash(Peer.key_to_hash(key))} reason=#{inspect(reason)}"
+        )
+    end
+
+    :ok
+  end
+
   @spec drain_inbound(t()) :: GenServer.reply()
+  # BEP 9 swarm metadata: Magnet.Connection deactivates Sender and reads via
+  # socket_recv/3. uTP has no passive mode (setopts active:false is unsupported),
+  # so the connection keeps delivering {:utp,...} to us while inactive. Buffer those
+  # bytes for socket_recv instead of drain_inbound — otherwise ut_metadata data/reject
+  # replies are parsed and dropped before the metadata waiter sees them.
+  defp buffer_inbound(%__MODULE__{} = state, data) do
+    {:noreply, %{state | buffer: state.buffer <> data}, @timeout}
+  end
+
   defp drain_inbound(%__MODULE__{buffer: buffer, key: key} = state) do
     case take_message(buffer) do
       {:ok, message, rest} ->
@@ -325,7 +368,7 @@ defmodule Peer.Sender do
       true ->
         need = len - byte_size(buffer)
 
-        case Peer.Transport.recv(socket, need, timeout) do
+        case Peer.Transport.safe_recv(socket, need, timeout) do
           {:ok, chunk} ->
             combined = buffer <> chunk
 
@@ -428,7 +471,9 @@ defmodule Peer.Sender do
 
   @spec transport_send(Peer.Transport.socket(), iodata()) :: :ok | {:error, term()}
   defp transport_send(socket, msg) do
-    Peer.Transport.send(socket, [<<IO.iodata_length(msg)::32>>, msg])
+    # safe_send: uTP owner may exit between a wire cast (e.g. DHT {:port,6881})
+    # and the write — common under CGNAT churn; stop cleanly instead of crashing.
+    Peer.Transport.safe_send(socket, [<<IO.iodata_length(msg)::32>>, msg])
   end
 
   @spec log_wire(Peer.key(), String.t(), :info | :debug) :: :ok

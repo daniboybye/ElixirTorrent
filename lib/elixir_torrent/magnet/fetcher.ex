@@ -11,7 +11,7 @@ defmodule Magnet.Fetcher do
   @doc false
   @spec max_connections() :: pos_integer()
   def max_connections, do: @max_connections
-  @connection_pool_size 1
+  @connection_pool_size 6
   @metadata_peer_timeout_ms 40_000
   @tracker_task_timeout_ms 50_000
   @tracker_max_concurrency 8
@@ -20,6 +20,17 @@ defmodule Magnet.Fetcher do
   @round_backoff_base_ms 30_000
   @round_backoff_step_ms 5_000
   @round_backoff_cap_ms 120_000
+  # Reachable leechers without metadata are a sampling miss, not a dead swarm — retry
+  # sooner than the normal round ramp (discovery cadence unchanged).
+  @round_backoff_dead_leecher_ms 15_000
+  # BEP 9 metadata fetch is retry-forever by design; cap wall-clock lifetime so a
+  # dead magnet (no metadata peers) cannot hold ConnectionLimit slots + pending UI
+  # rows indefinitely (e.g. 7D2978A2 stuck since Jul 16).
+  @max_fetch_lifetime_ms 24 * 60 * 60 * 1_000
+
+  @doc false
+  @spec max_fetch_lifetime_ms() :: pos_integer()
+  def max_fetch_lifetime_ms, do: @max_fetch_lifetime_ms
 
   @type ref :: reference()
   @type progress :: Magnet.Fetcher.Session.progress()
@@ -147,10 +158,42 @@ defmodule Magnet.Fetcher do
   end
 
   @doc false
-  @spec round_backoff_ms(pos_integer()) :: pos_integer()
-  def round_backoff_ms(round) when is_integer(round) and round > 0 do
-    min(@round_backoff_cap_ms, @round_backoff_base_ms + (round - 1) * @round_backoff_step_ms)
+  @spec round_backoff_ms(pos_integer(), term()) :: pos_integer()
+  def round_backoff_ms(round, reason \\ nil)
+
+  def round_backoff_ms(round, reason) when is_integer(round) and round > 0 do
+    base =
+      min(@round_backoff_cap_ms, @round_backoff_base_ms + (round - 1) * @round_backoff_step_ms)
+
+    if dead_leecher_round_failure?(reason) do
+      min(base, @round_backoff_dead_leecher_ms)
+    else
+      base
+    end
   end
+
+  @doc false
+  @spec dead_leecher_round_failure?(term()) :: boolean()
+  def dead_leecher_round_failure?({:metadata_unavailable, failures}) when is_list(failures) do
+    failures != [] and Enum.all?(failures, &leecher_sampling_failure?/1)
+  end
+
+  def dead_leecher_round_failure?(:metadata_unavailable), do: true
+  def dead_leecher_round_failure?(:no_swarm_metadata_peers), do: false
+  def dead_leecher_round_failure?(:no_peers), do: false
+  def dead_leecher_round_failure?(:round_worker_crashed), do: false
+  def dead_leecher_round_failure?(_), do: false
+
+  @leecher_sampling_failures [
+    :peer_died,
+    :metadata_unavailable,
+    :no_ut_metadata,
+    :metadata_size_pending,
+    :no_metadata_session
+  ]
+
+  defp leecher_sampling_failure?(reason) when reason in @leecher_sampling_failures, do: true
+  defp leecher_sampling_failure?(_), do: false
 
   @doc false
   @spec discover_and_merge_peers(Magnet.t(), keyword(), %{peer_key() => Peer.t()}) ::
@@ -169,13 +212,27 @@ defmodule Magnet.Fetcher do
   end
 
   @doc false
+  @spec announce_dht_for_metadata(Torrent.hash()) :: :ok
+  def announce_dht_for_metadata(hash) when is_binary(hash) do
+    # BEP 5 — announce while still fetching metadata so we appear in other nodes'
+    # get_peers peer lists and attract reciprocal inbound under CGNAT (weak outbound v4).
+    if DHT.enabled?() do
+      DHT.announce(hash, Acceptor.port())
+    else
+      :ok
+    end
+  end
+
+  @doc false
   @spec select_peers_for_round(%{peer_key() => Peer.t()}, %{peer_key() => non_neg_integer()}) ::
           [Peer.t()]
   def select_peers_for_round(known_peers, peer_attempts) when is_map(known_peers) do
     known_peers
     |> Map.values()
     |> Enum.sort_by(fn %Peer{} = peer ->
-      Map.get(peer_attempts, peer_key(peer), 0)
+      # Prefer IPv6 before truncating to @max_peers — tracker floods of v4 must not
+      # crowd out the scarce v6 candidates that actually dial on this host.
+      {Map.get(peer_attempts, peer_key(peer), 0), not ipv6_peer?(peer)}
     end)
     |> Enum.take(@max_peers)
     |> shuffle()
@@ -230,9 +287,9 @@ defmodule Magnet.Fetcher do
             Magnet.Bootstrap.stop(magnet.hash)
             error
 
-          {:error, _} = error ->
+          {:error, :metadata_unavailable} ->
             Magnet.Bootstrap.stop(magnet.hash)
-            error
+            merge_metadata_unavailable_errors(swarm_reason, :metadata_unavailable)
         end
     end
   end
@@ -249,6 +306,10 @@ defmodule Magnet.Fetcher do
   @spec on_metadata_ok(Magnet.t(), Path.t()) :: :ok
   def on_metadata_ok(%Magnet{} = magnet, path) when is_binary(path) do
     Magnet.Bootstrap.stop(magnet.hash)
+    # BEP 9 § Magnet URI format — hand off x.pe endpoints so the fresh Announce
+    # process seeds them into ConnectionManager instead of losing them with the
+    # fetcher shutdown. Announce.take consumes the entry on first start.
+    _ = PeerDiscovery.SeedPeers.put(magnet.hash, magnet.x_pe_peers)
 
     case Application.get_env(:elixir_torrent, :metadata_ok_handler) do
       handler when is_function(handler, 2) ->
@@ -299,16 +360,21 @@ defmodule Magnet.Fetcher do
   @spec peer_key(Peer.t()) :: peer_key()
   defp peer_key(%Peer{ip: ip, port: port}), do: {ip, port}
 
+  @spec ipv6_peer?(Peer.t()) :: boolean()
+  defp ipv6_peer?(%Peer{ip: ip}), do: tuple_size(ip) == 8
+
   @tracker_await_cap_ms 120_000
   @magnet_tracker_task_timeout_ms 12_000
 
   @spec discover_peers(Magnet.t(), keyword()) :: {[Peer.t()], [String.t()]}
   defp discover_peers(%Magnet{} = magnet, stats) do
+    background_dht = take_background_dht_peers(magnet.hash)
+
     tracker_task = Task.async(fn -> collect_tracker_peers(magnet, stats) end)
 
     dht_task =
       if DHT.enabled?() do
-        Task.async(fn -> dht_peers_with_retry(magnet.hash, magnet.trackers) end)
+        Task.async(fn -> dht_peers_with_retry(magnet.hash, include_deep: false) end)
       end
 
     tracker_timeout = min(tracker_await_timeout_ms(magnet), @tracker_await_cap_ms)
@@ -325,7 +391,25 @@ defmodule Magnet.Fetcher do
           {[], Enum.uniq(magnet.trackers)}
       end
 
-    dht_peers_list = await_dht_peers(dht_task)
+    quick_dht_peers = await_dht_peers(dht_task)
+
+    dht_peers_list =
+      cond do
+        quick_dht_peers != [] ->
+          quick_dht_peers
+
+        not DHT.enabled?() ->
+          []
+
+        tracker_peers == [] ->
+          dht_peers_deep_retry(magnet.hash)
+
+        true ->
+          maybe_spawn_dht_deep_background(magnet.hash)
+          []
+      end
+
+    dht_peers_list = background_dht ++ dht_peers_list
     x_pe_peers = magnet.x_pe_peers
 
     peers =
@@ -340,27 +424,143 @@ defmodule Magnet.Fetcher do
     {peers, announced_trackers}
   end
 
-  @dht_retry_delays_ms [0, 2_000, 5_000]
+  @dht_retry_delays_ms [0, 2_000, 5_000, 8_000]
+  # One last dig after quick retries — bounded so a round gains at most ~15s wall clock.
+  @dht_deep_retry_delay_ms 13_000
+  @dht_bg_table :magnet_fetcher_dht_background
 
-  @spec dht_peers_with_retry(Torrent.hash(), [String.t()]) :: [Peer.t()]
-  defp dht_peers_with_retry(hash, _trackers) do
+  @doc false
+  @spec dht_deep_retry_delay_ms() :: pos_integer()
+  def dht_deep_retry_delay_ms, do: @dht_deep_retry_delay_ms
+
+  @spec dht_peers_with_retry(Torrent.hash(), keyword()) :: [Peer.t()]
+  defp dht_peers_with_retry(hash, opts) do
+    include_deep = Keyword.get(opts, :include_deep, true)
+
+    peers = dht_peers_quick_retries(hash)
+
+    cond do
+      peers != [] -> peers
+      include_deep -> dht_peers_deep_retry(hash)
+      true -> []
+    end
+  end
+
+  @spec dht_peers_quick_retries(Torrent.hash()) :: [Peer.t()]
+  defp dht_peers_quick_retries(hash) do
     hash_hex = Torrent.hex_encoded_hash(hash)
 
     Enum.reduce_while(@dht_retry_delays_ms, [], fn delay, _acc ->
-      if delay > 0, do: Process.sleep(delay)
-
-      case dht_peers(hash) do
+      case dht_get_peers_after_delay(hash, delay) do
         [] ->
           {:cont, []}
 
         peers ->
-          Logger.info(
-            "[magnet_fetch] dht_peers hash=#{hash_hex} count=#{length(peers)} delay_ms=#{delay}"
-          )
-
+          log_dht_peers_found(hash_hex, peers, delay)
           {:halt, peers}
       end
     end)
+  end
+
+  @spec dht_peers_deep_retry(Torrent.hash()) :: [Peer.t()]
+  defp dht_peers_deep_retry(hash) do
+    hash_hex = Torrent.hex_encoded_hash(hash)
+
+    # BEP 5 — announce_peer plants us on nearby nodes, but get_peers right after
+    # often returns empty: peers need a propagation window before they show up.
+    peers = dht_get_peers_after_delay(hash, @dht_deep_retry_delay_ms)
+
+    if peers != [] do
+      log_dht_peers_found(hash_hex, peers, @dht_deep_retry_delay_ms, deep: true)
+    end
+
+    peers
+  end
+
+  @spec dht_get_peers_after_delay(Torrent.hash(), non_neg_integer()) :: [Peer.t()]
+  defp dht_get_peers_after_delay(hash, delay) do
+    if delay > 0, do: Process.sleep(delay)
+
+    # Plant ourselves in the DHT before each get_peers attempt (idempotent via
+    # DHT announce_pending?); cold magnets previously only announced after metadata.
+    :ok = announce_dht_for_metadata(hash)
+    dht_peers(hash)
+  end
+
+  @spec log_dht_peers_found(String.t(), [Peer.t()], non_neg_integer(), keyword()) :: :ok
+  defp log_dht_peers_found(hash_hex, peers, delay_ms, opts \\ []) do
+    deep? = Keyword.get(opts, :deep, false)
+    deep_tag = if deep?, do: " deep=true", else: ""
+
+    Logger.info(
+      "[magnet_fetch] dht_peers hash=#{hash_hex} count=#{length(peers)} delay_ms=#{delay_ms}#{deep_tag}"
+    )
+  end
+
+  @spec ensure_dht_bg_table() :: :ok
+  defp ensure_dht_bg_table do
+    case :ets.info(@dht_bg_table) do
+      :undefined ->
+        :ets.new(@dht_bg_table, [:named_table, :public, read_concurrency: true])
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  @doc false
+  @spec take_background_dht_peers(Torrent.hash()) :: [Peer.t()]
+  def take_background_dht_peers(hash) when is_binary(hash) do
+    ensure_dht_bg_table()
+
+    case :ets.lookup(@dht_bg_table, hash) do
+      [{^hash, {:done, peers}}] when is_list(peers) ->
+        :ets.delete(@dht_bg_table, hash)
+        peers
+
+      _ ->
+        []
+    end
+  end
+
+  @spec maybe_spawn_dht_deep_background(Torrent.hash()) :: :ok
+  defp maybe_spawn_dht_deep_background(hash) when is_binary(hash) do
+    ensure_dht_bg_table()
+
+    case :ets.lookup(@dht_bg_table, hash) do
+      [{^hash, :pending}] ->
+        :ok
+
+      _ ->
+        :ets.insert(@dht_bg_table, {hash, :pending})
+        hash_hex = Torrent.hex_encoded_hash(hash)
+
+        Task.start(fn ->
+          peers = dht_peers_deep_retry(hash)
+
+          if peers != [] do
+            Logger.info(
+              "[magnet_fetch] dht_background_peers hash=#{hash_hex} count=#{length(peers)}"
+            )
+          end
+
+          :ets.insert(@dht_bg_table, {hash, {:done, peers}})
+        end)
+
+        :ok
+    end
+  end
+
+  @doc false
+  @spec dht_background_pending?(Torrent.hash()) :: boolean()
+  def dht_background_pending?(hash) when is_binary(hash) do
+    ensure_dht_bg_table()
+
+    case :ets.lookup(@dht_bg_table, hash) do
+      [{^hash, :pending}] -> true
+      _ -> false
+    end
   end
 
   @spec tracker_await_timeout_ms(Magnet.t()) :: pos_integer()
@@ -383,6 +583,8 @@ defmodule Magnet.Fetcher do
 
   @spec dht_await_timeout_ms() :: pos_integer()
   defp dht_await_timeout_ms do
+    # Quick retries only — deep retry runs inline when trackers are empty, or in
+    # background when tracker peers already unblock the round.
     Enum.sum(@dht_retry_delays_ms) +
       length(@dht_retry_delays_ms) * DHTConfig.lookup_timeout_ms() + 5_000
   end
@@ -480,6 +682,20 @@ defmodule Magnet.Fetcher do
     end
   end
 
+  @spec merge_metadata_unavailable_errors(term(), term()) :: {:error, {:metadata_unavailable, [term()]}}
+  defp merge_metadata_unavailable_errors({:metadata_unavailable, swarm_failures}, :metadata_unavailable)
+       when is_list(swarm_failures) do
+    failures =
+      (swarm_failures ++ [:metadata_unavailable])
+      |> Enum.uniq()
+
+    {:error, {:metadata_unavailable, failures}}
+  end
+
+  defp merge_metadata_unavailable_errors(_swarm_reason, :metadata_unavailable) do
+    {:error, {:metadata_unavailable, [:metadata_unavailable]}}
+  end
+
   @spec fetch_metadata(Magnet.t(), [Peer.t()], [String.t()]) ::
           {:ok, Path.t(), [String.t()], boolean()} | {:error, term()}
   defp fetch_metadata(%Magnet{} = magnet, peers, announced_trackers) do
@@ -540,8 +756,9 @@ defmodule Magnet.Fetcher do
     with {:ok, connections} <- open_connection_pool(magnet, peer_pool) do
       try do
         with {:ok, metadata_blob} <- download_pieces(connections, magnet.hash),
-             {:ok, info} <- Magnet.UtMetadata.decode_and_verify_info(metadata_blob, magnet.hash),
-             {:ok, path} <- write_torrent(magnet, info) do
+             {:ok, info, blob} <-
+               Magnet.UtMetadata.decode_and_verify_info(metadata_blob, magnet.hash),
+             {:ok, path} <- write_torrent(magnet, blob) do
           {:ok, path, Magnet.private?(info)}
         else
           {:error, :info_hash_mismatch} ->
@@ -714,11 +931,11 @@ defmodule Magnet.Fetcher do
     |> Enum.map(&elem(&1, 0))
   end
 
-  @spec write_torrent(Magnet.t(), map()) :: {:ok, Path.t()} | {:error, term()}
-  defp write_torrent(%Magnet{} = magnet, info) when is_map(info) do
+  @spec write_torrent(Magnet.t(), binary()) :: {:ok, Path.t()} | {:error, term()}
+  defp write_torrent(%Magnet{} = magnet, info_blob) when is_binary(info_blob) do
     path = torrent_path(magnet.hash)
     File.mkdir_p!(Path.dirname(path))
-    torrent = Magnet.build_torrent!(magnet, info)
+    torrent = Magnet.build_torrent!(magnet, info_blob)
     :ok = File.write(path, torrent)
     {:ok, path}
   end
