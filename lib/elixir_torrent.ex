@@ -45,15 +45,7 @@ defmodule ElixirTorrent do
 
   Keys: `:index`, `:path`, `:name`, `:length`, `:downloaded`, `:progress`, `:complete?`.
   """
-  @type file_entry :: %{
-          index: non_neg_integer(),
-          path: String.t(),
-          name: String.t(),
-          length: non_neg_integer(),
-          downloaded: non_neg_integer(),
-          progress: float(),
-          complete?: boolean()
-        }
+  @type file_entry :: Torrent.Files.Entry.t()
 
   @doc "Starts the CLI loop used by the escript entrypoint."
   def main(_), do: loop()

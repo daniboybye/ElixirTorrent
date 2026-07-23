@@ -12,6 +12,11 @@
 - **Peer.ConnectionManager:** outbound dial orchestration with per-family throttle
 - Mid-download session checkpoint (bitfield + counters every 30s)
 - Magnet `x.pe` peers kept as live dial candidates after metadata fetch
+- Developer quality gate: warnings-as-errors compile, Dialyzer, and Credo warning checks via `mix quality`
+
+### Fixed
+
+- NAT-PMP and UPnP passive UDP receive handling now decodes the datagram payload instead of the source-address tuple
 
 ## 0.5.1 - 2026-07-22
 

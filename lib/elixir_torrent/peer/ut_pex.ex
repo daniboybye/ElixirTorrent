@@ -187,7 +187,7 @@ defmodule Peer.UtPex do
   @spec flags([endpoint()]) :: binary()
   defp flags(endpoints), do: :binary.copy(<<0>>, length(endpoints))
 
-  @spec maybe_put(keyword(), String.t(), binary()) :: keyword()
+  @spec maybe_put([{binary(), binary()}], binary(), binary()) :: [{binary(), binary()}]
   defp maybe_put(fields, _key, <<>>), do: fields
 
   defp maybe_put(fields, key, value) when is_binary(value), do: [{key, value} | fields]

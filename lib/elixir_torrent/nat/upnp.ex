@@ -41,7 +41,6 @@ defmodule NAT.UPnP do
       {:ok, {control_url, service_type}}
     else
       {:error, _} = error -> error
-      :error -> {:error, :timeout}
     end
   catch
     :exit, _ -> {:error, :timeout}
@@ -215,10 +214,10 @@ defmodule NAT.UPnP do
       {:error, :timeout}
     else
       case :gen_udp.recv(socket, 0, remaining) do
-        {:ok, data} when is_binary(data) ->
+        {:ok, {_ip, _port, data}} when is_binary(data) ->
           {:ok, data}
 
-        {:ok, {_ip, _port, data}} when is_binary(data) ->
+        {:ok, {_ip, _port, _ancillary_data, data}} when is_binary(data) ->
           {:ok, data}
 
         {:error, _} ->

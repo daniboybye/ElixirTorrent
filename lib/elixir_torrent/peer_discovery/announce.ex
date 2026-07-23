@@ -1189,7 +1189,7 @@ defmodule PeerDiscovery.Announce do
     end
   end
 
-  @spec schedule_pex(pid(), pos_integer()) :: :ok
+  @spec schedule_pex(pid(), pos_integer()) :: reference()
   defp schedule_pex(pid, ms), do: send_after(pid, :pex_broadcast, ms)
 
   @spec maybe_broadcast_pex(%__MODULE__{}) :: %__MODULE__{}

@@ -509,7 +509,7 @@ defmodule Tracker do
   defp http_hackney_opts(:inet6, _ip),
     do: [pool: ElixirTorrentApplication.tracker_pool(), connect_options: [:inet6]]
 
-  @spec badarg_clause?(CaseClauseError.t()) :: boolean()
+  @spec badarg_clause?(term()) :: boolean()
   defp badarg_clause?(%CaseClauseError{term: :badarg}), do: true
   defp badarg_clause?(_), do: false
 

@@ -62,7 +62,7 @@ defmodule Peer.Controller.State do
           fast_extension: FastExtension.type(),
           status: Peer.status(),
           pieces_count: pos_integer(),
-          socket: port(),
+          socket: Peer.Transport.socket(),
           ltep: Peer.LTEP.Session.t() | nil,
           requests: MapSet.t(subpiece()),
           pending_requests: non_neg_integer(),

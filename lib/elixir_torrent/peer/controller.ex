@@ -338,10 +338,7 @@ defmodule Peer.Controller do
   end
 
   def handle_call({:interested, index}, _, state) do
-    case State.interested(state, index) do
-      {:error, reason, state} -> {:stop, {:shutdown, reason}, state}
-      state -> {:reply, :ok, state}
-    end
+    {:reply, :ok, State.interested(state, index)}
   end
 
   def handle_call(:stale_useless_pin?, _, state),

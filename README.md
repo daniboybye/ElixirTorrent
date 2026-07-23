@@ -40,6 +40,17 @@ Application.ensure_all_started(:elixir_torrent)
 
 Requires **Elixir 1.20+**.
 
+### Development quality checks
+
+Run the project quality gate with:
+
+```bash
+mix quality
+```
+
+It compiles with warnings as errors, runs Dialyzer, and runs Credo's warning-level checks. Use
+`mix credo --strict` when auditing the existing readability and refactoring backlog.
+
 ## Quick start
 
 ### From a `.torrent` file

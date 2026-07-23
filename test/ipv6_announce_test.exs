@@ -43,7 +43,6 @@ defmodule IPv6AnnounceTest do
         {:ok, hosts} ->
           families = Enum.map(hosts, &elem(&1, 1)) |> Enum.uniq()
           assert :inet in families
-          assert length(hosts) >= 1
 
         {:error, :nxdomain} ->
           # Some CI environments lack localhost DNS; skip assertion.

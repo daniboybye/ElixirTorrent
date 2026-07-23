@@ -4,6 +4,11 @@ defmodule AllowedFast do
 
   @type set :: MapSet.t(Torrent.index())
 
+  # Elixir 1.20's MapSet implementation and published opaque :sets type disagree
+  # about the empty set's internal map representation. We only use MapSet's
+  # public API, so this is an analyzer false positive rather than an opacity leak.
+  @dialyzer {:no_opaque, set: 4}
+
   @spec count() :: non_neg_integer()
   def count, do: @k
 

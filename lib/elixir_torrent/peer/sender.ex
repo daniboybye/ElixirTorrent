@@ -13,7 +13,7 @@ defmodule Peer.Sender do
 
   defstruct [:socket, :buffer, :key, active: false]
 
-  @type socket :: :gen_tcp.socket() | UTP.Connection.socket_ref()
+  @type socket :: Peer.Transport.socket()
 
   @type t :: %__MODULE__{
           socket: socket(),
@@ -306,7 +306,8 @@ defmodule Peer.Sender do
     :ok
   end
 
-  @spec drain_inbound(t()) :: GenServer.reply()
+  @spec drain_inbound(t()) ::
+          {:noreply, t(), timeout()} | {:stop, {:shutdown, :protocol_error}, t()}
   # BEP 9 swarm metadata: Magnet.Connection deactivates Sender and reads via
   # socket_recv/3. uTP has no passive mode (setopts active:false is unsupported),
   # so the connection keeps delivering {:utp,...} to us while inactive. Buffer those

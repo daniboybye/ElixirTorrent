@@ -56,9 +56,6 @@ defmodule NAT.NATPMP do
     else
       {:error, _} = error ->
         error
-
-      :error ->
-        {:error, :timeout}
     end
   catch
     :exit, _ -> {:error, :timeout}
@@ -79,7 +76,8 @@ defmodule NAT.NATPMP do
 
   defp recv_udp(socket, timeout) do
     case :gen_udp.recv(socket, 0, timeout) do
-      {:ok, data} -> {:ok, data}
+      {:ok, {_ip, _port, data}} -> {:ok, data}
+      {:ok, {_ip, _port, _ancillary_data, data}} -> {:ok, data}
       error -> error
     end
   end

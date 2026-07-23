@@ -119,7 +119,7 @@ defmodule Magnet.Bootstrap do
       ((is_integer(info.metadata_size) and info.metadata_size > 0) or info.seeder? == true)
   end
 
-  @spec start_link(%Magnet{}) :: Supervisor.on_start()
+  @spec start_link(Magnet.t()) :: Supervisor.on_start()
   def start_link(%Magnet{} = magnet) do
     Supervisor.start_link(__MODULE__, magnet, name: via_name(magnet.hash))
   end

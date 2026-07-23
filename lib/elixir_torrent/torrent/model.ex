@@ -33,7 +33,8 @@ defmodule Torrent.Model do
   def downloaded?(hash),
     do: GenServer.call(via(hash), :downloaded?)
 
-  @spec get(Torrent.hash(), atom() | [atom()]) :: list(any())
+  @spec get(Torrent.hash(), atom()) :: any()
+  @spec get(Torrent.hash(), [atom()]) :: [any()]
   def get(hash, key),
     do: GenServer.call(via(hash), {:get, key})
 

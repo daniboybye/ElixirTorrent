@@ -15,7 +15,11 @@ defmodule ElixirTorrent.MixProject do
       source_url: source_url(),
       docs: docs(),
       deps: deps(),
-      escript: escript()
+      escript: escript(),
+      aliases: aliases(),
+      # Defensive and staged protocol branches intentionally retain fallback
+      # clauses that Dialyzer proves unreachable with today's implementations.
+      dialyzer: [flags: [:no_match]]
     ]
   end
 
@@ -37,6 +41,7 @@ defmodule ElixirTorrent.MixProject do
   defp deps do
     [
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:bento, "~> 1.0.0"},
       {:recon, "~> 2.5.6"},
       {:logger_file_backend, "~> 0.0.14"},
@@ -50,6 +55,10 @@ defmodule ElixirTorrent.MixProject do
 
   defp escript do
     [main_module: ElixirTorrent]
+  end
+
+  defp aliases do
+    [quality: ["compile --warnings-as-errors", "dialyzer", "credo --only warning"]]
   end
 
   @spec description() :: String.t()

@@ -223,7 +223,7 @@ defmodule Torrent.Swarm do
 
   @max_active_peers 60
 
-  @spec add(Torrent.hash(), Peer.id(), Peer.reserved(), port()) ::
+  @spec add(Torrent.hash(), Peer.id(), Peer.reserved(), Peer.Transport.socket()) ::
           DynamicSupervisor.on_start_child()
   def add(hash, id, reserved, socket) do
     if count(hash) >= @max_active_peers do

@@ -16,10 +16,8 @@ defmodule Peer.Transport do
   alias Peer.MSE
 
   @type mse_ciphers :: %{recv: MSE.cipher(), send: MSE.cipher()}
-  @type socket ::
-          :gen_tcp.socket()
-          | UTP.Connection.socket_ref()
-          | {:mse, :gen_tcp.socket() | UTP.Connection.socket_ref(), mse_ciphers()}
+  @type base_socket :: :gen_tcp.socket() | UTP.Connection.socket_ref()
+  @type socket :: base_socket() | {:mse, base_socket(), mse_ciphers()}
 
   @spec connect(:inet.ip_address(), :inet.port_number(), keyword(), timeout()) ::
           {:ok, socket()} | {:error, term()}
@@ -34,7 +32,7 @@ defmodule Peer.Transport do
   end
 
   @doc "Wrap an inner socket with MSE RC4 ciphers negotiated by the handshake."
-  @spec wrap(term(), mse_ciphers()) :: socket()
+  @spec wrap(base_socket(), mse_ciphers()) :: socket()
   def wrap(inner, %{recv: _, send: _} = ciphers), do: {:mse, inner, ciphers}
 
   @doc "The underlying transport socket (the inner one for MSE, else the socket)."

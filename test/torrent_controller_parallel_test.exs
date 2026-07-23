@@ -188,14 +188,15 @@ defmodule TorrentControllerParallelTest do
 
     deadline = System.monotonic_time(:millisecond) + duration_ms
 
-    Stream.repeatedly(fn ->
-      send(controller_pid, :reconcile_pump)
-      send(controller_pid, {:next_piece, :rare})
-      Process.sleep(250)
-    end)
-    |> Enum.take_while(fn _ ->
-      System.monotonic_time(:millisecond) < deadline
-    end)
+    _ =
+      Stream.repeatedly(fn ->
+        send(controller_pid, :reconcile_pump)
+        send(controller_pid, {:next_piece, :rare})
+        Process.sleep(250)
+      end)
+      |> Enum.take_while(fn _ ->
+        System.monotonic_time(:millisecond) < deadline
+      end)
 
     :ok
   end

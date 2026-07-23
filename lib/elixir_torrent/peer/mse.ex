@@ -30,7 +30,7 @@ defmodule Peer.MSE do
   @crypto_rc4 0x02
 
   @type keypair :: %{private: binary(), public: binary()}
-  @type cipher :: reference()
+  @type cipher :: :crypto.crypto_state()
 
   @doc "The verification constant (8 zero bytes)."
   @spec vc() :: binary()
