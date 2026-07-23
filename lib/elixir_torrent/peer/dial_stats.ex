@@ -45,6 +45,11 @@ defmodule Peer.DialStats do
   @throttle_rate_num 3
   @throttle_rate_den 100
 
+  # When v6's measured success rate is at least this many times v4's, the dial
+  # batcher may bias toward v6 outside the critical tier (still keeps a v4 probe).
+  @prefer_ratio_num 2
+  @prefer_ratio_den 1
+
   # Counts decay toward zero so the rate reflects the last several minutes and both
   # stale successes and stale failures age out. We decay *gently* — multiply by
   # @decay_num/@decay_den (7/8) each minute, a ~5 min half-life — rather than the
@@ -107,6 +112,31 @@ defmodule Peer.DialStats do
   @spec throttle_worthy?(Torrent.hash(), :inet | :inet6) :: boolean()
   def throttle_worthy?(hash, family) when family in [:inet, :inet6] do
     enabled?() and wasteful_rate?(counts(hash, family))
+  end
+
+  @doc """
+  Is IPv6 outbound clearly outperforming IPv4 for this torrent?
+
+  True when both families have a meaningful recent sample (`>= @min_sample`)
+  and v6's measured success rate is at least `@prefer_ratio_num`× v4's. The
+  batcher uses this outside the critical tier to fill ~75% v6 / ~25% v4 instead
+  of a family-neutral 50/50 split — without starving v4 entirely (it still gets
+  at least a probe-sized slice). Config-gated like `throttle_worthy?/2`.
+  """
+  @spec prefer_inet6?(Torrent.hash()) :: boolean()
+  def prefer_inet6?(hash) do
+    enabled?() and prefer_inet6_rate?(counts(hash, :inet), counts(hash, :inet6))
+  end
+
+  # Integer form of `rate_v6 >= @prefer_ratio * rate_v4` with both totals >= @min_sample.
+  @spec prefer_inet6_rate?({non_neg_integer(), non_neg_integer()}, {non_neg_integer(), non_neg_integer()}) ::
+          boolean()
+  defp prefer_inet6_rate?({ok4, fail4}, {ok6, fail6}) do
+    total4 = ok4 + fail4
+    total6 = ok6 + fail6
+
+    total4 >= @min_sample and total6 >= @min_sample and
+      ok6 * total4 * @prefer_ratio_den >= @prefer_ratio_num * ok4 * total6
   end
 
   # Integer form of `total >= @min_sample and ok / total <= @throttle_rate`.

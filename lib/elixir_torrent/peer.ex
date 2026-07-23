@@ -1,6 +1,8 @@
 defmodule Peer do
   @enforce_keys [:ip, :port]
-  defstruct [:ip, :port, id: nil]
+  # `seed` is set from BEP 11 PEX `added.f` / `added6.f` (bit 0x02) when ingesting
+  # peers for dial; nil means no PEX seed hint (tracker/DHT/LSD sources).
+  defstruct [:ip, :port, id: nil, seed: nil]
 
   @moduledoc """
   Recommend Peer controls a :gen_tcp.socket 
@@ -47,7 +49,8 @@ defmodule Peer do
   @type t :: %__MODULE__{
           ip: ip(),
           port: :inet.port_number(),
-          id: id() | nil
+          id: id() | nil,
+          seed: boolean() | nil
         }
 
   defp vm(hash, id), do: via(make_key(hash, id))

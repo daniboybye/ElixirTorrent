@@ -15,7 +15,12 @@ defmodule Acceptor.Connection.Handler do
   def init(_) do
     with {:ok, socket} <- open_listen_socket({:stop, :no_free_port}) do
       {:ok, port} = :inet.port(socket)
-      Logger.info("[acceptor] listening proto=tcp port=#{port}")
+      %{inet: ip4, inet6_all: v6_all} = Acceptor.all_global_ips()
+
+      Logger.info(
+        "[acceptor] listening proto=tcp port=#{port} ipv4=#{if ip4, do: Acceptor.format_ip(ip4), else: "none"} ipv6_all=#{Enum.map(v6_all, &Acceptor.format_ip/1) |> Enum.join(",")} dual_stack=#{v6_all != []}"
+      )
+
       {:ok, _} = Task.start_link(fn -> loop(socket) end)
       {:ok, socket}
     end
