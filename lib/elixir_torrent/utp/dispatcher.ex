@@ -32,7 +32,17 @@ defmodule UTP.Dispatcher do
 
   @spec unregister(0..65535, :inet.ip_address(), :inet.port_number()) :: :ok
   def unregister(conn_id, ip, port) do
-    true = :ets.delete(@table, conn_key(ip, port, conn_id))
+    # OTP app stop races are expected: UTP.Dispatcher (and its named ETS table) can
+    # disappear between an existence check and :ets.delete/2 when lingering
+    # UTP.Connection processes shut down on :close.
+    try do
+      if :ets.info(@table) != :undefined do
+        :ets.delete(@table, conn_key(ip, port, conn_id))
+      end
+    rescue
+      ArgumentError -> :ok
+    end
+
     :ok
   end
 

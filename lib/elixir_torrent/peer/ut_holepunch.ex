@@ -227,16 +227,66 @@ defmodule Peer.UtHolepunch do
            encode_connect(init_ip, init_port),
          connect_to_target when is_binary(connect_to_target) <-
            encode_connect(target_ip, target_port) do
-      :ok = send_to_peer(initiator_key, state.ltep, connect_to_initiator)
-      :ok = send_to_peer(target_key, target_ltep, connect_to_target)
+      # BEP 55 relay sends connect hints to two peers; either may drop mid-relay
+      # (Endpoints still registered briefly while Sender/uTP is shutting down).
+      case relay_connect_sends(
+             hash,
+             {target_ip, target_port},
+             {init_ip, init_port},
+             initiator_key,
+             state.ltep,
+             connect_to_initiator,
+             target_key,
+             target_ltep,
+             connect_to_target
+           ) do
+        :ok ->
+          Logger.info(
+            "[holepunch] rendezvous_relay hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} initiator=#{inspect({init_ip, init_port})}"
+          )
 
-      Logger.info(
-        "[holepunch] rendezvous_relay hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} initiator=#{inspect({init_ip, init_port})}"
-      )
+          state
 
-      state
+        {:error, reason} ->
+          Logger.debug(
+            "[holepunch] relay_send_failed hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} reason=#{inspect(reason)}"
+          )
+
+          state
+      end
     else
       _ -> state
+    end
+  end
+
+  @spec relay_connect_sends(
+          Torrent.hash(),
+          {:inet.ip_address(), :inet.port_number()},
+          {:inet.ip_address(), :inet.port_number()},
+          Peer.key(),
+          Session.t(),
+          binary(),
+          Peer.key(),
+          Session.t(),
+          binary()
+        ) :: :ok | {:error, term()}
+  defp relay_connect_sends(
+         _hash,
+         _target,
+         _initiator,
+         initiator_key,
+         initiator_ltep,
+         connect_to_initiator,
+         target_key,
+         target_ltep,
+         connect_to_target
+       ) do
+    with :ok <- send_to_peer(initiator_key, initiator_ltep, connect_to_initiator),
+         :ok <- send_to_peer(target_key, target_ltep, connect_to_target) do
+      :ok
+    else
+      {:error, _} = err -> err
+      other -> {:error, other}
     end
   end
 
@@ -251,8 +301,15 @@ defmodule Peer.UtHolepunch do
     initiator_key = Peer.Controller.State.key(state)
 
     case encode(:error, target_ip, target_port, err_code: code) do
-      bin when is_binary(bin) -> send_to_peer(initiator_key, state.ltep, bin)
-      _ -> :ok
+      bin when is_binary(bin) ->
+        case send_to_peer(initiator_key, state.ltep, bin) do
+          :ok -> :ok
+          {:error, reason} -> {:error, reason}
+          other -> {:error, other}
+        end
+
+      _ ->
+        :ok
     end
 
     Logger.debug(
@@ -284,7 +341,7 @@ defmodule Peer.UtHolepunch do
     end
   end
 
-  @spec send_to_peer(Peer.key(), Session.t(), binary()) :: :ok
+  @spec send_to_peer(Peer.key(), Session.t(), binary()) :: :ok | {:error, term()}
   defp send_to_peer(key, ltep, payload) do
     case Session.peer_extension_id(ltep, @extension_name) do
       id when is_integer(id) and id > 0 ->
@@ -298,7 +355,7 @@ defmodule Peer.UtHolepunch do
   @spec peer_endpoint(Peer.Transport.socket()) ::
           {:ok, {:inet.ip_address(), :inet.port_number()}} | :error
   defp peer_endpoint(socket) do
-    case Peer.Transport.peername(socket) do
+    case Peer.Transport.safe_peername(socket) do
       {:ok, endpoint} -> {:ok, endpoint}
       _ -> :error
     end

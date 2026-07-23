@@ -62,6 +62,47 @@ defmodule Peer.Transport do
   def recv({:utp, _} = socket, len, timeout), do: UTP.Socket.recv(socket, len, timeout)
   def recv(socket, len, timeout) when is_port(socket), do: :gen_tcp.recv(socket, len, timeout)
 
+  @doc """
+  Like `recv/3`, but never raises when the transport owner exits during the read
+  (uTP shutdown, peer disconnect). Maps clean exits to `{:error, :closed}`.
+  """
+  @spec safe_recv(term(), non_neg_integer(), timeout()) :: {:ok, binary()} | {:error, term()}
+  def safe_recv(socket, len, timeout) do
+    recv(socket, len, timeout)
+  catch
+    :exit, reason -> {:error, peer_exit_reason(reason)}
+  end
+
+  @doc """
+  Like `send/2`, but never raises when the transport owner exits mid-send
+  (uTP connection torn down, peer disconnect under churn/CGNAT).
+  """
+  @spec safe_send(socket(), iodata()) :: :ok | {:error, term()}
+  def safe_send(socket, data) do
+    send(socket, data)
+  catch
+    :exit, reason -> {:error, peer_exit_reason(reason)}
+  end
+
+  @doc """
+  Like `peername/1`, but never raises when the uTP connection GenServer is gone.
+  """
+  @spec safe_peername(socket()) ::
+          {:ok, {:inet.ip_address(), :inet.port_number()}} | {:error, term()}
+  def safe_peername(socket) do
+    peername(socket)
+  catch
+    :exit, reason -> {:error, peer_exit_reason(reason)}
+  end
+
+  @doc false
+  @spec peer_exit_reason(term()) :: term()
+  def peer_exit_reason(:normal), do: :closed
+  def peer_exit_reason({:normal, _}), do: :closed
+  def peer_exit_reason({:shutdown, _}), do: :closed
+  def peer_exit_reason({:noproc, _}), do: :closed
+  def peer_exit_reason(other), do: other
+
   @spec decrypt_inbound(socket(), binary()) :: binary()
   def decrypt_inbound({:mse, _inner, ciphers}, data), do: MSE.crypt(ciphers.recv, data)
   def decrypt_inbound(_socket, data), do: data

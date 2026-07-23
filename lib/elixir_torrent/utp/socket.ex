@@ -28,6 +28,10 @@ defmodule UTP.Socket do
     UTP.Connection.activate({:utp, pid})
   end
 
+  def setopts({:utp, pid}, active: false) do
+    UTP.Connection.deactivate({:utp, pid})
+  end
+
   def setopts({:utp, _}, opts) do
     {:error, {:unsupported_opts, opts}}
   end

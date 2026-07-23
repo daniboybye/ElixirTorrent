@@ -39,6 +39,7 @@ defmodule NAT.Stun do
   @type mapping :: :endpoint_independent | :endpoint_dependent | :unknown
 
   @mapping_key {__MODULE__, :mapping}
+  @reflexives_key {__MODULE__, :reflexives}
 
   @doc """
   The last classified NAT mapping behaviour, or `:unknown` before detection.
@@ -54,6 +55,21 @@ defmodule NAT.Stun do
   @spec put_mapping(mapping()) :: :ok
   def put_mapping(mapping) when mapping in [:endpoint_independent, :endpoint_dependent, :unknown] do
     :persistent_term.put(@mapping_key, mapping)
+  end
+
+  @doc """
+  Server-reflexive `{ip, port}` observations from the last STUN detect. Used
+  by the self-endpoint filter so peers whose (ip, port) matches our external
+  view of ourselves — e.g. a peer picked up from a tracker/DHT that is us —
+  are rejected before we bother dialing.
+  """
+  @spec reflexives() :: [reflexive()]
+  def reflexives, do: :persistent_term.get(@reflexives_key, [])
+
+  @doc false
+  @spec put_reflexives([reflexive()]) :: :ok
+  def put_reflexives(reflexives) when is_list(reflexives) do
+    :persistent_term.put(@reflexives_key, Enum.uniq(reflexives))
   end
 
   @doc """

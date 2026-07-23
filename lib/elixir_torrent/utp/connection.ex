@@ -81,18 +81,33 @@ defmodule UTP.Connection do
   end
 
   @spec send_raw(socket_ref(), iodata()) :: :ok | {:error, term()}
-  def send_raw({:utp, pid}, data), do: GenServer.call(pid, {:send, data}, 60_000)
+  def send_raw({:utp, pid}, data) do
+    GenServer.call(pid, {:send, data}, 60_000)
+  catch
+    :exit, reason -> {:error, Peer.Transport.peer_exit_reason(reason)}
+  end
 
   @spec recv_raw(socket_ref(), non_neg_integer(), timeout()) :: {:ok, binary()} | {:error, term()}
-  def recv_raw({:utp, pid}, len, timeout),
-    do: GenServer.call(pid, {:recv, len, timeout}, timeout + 5_000)
+  def recv_raw({:utp, pid}, len, timeout) do
+    GenServer.call(pid, {:recv, len, timeout}, timeout + 5_000)
+  catch
+    :exit, reason -> {:error, Peer.Transport.peer_exit_reason(reason)}
+  end
 
   @spec activate(socket_ref()) :: :ok | {:error, term()}
   def activate({:utp, pid}), do: GenServer.call(pid, :activate, 5_000)
 
   @doc false
+  @spec deactivate(socket_ref()) :: :ok | {:error, term()}
+  def deactivate({:utp, pid}), do: GenServer.call(pid, :deactivate, 5_000)
+
+  @doc false
   @spec take_recv_buffer(socket_ref()) :: binary()
-  def take_recv_buffer({:utp, pid}), do: GenServer.call(pid, :take_recv_buffer, 5_000)
+  def take_recv_buffer({:utp, pid}) do
+    GenServer.call(pid, :take_recv_buffer, 5_000)
+  catch
+    :exit, _ -> <<>>
+  end
 
   @spec controlling_process(socket_ref(), pid()) :: :ok | {:error, term()}
   def controlling_process({:utp, pid}, owner),
@@ -102,7 +117,11 @@ defmodule UTP.Connection do
   def close({:utp, pid}), do: GenServer.cast(pid, :close)
 
   @spec peername(socket_ref()) :: {:ok, {:inet.ip_address(), :inet.port_number()}} | {:error, term()}
-  def peername({:utp, pid}), do: GenServer.call(pid, :peername)
+  def peername({:utp, pid}) do
+    GenServer.call(pid, :peername)
+  catch
+    :exit, reason -> {:error, Peer.Transport.peer_exit_reason(reason)}
+  end
 
   @spec await_connected(socket_ref(), timeout()) :: :ok | {:error, term()}
   def await_connected({:utp, pid}, timeout \\ 5_000) do
@@ -186,6 +205,12 @@ defmodule UTP.Connection do
   end
 
   def handle_call(:activate, _from, state), do: {:reply, :ok, state}
+
+  def handle_call(:deactivate, _from, %{active: true} = state) do
+    {:reply, :ok, %{state | active: false}}
+  end
+
+  def handle_call(:deactivate, _from, state), do: {:reply, :ok, state}
 
   def handle_call(:take_recv_buffer, _from, state) do
     {buffer, state} = {state.recv_buffer, %{state | recv_buffer: <<>>}}
