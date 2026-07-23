@@ -1,3 +1,23 @@
+defmodule PeerDiscoveryDualSwarmDHTStub do
+  @moduledoc false
+
+  def get_peers(hash) do
+    test_pid = Process.whereis(__MODULE__)
+    send(test_pid, {:dual_swarm_get_peers, self(), hash})
+
+    receive do
+      {:dual_swarm_reply, ^hash, peers} -> {:ok, peers}
+    after
+      5_000 -> {:error, :timeout}
+    end
+  end
+
+  def announce(hash, _port) do
+    send(Process.whereis(__MODULE__), {:dual_swarm_announce, hash})
+    :ok
+  end
+end
+
 defmodule PeerDiscoveryAnnounceTest do
   use ExUnit.Case, async: false
 
@@ -66,11 +86,12 @@ defmodule PeerDiscoveryAnnounceTest do
 
   test "dispatch_task_message stores dht get_peers success without raising" do
     ref = make_ref()
+    hash = <<9::160>>
     peers = [%Peer{ip: {88, 230, 64, 159}, port: 20_959}]
 
     state =
       base_state(
-        requests: %{ref => :dht},
+        requests: %{ref => {:dht, hash}},
         dht_peers: []
       )
 
@@ -79,6 +100,114 @@ defmodule PeerDiscoveryAnnounceTest do
     assert new_state.dht_peers == peers
     assert new_state.requests == %{}
     assert Announce.peer_list(new_state) == peers
+  end
+
+  test "dual DHT results merge into one torrent peer set after both lookups finish" do
+    v1 = <<1::160>>
+    v2 = <<2::160>>
+    ref1 = make_ref()
+    ref2 = make_ref()
+    p1 = %Peer{ip: {198, 51, 100, 1}, port: 6881}
+    p2 = %Peer{ip: {2001, 0xDB8, 0, 0, 0, 0, 0, 2}, port: 6882}
+
+    state =
+      base_state(
+        hash: v1,
+        dht_hashes: [v1, v2],
+        requests: %{ref1 => {:dht, v1}, ref2 => {:dht, v2}}
+      )
+
+    partial = Announce.dispatch_task_message(state, {ref1, {:ok, [p1]}})
+    assert partial.dht_peers == []
+    assert partial.dht_round_peers == [p1]
+    assert Announce.peer_list(partial) == [p1]
+
+    complete = Announce.dispatch_task_message(partial, {ref2, {:ok, [p1, p2]}})
+    assert MapSet.new(complete.dht_peers) == MapSet.new([p1, p2])
+    assert complete.dht_round_peers == []
+    assert MapSet.new(Announce.peer_list(complete)) == MapSet.new([p1, p2])
+  end
+
+  test "dual DHT round retains successful peers when the other lookup fails" do
+    v1 = <<5::160>>
+    v2 = <<6::160>>
+    ref1 = make_ref()
+    ref2 = make_ref()
+    peer = %Peer{ip: {203, 0, 113, 6}, port: 6881}
+
+    state =
+      base_state(
+        hash: v1,
+        dht_hashes: [v1, v2],
+        requests: %{ref1 => {:dht, v1}, ref2 => {:dht, v2}}
+      )
+
+    partial = Announce.dispatch_task_message(state, {ref1, {:error, :timeout}})
+    assert partial.dht_peers == []
+    assert map_size(partial.requests) == 1
+
+    complete = Announce.dispatch_task_message(partial, {ref2, {:ok, [peer]}})
+    assert complete.requests == %{}
+    assert complete.dht_peers == [peer]
+    assert Announce.peer_list(complete) == [peer]
+  end
+
+  test "hybrid Announce queries and announces both DHT swarm identities" do
+    Process.register(self(), PeerDiscoveryDualSwarmDHTStub)
+
+    on_exit(fn ->
+      if Process.whereis(PeerDiscoveryDualSwarmDHTStub) == self() do
+        Process.unregister(PeerDiscoveryDualSwarmDHTStub)
+      end
+    end)
+
+    v1 = <<3::160>>
+    hash_v2 = :binary.copy(<<4>>, 32)
+    v2 = binary_part(hash_v2, 0, 20)
+    p1 = %Peer{ip: {198, 51, 100, 3}, port: 6881}
+    p2 = %Peer{ip: {2001, 0xDB8, 0, 0, 0, 0, 0, 4}, port: 6882}
+
+    torrent = %Torrent{
+      hash: v1,
+      hash_v2: hash_v2,
+      kind: :hybrid,
+      metadata: %{"info" => %{"name" => "dual-swarm"}},
+      left: 1000,
+      last_index: 0,
+      last_piece_length: 1000,
+      peer_status: :seed
+    }
+
+    {:ok, model_pid} = Torrent.Model.start_link(torrent)
+
+    {:ok, announce_pid} =
+      GenServer.start_link(
+        Announce,
+        [self(), torrent, [dht_module: PeerDiscoveryDualSwarmDHTStub]]
+      )
+
+    on_exit(fn ->
+      if Process.alive?(announce_pid), do: GenServer.stop(announce_pid, :normal, 1_000)
+      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+    end)
+
+    queries =
+      for _ <- 1..2 do
+        assert_receive {:dual_swarm_get_peers, task_pid, queried_hash}, 2_000
+        peers = if queried_hash == v1, do: [p1], else: [p2]
+        send(task_pid, {:dual_swarm_reply, queried_hash, peers})
+        queried_hash
+      end
+
+    assert MapSet.new(queries) == MapSet.new([v1, v2])
+    assert_receive {:dual_swarm_announce, announced1}, 2_000
+    assert_receive {:dual_swarm_announce, announced2}, 2_000
+    assert MapSet.new([announced1, announced2]) == MapSet.new([v1, v2])
+
+    state = :sys.get_state(announce_pid)
+    assert state.hash == v1
+    assert MapSet.new(state.dht_peers) == MapSet.new([p1, p2])
+    assert MapSet.new(Announce.peer_list(state)) == MapSet.new([p1, p2])
   end
 
   test "dispatch_task_message handles tracker errors without raising" do
@@ -280,7 +409,7 @@ defmodule PeerDiscoveryAnnounceTest do
 
   defp dht_pending?(requests) do
     Enum.any?(requests, fn
-      {_ref, :dht} -> true
+      {_ref, {:dht, _hash}} -> true
       _ -> false
     end)
   end

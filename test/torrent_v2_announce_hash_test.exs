@@ -22,6 +22,28 @@ defmodule Torrent.V2AnnounceHashTest do
     assert Torrent.select_announce_hash(:v2, @v1, nil) == {:error, :missing_v2_hash}
   end
 
+  test "selects discovery swarms without changing the primary torrent identity" do
+    truncated_v2 = binary_part(@v2, 0, 20)
+
+    assert Torrent.discovery_swarm_hashes(:v1, @v1, nil) == [@v1]
+    assert Torrent.discovery_swarm_hashes(:v2, truncated_v2, @v2) == [truncated_v2]
+    assert Torrent.discovery_swarm_hashes(:hybrid, @v1, @v2) == [@v1, truncated_v2]
+    assert Torrent.discovery_swarm_hashes(:hybrid, @v1, nil) == [@v1]
+
+    hybrid = %Torrent{
+      hash: @v1,
+      hash_v2: @v2,
+      kind: :hybrid,
+      metadata: %{},
+      left: 0,
+      last_index: 0,
+      last_piece_length: 1
+    }
+
+    assert Torrent.discovery_swarm_hashes(hybrid) == [@v1, truncated_v2]
+    assert Torrent.select_announce_hash(:hybrid, @v1, @v2) == {:ok, @v1}
+  end
+
   test "the selected pure-v2 hash reaches tracker and DHT wire encoders unchanged" do
     {:ok, hash} = Torrent.select_announce_hash(:v2, nil, @v2)
 

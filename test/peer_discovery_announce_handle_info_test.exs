@@ -58,7 +58,7 @@ defmodule PeerDiscoveryAnnounceHandleInfoTest do
     peers = [%Peer{ip: {8, 8, 8, 8}, port: 6881}]
 
     :sys.replace_state(pid, fn state ->
-      %{state | requests: %{ref => :dht}, dht_peers: []}
+      %{state | requests: %{ref => {:dht, state.hash}}, dht_peers: []}
     end)
 
     send(pid, {ref, {:ok, peers}})
@@ -144,11 +144,11 @@ defmodule PeerDiscoveryAnnounceHandleInfoTest do
     state = %Announce{
       torrent_pid: self(),
       hash: <<0::160>>,
-      requests: %{ref => :dht}
+      requests: %{ref => {:dht, <<0::160>>}}
     }
 
     {meta, new_state} = Announce.pop_request(state, ref)
-    assert meta == :dht
+    assert meta == {:dht, <<0::160>>}
     assert new_state.requests == %{}
   end
 end
