@@ -42,11 +42,24 @@ defmodule TorrentV2DetectionTest do
   end
 
   # A hybrid info dict — v1 fields + `meta version = 2` + a minimal
-  # `file tree` entry. We do not fill the merkle tree fields; detection
-  # only depends on the two markers.
+  # single-piece `file tree` entry. Its piece layer is represented directly
+  # by the root and therefore omitted from the top-level metadata.
   defp hybrid_info_blob(name \\ "hello") do
     pieces = :binary.copy(<<0>>, 20)
-    file_tree_leaf = IO.iodata_to_binary(["d", bstr(""), "d", bstr("length"), bint(42), "e", "e"])
+
+    file_tree_leaf =
+      IO.iodata_to_binary([
+        "d",
+        bstr(""),
+        "d",
+        bstr("length"),
+        bint(42),
+        bstr("pieces root"),
+        bstr(:binary.copy(<<1>>, 32)),
+        "e",
+        "e"
+      ])
+
     file_tree = IO.iodata_to_binary(["d", bstr(name), file_tree_leaf, "e"])
 
     IO.iodata_to_binary([
@@ -99,13 +112,17 @@ defmodule TorrentV2DetectionTest do
     ])
   end
 
-  defp wrap_torrent(info_blob) do
+  defp wrap_torrent(info_blob, piece_layers \\ nil) do
+    piece_layers_entry =
+      if is_binary(piece_layers), do: [bstr("piece layers"), piece_layers], else: []
+
     IO.iodata_to_binary([
       "d",
       bstr("announce"),
       bstr("http://tracker.example.com/announce"),
       bstr("info"),
       info_blob,
+      piece_layers_entry,
       "e"
     ])
   end
@@ -141,21 +158,42 @@ defmodule TorrentV2DetectionTest do
       assert torrent.kind == :v1
       assert torrent.hash == :crypto.hash(:sha, info_blob)
       assert is_nil(torrent.hash_v2)
+      assert is_nil(torrent.merkle)
       assert torrent.info_blob == info_blob
     end
 
     test "hybrid → kind :hybrid, hash_v2 = SHA-256(info_blob), v1 hash still set" do
       info_blob = hybrid_info_blob()
-      path = write_tmp!(wrap_torrent(info_blob))
+      path = write_tmp!(wrap_torrent(info_blob, "de"))
       torrent = Torrent.parse_file!(path)
 
       assert torrent.kind == :hybrid
       assert torrent.hash == :crypto.hash(:sha, info_blob)
       assert torrent.hash_v2 == :crypto.hash(:sha256, info_blob)
       assert byte_size(torrent.hash_v2) == 32
+      assert torrent.merkle.piece_length == 16_384
+
+      assert torrent.merkle.files == [
+               %{
+                 path: ["hello"],
+                 length: 42,
+                 pieces_root: :binary.copy(<<1>>, 32),
+                 piece_hashes: [:binary.copy(<<1>>, 32)]
+               }
+             ]
+
       # v1 fields still populated so the v1 downloader keeps working end-to-end.
       assert torrent.metadata["info"]["pieces"]
       assert torrent.last_piece_length == 42
+    end
+
+    test "libtorrent hybrid fixture populates validated per-file piece hashes" do
+      path = Path.join([__DIR__, "fixtures", "libtorrent_v2_multipiece_file.torrent"])
+      torrent = Torrent.parse_file!(path)
+
+      assert torrent.kind == :hybrid
+      assert [%{path: ["test1MB"], piece_hashes: hashes}] = torrent.merkle.files
+      assert length(hashes) == 16
     end
 
     test "pure v2 → raises with a clear \"not yet supported\" message" do

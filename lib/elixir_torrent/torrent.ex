@@ -28,6 +28,7 @@ defmodule Torrent do
     :download_dir,
     :info_blob,
     :hash_v2,
+    :merkle,
     bitfield: nil,
     peer_status: nil,
     uploaded: 0,
@@ -68,6 +69,8 @@ defmodule Torrent do
           # info_blob for hybrid and v2. Kept alongside the v1 SHA-1 `hash`
           # (which stays the wire/tracker/DHT identifier throughout).
           hash_v2: hash_v2() | nil,
+          # Parsed and root-validated BEP 52 per-file piece hashes. Nil for v1.
+          merkle: Torrent.Merkle.metadata_context() | nil,
           # BEP 52 § Compatibility — :v1 = no `meta version`; :hybrid = v1 +
           # v2 fields in same info dict; :v2 = only v2 (pure BEP 52).
           kind: kind()
@@ -245,6 +248,7 @@ defmodule Torrent do
               "missing v1 `pieces` field. Hybrid v1+v2 torrents load normally."
     end
 
+    merkle = merkle_for(kind, metadata)
     bytes = all_bytes_in_torrent(metadata)
 
     last_index =
@@ -256,6 +260,7 @@ defmodule Torrent do
     %__MODULE__{
       hash: :crypto.hash(:sha, info_blob),
       hash_v2: hash_v2_for(kind, info_blob),
+      merkle: merkle,
       kind: kind,
       left: bytes,
       last_piece_length: bytes - last_index * metadata["info"]["piece length"],
@@ -292,6 +297,19 @@ defmodule Torrent do
   @spec hash_v2_for(kind(), binary()) :: hash_v2() | nil
   defp hash_v2_for(:v1, _blob), do: nil
   defp hash_v2_for(_kind, blob), do: :crypto.hash(:sha256, blob)
+
+  @spec merkle_for(kind(), map()) :: Torrent.Merkle.metadata_context() | nil
+  defp merkle_for(:v1, _metadata), do: nil
+
+  defp merkle_for(_kind, metadata) do
+    case Torrent.Merkle.parse_metadata(metadata) do
+      {:ok, context} ->
+        context
+
+      {:error, reason} ->
+        raise ArgumentError, "invalid BitTorrent v2 merkle metadata: #{inspect(reason)}"
+    end
+  end
 
   @doc """
   Returns whether a torrent disables DHT peer discovery (BEP 27 de-facto `private` flag).

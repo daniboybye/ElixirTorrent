@@ -38,8 +38,8 @@ defmodule Torrent.FileHandle.Store do
     # purely for graceful teardown.
     Process.flag(:trap_exit, true)
 
-    [metadata, last_index, last_piece_length, download_dir] =
-      Model.get(hash, [:metadata, :last_index, :last_piece_length, :download_dir])
+    [metadata, last_index, last_piece_length, download_dir, merkle] =
+      Model.get(hash, [:metadata, :last_index, :last_piece_length, :download_dir, :merkle])
 
     download_dir = download_dir || File.cwd!()
 
@@ -48,6 +48,9 @@ defmodule Torrent.FileHandle.Store do
       # normal piece length; the final piece uses last_piece_length
       piece_length: metadata["info"]["piece length"],
       pieces_hash: metadata["info"]["pieces"],
+      # BEP 52 per-file roots and piece-layer hashes. Phase 5 will consume
+      # this independently from the existing v1 SHA-1 `pieces_hash` path.
+      v2_merkle: merkle,
       last_index: last_index,
       last_piece_length: last_piece_length
     }
