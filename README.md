@@ -42,6 +42,8 @@ Requires **Elixir 1.20+**.
 
 ## Quick start
 
+### From a `.torrent` file
+
 ```elixir
 Application.ensure_all_started(:elixir_torrent)
 
@@ -62,6 +64,27 @@ files = ElixirTorrent.list_files(hash)
 
 Poll `stats/2` while the download runs. When you are done monitoring, call
 `stop_and_serialize/1` (see below) or `remove/2` to drop the torrent from the active session.
+
+### From a magnet link
+
+```elixir
+{:ok, pid} =
+  ElixirTorrent.download_magnet(
+    "magnet:?xt=urn:btih:…&tr=udp%3A%2F%2Ftracker.example.com%3A1337%2Fannounce"
+  )
+```
+
+The magnet flow:
+
+1. Parse the URI (`xt=urn:btih:`, `tr=`, optional `dn=`).
+2. Announce to `tr=` tracker URLs when present, and/or discover peers via **BEP 5 DHT** when enabled.
+3. Fetch the `info` dictionary from a peer via **BEP 9** (`ut_metadata`), negotiated with **BEP 10** (LTEP).
+4. Verify `SHA1(bencode(info))` matches the magnet hash.
+5. Write a temporary `.torrent` file and start a normal session via `download/1`.
+
+**Requirements:** at least one `tr=` tracker URL **or** DHT enabled (default on desktop). Trackerless magnets with DHT disabled return `{:error, :missing_trackers}`.
+
+Common errors: `:no_peers`, `:timeout`, `:metadata_unavailable`, `:info_hash_mismatch`.
 
 ## Session persistence
 
@@ -111,7 +134,7 @@ Full reference: [`hexdocs.pm/elixir_torrent/ElixirTorrent.html`](https://hexdocs
 | Function | Description |
 | --- | --- |
 | `download/2` | Start a download from a local `.torrent` path; optional `download_dir:` |
-| `download_magnet/1` | Start a download from a magnet URI (BEP 9 metadata exchange) |
+| `download_magnet/1` | Start from a magnet URI (metadata fetch + normal session); returns `{:ok, pid}` |
 | `stats/2` | Runtime stats map (`:name`, `:speed`, `:downloaded`, `:bytes_size`, …) |
 | `list/0` | Info hashes for all active torrent processes |
 | `list_files/1` | Per-file paths and download progress |
@@ -121,28 +144,75 @@ Full reference: [`hexdocs.pm/elixir_torrent/ElixirTorrent.html`](https://hexdocs
 | `get/2` | Low-level field access (prefer `stats/2`) |
 | `version/0` | Client peer ID prefix (`ET0-3-0`, BEP 20) |
 
-## Supported BEPs
+## Protocol support (BEPs)
 
-| BEP | Topic |
+Status meanings:
+
+| Status | Meaning |
 | --- | --- |
-| [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) | BitTorrent protocol |
-| [BEP 4](https://www.bittorrent.org/beps/bep_0004.html) | Known number allocations |
-| [BEP 5](https://www.bittorrent.org/beps/bep_0005.html) | Mainline DHT |
-| [BEP 6](https://www.bittorrent.org/beps/bep_0006.html) | Fast extension |
-| [BEP 7](https://www.bittorrent.org/beps/bep_0007.html) | IPv6 tracker extension |
-| [BEP 9](https://www.bittorrent.org/beps/bep_0009.html) | Extension for peers to send metadata files (ut_metadata) |
-| [BEP 10](https://www.bittorrent.org/beps/bep_0010.html) | Extension protocol (LTEP) |
-| [BEP 11](https://www.bittorrent.org/beps/bep_0011.html) | Peer exchange (ut_pex) |
-| [BEP 12](https://www.bittorrent.org/beps/bep_0012.html) | Multitracker metadata |
-| [BEP 15](https://www.bittorrent.org/beps/bep_0015.html) | UDP tracker protocol |
-| [BEP 20](https://www.bittorrent.org/beps/bep_0020.html) | Peer ID conventions |
-| [BEP 23](https://www.bittorrent.org/beps/bep_0023.html) | Compact peer lists |
-| [BEP 24](https://www.bittorrent.org/beps/bep_0024.html) | Tracker returns external IP |
-| [BEP 29](https://www.bittorrent.org/beps/bep_0029.html) | Micro Transport Protocol (uTP) |
-| [BEP 31](https://www.bittorrent.org/beps/bep_0031.html) | Failure retry extension |
-| [BEP 32](https://www.bittorrent.org/beps/bep_0032.html) | IPv6 extension for DHT |
-| [BEP 42](https://www.bittorrent.org/beps/bep_0042.html) | DHT IP address and port encoding |
-| [BEP 55](https://www.bittorrent.org/beps/bep_0055.html) | Hole punching (ut_holepunch) |
+| **Full** | Used in normal download and seeding paths |
+| **Partial** | Implemented for common cases; known gaps listed |
+| **Magnet only** | Implemented only for magnet metadata fetch, not general peer sessions |
+| **Not implemented** | Planned or acknowledged gap |
+
+| BEP | Topic | Status | Notes |
+| --- | --- | --- | --- |
+| [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) | BitTorrent peer protocol | **Full** | Handshake, choke/unchoke, request/cancel, bitfield, endgame |
+| [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) | HTTP tracker announce | **Full** | `compact=1`, events, stats fields |
+| [BEP 4](https://www.bittorrent.org/beps/bep_0004.html) | Known number allocations | **Full** | Message IDs and reserved bits as used |
+| [BEP 5](https://www.bittorrent.org/beps/bep_0005.html) | DHT | **Full** | KRPC over UDP (ping, find_node, get_peers, announce_peer), k-buckets, bootstrap routers, iterative lookup, token validation, BT PORT message + reserved bit; trackerless magnets when enabled; BEP 32 IPv6 routing tables + dedicated v6 socket; routing table persisted across restarts (node id + bucket contents) for fast rejoin |
+| [BEP 6](https://www.bittorrent.org/beps/bep_0006.html) | Fast extension | **Full** | `allowed_fast`, `suggest_piece`, reject on choked requests |
+| [BEP 7](https://www.bittorrent.org/beps/bep_0007.html) | IPv6 tracker extension | **Partial** | Parses `peers6`; HTTP/UDP announce over one IPv4 and one IPv6 source address each — not full multi-homed announce per listen address |
+| [BEP 9](https://www.bittorrent.org/beps/bep_0009.html) | Extension for Peers to Send Metadata Files | **Full** | Bencoded `ut_metadata` request/data/reject, 16 KiB pieces, multi-peer fetch, SHA-1 verification (magnet bootstrap); completed torrents serve metadata to magnet leechers |
+| [BEP 10](https://www.bittorrent.org/beps/bep_0010.html) | Extension Protocol | **Full** | Reusable LTEP layer (`Peer.LTEP`): reserved bit, extended message 20, handshake encode/decode/merge, per-peer `m` id mapping, extension registry; `ut_metadata` wired for magnet bootstrap and seed serving |
+| [BEP 11](https://www.bittorrent.org/beps/bep_0011.html) | Peer exchange (ut_pex) | **Full** | Encode/decode, ingest, and broadcast over LTEP |
+| [BEP 12](https://www.bittorrent.org/beps/bep_0012.html) | Multitracker metadata | **Full** | Preserves `announce-list` tier structure; sequential tier failover; promotes working tracker within tier |
+| [BEP 14](https://www.bittorrent.org/beps/bep_0014.html) | Local Service Discovery | **Full** | UDP multicast on 239.192.152.143:6771, `BT-SEARCH` broadcast every 5 min for active public torrents; IPv6 group deferred |
+| [BEP 15](https://www.bittorrent.org/beps/bep_0015.html) | UDP tracker protocol | **Full** | Connect, announce, scrape, error packets; connection_id cache; 15×2ⁿ s backoff; compact IPv4/IPv6 peers |
+| [BEP 16](https://www.bittorrent.org/beps/bep_0016.html) | Superseeding | **Not implemented** | Efficient initial-seed strategy; minimizes redundant uploads when first distributing a torrent |
+| [BEP 19](https://www.bittorrent.org/beps/bep_0019.html) | WebSeed — HTTP/FTP seeding (GetRight-style) | **Full** | `Torrent.WebSeed` per torrent when `metadata["url-list"]` is present; HTTP `Range` GETs feed the same verify/write path as a peer download; never races the peer swarm for a piece; BEP 17 (older httpseeds format) not planned |
+| [BEP 20](https://www.bittorrent.org/beps/bep_0020.html) | Peer ID conventions | **Full** | Prefix `ET0-3-0` |
+| [BEP 23](https://www.bittorrent.org/beps/bep_0023.html) | Compact peer lists | **Full** | Compact IPv4 peers; combined with BEP 7 for `peers6` |
+| [BEP 24](https://www.bittorrent.org/beps/bep_0024.html) | Tracker returns external IP | **Partial** | Decodes `external ip` from HTTP responses; not used for listen-address selection |
+| [BEP 29](https://www.bittorrent.org/beps/bep_0029.html) | Micro Transport Protocol (uTP) | **Full** | Packet stack with LEDBAT; TCP-first dial with uTP fallback; shared UDP socket with DHT |
+| [BEP 31](https://www.bittorrent.org/beps/bep_0031.html) | Failure retry extension | **Full** | Honors `retry in` on HTTP tracker failures (any failure reason) |
+| [BEP 32](https://www.bittorrent.org/beps/bep_0032.html) | IPv6 DHT extension | **Full** | Separate v4/v6 k-bucket routing tables; `nodes`/`nodes6` in find_node/get_peers replies with BEP 32 `want` filtering; dedicated global-IPv6 UDP socket for KRPC and uTP egress |
+| [BEP 42](https://www.bittorrent.org/beps/bep_0042.html) | DHT security extension (IP-derived node ID) | **Full** | CRC32C-bound node id prefix from the primary global IPv6 (falls back to random); Sybil/routing-poisoning mitigation |
+| [BEP 48](https://www.bittorrent.org/beps/bep_0048.html) | Tracker scrape convention | **Full** | `Tracker.scrape/2` for HTTP (BEP 48 `/scrape` URL derivation, bencoded `files` map) and UDP (BEP 15 scrape packet, prefer IPv6 host); periodic 5 min per-torrent scrape loop caches `{seeders, leechers, completed}` per tracker; dead-swarm URLs ({0, 0} within 20 min) skipped at announce time so a fully-dead tier falls through to the next tier |
+| [BEP 52](https://www.bittorrent.org/beps/bep_0052.html) | BitTorrent v2 (SHA-256 + merkle trees) | **Partial** | Phase 1/6: detects `:v1`/`:hybrid`/`:v2`, computes `hash_v2` and accepts hybrid `.torrent`s/magnets transparently (wire hash stays SHA-1), filters BEP 47 padding files from the listing. Pure-v2 torrents are rejected with a clear error, not crashed on — merkle verification (phases 2–5) isn't built yet |
+| [BEP 55](https://www.bittorrent.org/beps/bep_0055.html) | uTP hole punching (`ut_holepunch`) | **Full** | LTEP extension id 3; binary rendezvous/connect/error codec for IPv4 **and** IPv6; relay role sends `connect` to both endpoints or a typed error reply (`no_such_peer`/`not_connected`/`no_support`/`no_self`) to the initiator; uTP punch dial on `connect`; outbound trigger after direct dial failure for both families; per-target exponential backoff (30s/2m/8m, max 4/session); symmetric-NAT guard skips initiating when STUN classifies our mapping as endpoint-dependent |
+
+**Magnet URIs** are a de-facto convention (BitTorrent wiki), not a numbered BEP. We parse `xt=urn:btih:` (hex and base32), multiple `tr=`, and optional `dn=`.
+
+**De-facto tracker behaviour:** before metadata is known, magnet announces use `left=16384` (typical client convention, not a BEP requirement) so trackers return peers that support `ut_metadata`.
+
+**MSE/PE (Message Stream Encryption / Protocol Encryption)** — the Vuze de-facto spec, not a numbered BEP. **Full, bidirectional.** 768-bit MODP Diffie–Hellman key exchange, RC4 stream cipher, SHA-1 key derivation (all via OTP `:crypto`). Inbound connections auto-detect plaintext vs encrypted; outbound prefers the encrypted handshake and falls back to plaintext, honouring the peer's `crypto_select` (RC4 or plaintext) for the post-handshake stream. Interop-verified against Transmission, qBittorrent, and libtorrent. Provides ISP-throttling resistance and connectivity with encryption-only peers.
+
+## Recently completed (2026-07)
+
+- **Web seeds (BEP 19)** — HTTP/URL seeding as a third data source alongside peers and DHT, sharing the same piece-verify and write path as a normal download.
+- **Local Service Discovery (BEP 14)** — LAN peer discovery via UDP multicast, no tracker/DHT round-trip needed.
+- **BitTorrent v2 detection (BEP 52, phase 1/6)** — recognizes v1/hybrid/v2 torrents and magnets; hybrid torrents load transparently; pure-v2 rejected with a clear message pending the merkle-verify phases.
+- **DHT secure node ID (BEP 42)** — node id cryptographically bound to our own IP (Sybil/routing-poisoning mitigation).
+- **BEP 48 scrape-driven tracker health** — every torrent scrapes its trackers periodically for `{seeders, leechers}` and skips confirmed dead-swarm URLs at announce time, so a tier of dead trackers falls through to the next tier instead of firing a wasted parallel announce every 30 s while under swarm target.
+- **Magnet x.pe hand-off** — magnet-embedded fallback peers stay live candidates for the whole session instead of being dropped once metadata fetch completes.
+- **Mid-download session checkpoint** — bitfield + counters persisted every 30 s, so a crash resumes with a hash-check of only what's unconfirmed, not a full re-scan.
+- **MSE/PE encryption** (full bidirectional — see the note above).
+- **Measured per-family dial throttle** — de-prioritises the address family with proven-low outbound success (data-driven; under CGNAT+IPv6 that is IPv4 at ~1.3% vs IPv6 ~25%), without starving single-family swarms.
+- **Lazy piece storage** — piece read/write/verify processes start on demand and idle-terminate instead of one persistent process per piece, cutting process count and memory to a fraction (compact-state model like libtorrent/qBittorrent).
+- **DHT routing-table persistence** across restarts for fast rejoin.
+
+## Not yet implemented (roadmap)
+
+Work tracked for future releases:
+
+| Priority | Item | Why it matters |
+| --- | --- | --- |
+| Medium | **BEP 7 — full multi-homed announce** | Announce per local listen address (v4/v6), filter link-local/loopback, correct source-IP bind for HTTP and UDP |
+| Medium | **BEP 52 phases 2–6 — BitTorrent v2 merkle verify + pure-v2 download** | Reserved-bit signalling, merkle tree construction/verification, `hash_request`/`hashes`/`hash_reject` wire messages, pure-v2 end-to-end download |
+| Low | **BEP 16 — Superseeding** | Efficient initial-seed strategy; minimizes redundant uploads when first distributing a torrent |
+
+Full internal backlog and design rationale live in [`.claude/PLAN.md`](.claude/PLAN.md) and [`.claude/ARCHITECTURE.md`](.claude/ARCHITECTURE.md) (kept in sync with this table).
 
 ## CLI (escript)
 
@@ -153,5 +223,7 @@ mix escript.build
 ./elixir_torrent
 # then type: download /path/to/file.torrent
 ```
+
+The escript does not expose `download_magnet` in the interactive loop yet — use the API from your OTP application for magnet links.
 
 For production use, call the API from your OTP application instead.
