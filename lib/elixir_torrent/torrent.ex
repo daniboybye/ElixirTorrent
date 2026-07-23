@@ -70,8 +70,8 @@ defmodule Torrent do
           private?: boolean(),
           info_blob: binary() | nil,
           # BEP 52 § Info dictionary — nil for v1 torrents; SHA-256 of raw
-          # info_blob for hybrid and v2. Kept alongside the v1 SHA-1 `hash`
-          # (which stays the wire/tracker/DHT identifier throughout).
+          # info_blob for hybrid and v2. Hybrid keeps the v1 SHA-1 `hash` as
+          # its internal/handshake identity while discovery may use both.
           hash_v2: hash_v2() | nil,
           # Parsed and root-validated BEP 52 per-file piece hashes. Nil for v1.
           merkle: Torrent.Merkle.metadata_context() | nil,
@@ -253,7 +253,7 @@ defmodule Torrent do
   end
 
   @doc """
-  Returns the wire/tracker info-hash for a torrent kind.
+  Returns the primary wire/internal info-hash for a torrent kind.
 
   v1 and hybrid torrents use SHA-1(raw info). Pure-v2 torrents use the first 20
   bytes of SHA-256(raw info) per BEP 52; the full 32-byte digest is kept in
@@ -268,10 +268,12 @@ defmodule Torrent do
   end
 
   @doc """
-  Selects the single 20-byte swarm identifier used by trackers, DHT and peers.
+  Selects the primary 20-byte identity used by peers and internal torrent state.
 
-  Hybrid torrents deliberately stay in their v1 SHA-1 swarm. A pure-v2 torrent
-  has no v1 swarm and therefore uses the first 20 bytes of its SHA-256 info-hash.
+  Hybrid torrents retain their v1 SHA-1 identity so Registry, Model, Swarm and
+  peer handshakes are not split. Discovery can additionally use their truncated
+  v2 hash via `discovery_swarm_hashes/1`. Pure-v2 torrents use the first 20 bytes
+  of their SHA-256 info-hash.
   """
   @spec select_announce_hash(kind(), hash() | nil, hash_v2() | nil) ::
           {:ok, hash()} | {:error, :missing_v1_hash | :missing_v2_hash}
@@ -287,6 +289,30 @@ defmodule Torrent do
     do: {:error, :missing_v1_hash}
 
   def select_announce_hash(:v2, _hash_v1, _hash_v2), do: {:error, :missing_v2_hash}
+
+  @doc """
+  Returns the 20-byte swarm identities used only for tracker/DHT discovery.
+
+  BEP 52 hybrid torrents can join both their v1 and v2 swarms without changing
+  the v1 identity that keys their local torrent and peer processes.
+  """
+  @spec discovery_swarm_hashes(t()) :: [hash()]
+  def discovery_swarm_hashes(%__MODULE__{kind: kind, hash: hash, hash_v2: hash_v2}),
+    do: discovery_swarm_hashes(kind, hash, hash_v2)
+
+  @doc false
+  @spec discovery_swarm_hashes(kind(), hash() | nil, hash_v2() | nil) :: [hash()]
+  def discovery_swarm_hashes(:hybrid, hash, hash_v2)
+      when is_binary(hash) and byte_size(hash) == 20 and is_binary(hash_v2) and
+             byte_size(hash_v2) == 32 do
+    Enum.uniq([hash, binary_part(hash_v2, 0, 20)])
+  end
+
+  def discovery_swarm_hashes(kind, hash, _hash_v2)
+      when kind in [:v1, :hybrid, :v2] and is_binary(hash) and byte_size(hash) == 20,
+      do: [hash]
+
+  def discovery_swarm_hashes(kind, _hash, _hash_v2) when kind in [:v1, :hybrid, :v2], do: []
 
   @spec build_torrent_fields(kind(), map(), Torrent.Merkle.metadata_context() | nil, binary()) ::
           {:ok, keyword()} | {:error, term()}

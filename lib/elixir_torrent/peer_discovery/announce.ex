@@ -2,11 +2,14 @@ defmodule PeerDiscovery.Announce do
   @enforce_keys [:torrent_pid, :hash]
   defstruct torrent_pid: nil,
             hash: nil,
+            dht_hashes: [],
+            dht_module: DHT,
             tiers: [],
             tier_index: 0,
             requests: %{},
             peers: %{},
             dht_peers: [],
+            dht_round_peers: [],
             # BEP 9 § Magnet URI format — x.pe endpoints handed off from Magnet.Fetcher
             # via PeerDiscovery.SeedPeers. Merged into the peer pool alongside tracker
             # and DHT peers so magnet-supplied hints keep being tried across the whole
@@ -244,7 +247,9 @@ defmodule PeerDiscovery.Announce do
     :exit, _ -> :ok
   end
 
-  def init([pid, torrent]) do
+  def init([pid, torrent]), do: init([pid, torrent, []])
+
+  def init([pid, torrent, opts]) do
     Process.monitor(pid)
 
     tiers = extract_tiers(torrent.metadata)
@@ -254,6 +259,8 @@ defmodule PeerDiscovery.Announce do
     state = %__MODULE__{
       torrent_pid: pid,
       hash: torrent.hash,
+      dht_hashes: Torrent.discovery_swarm_hashes(torrent),
+      dht_module: Keyword.get(opts, :dht_module, DHT),
       tiers: tiers,
       private?: Torrent.private?(torrent),
       pex_snapshot: MapSet.new(),
@@ -419,13 +426,18 @@ defmodule PeerDiscovery.Announce do
             {:noreply, state}
 
           :ok ->
-            %Task{ref: ref} =
-              Task.Supervisor.async_nolink(Requests, DHT, :get_peers, [state.hash])
+            dht_module = state.dht_module
 
-            {:noreply,
-             state
-             |> put_in([Access.key!(:requests), ref], :dht)
-             |> Map.put(:last_dht_lookup_ms, now)}
+            state =
+              Enum.reduce(dht_hashes(state), %{state | dht_round_peers: []}, fn dht_hash,
+                                                                                acc ->
+                %Task{ref: ref} =
+                  Task.Supervisor.async_nolink(Requests, dht_module, :get_peers, [dht_hash])
+
+                put_in(acc, [Access.key!(:requests), ref], {:dht, dht_hash})
+              end)
+
+            {:noreply, %{state | last_dht_lookup_ms: now}}
         end
     end
   end
@@ -434,8 +446,10 @@ defmodule PeerDiscovery.Announce do
     {request, state} = pop_request(state, ref)
 
     case request do
-      :dht ->
-        {:noreply, apply_dht_peers(state, peer_list)}
+      {:dht, _dht_hash} ->
+        state = merge_dht_round_peers(state, peer_list)
+        maybe_handshake_dht_peers(state, peer_list)
+        {:noreply, maybe_finish_dht_round(state)}
 
       _ ->
         {:noreply, state}
@@ -472,12 +486,8 @@ defmodule PeerDiscovery.Announce do
     {request, state} = pop_request(state, ref)
 
     case request do
-      :dht ->
-        if dht_allowed?(state) do
-          send_after(self(), :dht_lookup, dht_retry_ms(state))
-        end
-
-        {:noreply, state}
+      {:dht, _dht_hash} ->
+        {:noreply, maybe_finish_dht_round(state)}
 
       nil ->
         {:noreply, state}
@@ -498,12 +508,8 @@ defmodule PeerDiscovery.Announce do
     {request, state} = pop_request(state, ref)
 
     case request do
-      :dht ->
-        if dht_allowed?(state) do
-          send_after(self(), :dht_lookup, dht_retry_ms(state))
-        end
-
-        {:noreply, state}
+      {:dht, _dht_hash} ->
+        {:noreply, maybe_finish_dht_round(state)}
 
       {_announce, tier_index, _tracker_index} ->
         {:noreply, dec_tier_batch(state, tier_index)}
@@ -876,7 +882,7 @@ defmodule PeerDiscovery.Announce do
     Model.update_event(state.hash)
 
     if dht_allowed?(state) do
-      _ignored = DHT.announce(state.hash, Acceptor.port())
+      announce_dht_hashes(state)
     end
 
     if Model.get(state.hash, :peer_status) != :seed do
@@ -1092,7 +1098,7 @@ defmodule PeerDiscovery.Announce do
   @spec dht_request_pending?(%__MODULE__{}) :: boolean()
   defp dht_request_pending?(%__MODULE__{requests: requests}) do
     Enum.any?(requests, fn
-      {_ref, :dht} -> true
+      {_ref, {:dht, _hash}} -> true
       _ -> false
     end)
   end
@@ -1334,6 +1340,7 @@ defmodule PeerDiscovery.Announce do
          hash: hash,
          peers: peers_map,
          dht_peers: dht_peers,
+         dht_round_peers: dht_round_peers,
          seed_peers: seed_peers
        }) do
     tracker_peers =
@@ -1344,7 +1351,7 @@ defmodule PeerDiscovery.Announce do
     listen_port = Acceptor.port()
 
     merged =
-      (tracker_peers ++ dht_peers ++ seed_peers)
+      (tracker_peers ++ dht_peers ++ dht_round_peers ++ seed_peers)
       |> Enum.uniq_by(&{&1.ip, &1.port})
       |> Enum.reject(&Acceptor.Connection.Handshakes.local_endpoint?(&1.ip, &1.port, listen_port))
 
@@ -1357,30 +1364,58 @@ defmodule PeerDiscovery.Announce do
     merged
   end
 
-  @spec apply_dht_peers(%__MODULE__{}, [Peer.t()]) :: %__MODULE__{}
-  defp apply_dht_peers(%__MODULE__{} = state, [] = _peers) do
+  @spec merge_dht_round_peers(%__MODULE__{}, [Peer.t()]) :: %__MODULE__{}
+  defp merge_dht_round_peers(%__MODULE__{dht_round_peers: existing} = state, peers) do
+    merged = Enum.uniq_by(existing ++ peers, &{&1.ip, &1.port})
+    %{state | dht_round_peers: merged}
+  end
+
+  @spec maybe_finish_dht_round(%__MODULE__{}) :: %__MODULE__{}
+  defp maybe_finish_dht_round(%__MODULE__{} = state) do
+    if dht_request_pending?(state), do: state, else: finish_dht_round(state)
+  end
+
+  @spec finish_dht_round(%__MODULE__{}) :: %__MODULE__{}
+  defp finish_dht_round(%__MODULE__{dht_round_peers: []} = state) do
     if dht_allowed?(state), do: send_after(self(), :dht_lookup, dht_retry_ms(state))
     state
   end
 
-  defp apply_dht_peers(%__MODULE__{hash: hash} = state, peers) do
+  defp finish_dht_round(%__MODULE__{hash: hash, dht_round_peers: peers} = state) do
     Logger.info(
       "dht get_peers ok hash=#{Torrent.hex_encoded_hash(hash)} peers=#{length(peers)} connected=#{Swarm.count(hash)}"
     )
 
-    state = %{state | dht_peers: Enum.uniq_by(peers, &{&1.ip, &1.port})}
+    state = %{state | dht_peers: peers, dht_round_peers: []}
 
     if dht_allowed?(state) do
-      _ignored = DHT.announce(hash, Acceptor.port())
-
-      if Model.get(hash, :peer_status) != :seed do
-        Acceptor.handshakes(state.dht_peers, hash)
-      end
-
+      announce_dht_hashes(state)
       send_after(self(), :dht_lookup, dht_retry_ms(state))
     end
 
     state
+  end
+
+  @spec maybe_handshake_dht_peers(%__MODULE__{}, [Peer.t()]) :: :ok
+  defp maybe_handshake_dht_peers(%__MODULE__{hash: hash} = state, peers) do
+    if peers != [] and dht_allowed?(state) and Model.get(hash, :peer_status) != :seed do
+      Acceptor.handshakes(peers, hash)
+    end
+
+    :ok
+  end
+
+  @spec dht_hashes(%__MODULE__{}) :: [Torrent.hash()]
+  defp dht_hashes(%__MODULE__{dht_hashes: [], hash: hash}), do: [hash]
+  defp dht_hashes(%__MODULE__{dht_hashes: hashes}), do: hashes
+
+  @spec announce_dht_hashes(%__MODULE__{}) :: :ok
+  defp announce_dht_hashes(%__MODULE__{dht_module: dht_module} = state) do
+    Enum.each(dht_hashes(state), fn hash ->
+      _ignored = dht_module.announce(hash, Acceptor.port())
+    end)
+
+    :ok
   end
 
   @spec bootstrap_torrent_nodes(map()) :: :ok
