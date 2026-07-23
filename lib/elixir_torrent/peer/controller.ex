@@ -246,6 +246,8 @@ defmodule Peer.Controller do
   Sends a correlated outbound BEP 52 hash request to a v2-capable peer.
 
   Returns `{:ok, ref}`; results arrive as `{:peer_hash_transfer, ref, result}`.
+  No production caller uses this yet; hybrid downloads deliberately keep their
+  established SHA-1 piece-verification path.
   """
   @spec request_hashes(Peer.key(), Peer.HashWire.t(), keyword()) ::
           {:ok, reference()} | {:error, term()}

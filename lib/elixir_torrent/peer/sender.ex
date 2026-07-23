@@ -10,6 +10,7 @@ defmodule Peer.Sender do
 
   @timeout 100_000
   @max_length Torrent.Downloads.piece_max_length()
+  @max_hash_header_message_size 1 + Peer.HashWire.header_size()
   @max_hashes_message_size Peer.HashWire.max_hashes_message_size()
 
   defstruct [:socket, :buffer, :key, active: false]
@@ -426,6 +427,10 @@ defmodule Peer.Sender do
   end
 
   @spec take_message(binary()) :: {:ok, binary(), binary()} | :incomplete | :protocol_error
+  defp take_message(<<len::32, id, _::binary>>)
+       when id in [21, 23] and len > @max_hash_header_message_size,
+       do: :protocol_error
+
   defp take_message(<<len::32, 22, _::binary>>) when len > @max_hashes_message_size,
     do: :protocol_error
 

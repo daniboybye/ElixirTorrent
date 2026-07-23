@@ -150,6 +150,10 @@ defmodule Peer do
   Returns `{:ok, ref}` immediately; the caller receives
   `{:peer_hash_transfer, ref, result}` when the peer answers or the request
   times out. Options: `:timeout` (default 30_000 ms).
+
+  The live hybrid download path intentionally keeps v1 SHA-1 piece
+  verification and does not call this function. It is reserved for a future
+  consumer such as optional v2 cross-validation or pure-v2 magnet bootstrap.
   """
   @spec request_hashes(pid(), Peer.HashWire.t(), keyword()) ::
           {:ok, reference()} | {:error, term()} | nil
