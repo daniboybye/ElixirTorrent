@@ -514,6 +514,180 @@ defmodule Torrent.Merkle do
     end
   end
 
+  @type stream_entry ::
+          {:file, file_context(), Path.t()}
+          | {:gap, pos_integer()}
+
+  @type piece_stream_layout :: %{
+          address_space_length: non_neg_integer(),
+          content_length: non_neg_integer(),
+          piece_count: non_neg_integer(),
+          piece_lengths: [pos_integer()],
+          # Cumulative end offsets in the global piece byte stream (same shape as
+          # Store.all_files). Gap entries are zero-filled alignment padding that
+          # never exist on disk — BEP 52 requires each file to start on a piece
+          # boundary in the concatenated stream.
+          all_files: [{non_neg_integer(), stream_entry()}],
+          # Per global piece index: which file (if any) owns verification.
+          piece_specs: [%{file: file_context(), file_piece_index: non_neg_integer()}]
+        }
+
+  @doc """
+  Builds the BEP 52 pure-v2 piece byte stream from root-validated file metadata.
+
+  Non-empty files are visited in sorted `file tree` order. Each file starts at
+  the next piece-aligned offset; trailing bytes in the file's last piece are
+  zero padding in the stream but not stored in the physical file. Empty files
+  are skipped entirely.
+  """
+  @spec piece_stream_layout(metadata_context()) :: {:ok, piece_stream_layout()} | {:error, term()}
+  def piece_stream_layout(%{piece_length: piece_length, files: files}) do
+    with {:ok, _layer} <- piece_layer_level(piece_length) do
+      {stream_end, all_files, piece_specs} = build_stream_layout(files, piece_length, 0, [], [])
+      piece_count = length(piece_specs)
+
+      # The alignment gap belongs to the piece address space, but peers only
+      # transfer the file-owned prefix of each file's final piece.
+      piece_lengths =
+        Enum.map(piece_specs, fn %{file: file, file_piece_index: index} ->
+          min(piece_length, file.length - index * piece_length)
+        end)
+
+      {:ok,
+       %{
+         address_space_length: stream_end,
+         content_length: Enum.reduce(files, 0, &(&1.length + &2)),
+         piece_count: piece_count,
+         piece_lengths: piece_lengths,
+         all_files: all_files,
+         piece_specs: piece_specs
+       }}
+    end
+  end
+
+  @doc """
+  Returns the expected 32-byte digest for one file-local piece index.
+  """
+  @spec expected_file_piece_hash(file_context(), pos_integer(), non_neg_integer()) ::
+          hash() | nil
+  def expected_file_piece_hash(%{piece_hashes: hashes, length: length}, piece_length, index) do
+    cond do
+      length == 0 -> nil
+      length <= piece_length and index == 0 -> hd(hashes)
+      index >= 0 and index < length(hashes) -> Enum.at(hashes, index)
+      true -> nil
+    end
+  end
+
+  @doc """
+  Hashes the file-owned portion of a downloaded global piece using BEP 52 rules.
+
+  `piece_bytes` is the full on-the-wire piece (file bytes at the start, then
+  alignment zeros). Leaf blocks hash short final blocks without zero-filling
+  the data; missing leaf slots inside the piece subtree use the 32-byte zero
+  hash, not the digest of a zero-filled block.
+  """
+  @spec hash_file_piece_bytes(
+          file_context(),
+          pos_integer(),
+          non_neg_integer(),
+          binary()
+        ) :: hash()
+  def hash_file_piece_bytes(file, piece_length, file_piece_index, piece_bytes)
+      when is_binary(piece_bytes) do
+    blocks_per_piece = div(piece_length, @block_size)
+    offset_in_file = file_piece_index * piece_length
+    bytes_in_file = min(piece_length, max(file.length - offset_in_file, 0))
+    file_data = binary_part(piece_bytes, 0, bytes_in_file)
+
+    cache =
+      for block_idx <- 0..(blocks_per_piece - 1),
+          block_start = block_idx * @block_size,
+          into: %{} do
+        leaf_index = file_piece_index * blocks_per_piece + block_idx
+
+        cond do
+          block_start >= bytes_in_file ->
+            {leaf_index, @zero_hash}
+
+          true ->
+            size = min(@block_size, bytes_in_file - block_start)
+            <<chunk::binary-size(^size), _::binary>> = binary_part(file_data, block_start, size)
+            {leaf_index, :crypto.hash(:sha256, chunk)}
+        end
+      end
+
+    block_count = file_block_count(file.length)
+    piece_subtree_hash(cache, block_count, blocks_per_piece, file_piece_index)
+  end
+
+  @doc """
+  Verifies one pure-v2 global piece against its file's Merkle piece digest.
+  """
+  @spec verify_file_piece(
+          file_context(),
+          pos_integer(),
+          non_neg_integer(),
+          binary()
+        ) :: boolean()
+  def verify_file_piece(file, piece_length, file_piece_index, piece_bytes) do
+    expected = expected_file_piece_hash(file, piece_length, file_piece_index)
+
+    expected != nil and
+      hash_file_piece_bytes(file, piece_length, file_piece_index, piece_bytes) == expected
+  end
+
+  defp build_stream_layout([], _piece_length, stream_end, all_files, piece_specs),
+    do: {stream_end, all_files, piece_specs}
+
+  defp build_stream_layout(
+         [%{length: 0} = file | rest],
+         piece_length,
+         stream_end,
+         all_files,
+         specs
+       ) do
+    entry = {stream_end, {:file, file, Path.join(file.path)}}
+    build_stream_layout(rest, piece_length, stream_end, all_files ++ [entry], specs)
+  end
+
+  defp build_stream_layout([file | rest], piece_length, stream_end, all_files, specs) do
+    aligned_start = align_stream_offset(stream_end, piece_length)
+    gap = aligned_start - stream_end
+
+    {all_files, aligned_start} =
+      if gap > 0 do
+        {all_files ++ [{aligned_start, {:gap, gap}}], aligned_start}
+      else
+        {all_files, stream_end}
+      end
+
+    file_end = aligned_start + file.length
+    padded_end = aligned_start + ceil_div(file.length, piece_length) * piece_length
+    gap_after = padded_end - file_end
+
+    all_files =
+      all_files ++
+        [{file_end, {:file, file, Path.join(file.path)}}] ++
+        if(gap_after > 0, do: [{padded_end, {:gap, gap_after}}], else: [])
+
+    file_piece_count = ceil_div(file.length, piece_length)
+
+    specs =
+      specs ++
+        for file_piece_index <- 0..(file_piece_count - 1) do
+          %{file: file, file_piece_index: file_piece_index}
+        end
+
+    build_stream_layout(rest, piece_length, padded_end, all_files, specs)
+  end
+
+  defp align_stream_offset(offset, piece_length) do
+    rem = rem(offset, piece_length)
+
+    if rem == 0, do: offset, else: offset + (piece_length - rem)
+  end
+
   @doc """
   Returns the zero-padding hash at a tree layer.
 

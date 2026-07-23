@@ -55,6 +55,30 @@ defmodule Torrent.RemovalTest do
            ]
   end
 
+  test "disk_paths walks pure-v2 file-tree files" do
+    torrent =
+      sample_torrent(%{
+        "name" => "v2-files",
+        "file tree" => %{"a.bin" => %{}, "dir" => %{}},
+        "meta version" => 2
+      })
+      |> Map.merge(%{
+        kind: :v2,
+        merkle: %{
+          piece_length: 16_384,
+          files: [
+            %{path: ["a.bin"], length: 1, pieces_root: <<1::256>>, piece_hashes: [<<1::256>>]},
+            %{path: ["dir", "b.bin"], length: 0, pieces_root: nil, piece_hashes: []}
+          ]
+        }
+      })
+
+    assert Removal.disk_paths(torrent) == [
+             Path.join([File.cwd!(), "v2-files", "a.bin"]),
+             Path.join([File.cwd!(), "v2-files", "dir", "b.bin"])
+           ]
+  end
+
   test "delete_paths! removes files and empty parent directories" do
     root = Path.join(System.tmp_dir!(), "elixir_torrent_removal_#{System.unique_integer()}")
     dir = Path.join(root, "nested")

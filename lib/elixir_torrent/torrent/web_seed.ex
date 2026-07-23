@@ -16,7 +16,7 @@ defmodule Torrent.WebSeed do
     * Never race a `Torrent.Downloads.Piece` worker: before claiming a
       piece the webseed checks `Downloads.piece_active?/2` and skips.
     * On success, writes bytes via `Torrent.FileHandle.write/4`, then runs
-      `FileHandle.check?/3` — which performs the SHA-1 verify and calls
+      `FileHandle.check?/3` — which performs the torrent's hash verify and calls
       `Torrent.Model.downloaded_piece/2` + `PiecesStatistic.set(:complete)`
       inline, exactly the same code path a normal peer download hits after
       the last subpiece arrives. On verify-ok we also call `Swarm.have/2`
@@ -447,8 +447,16 @@ defmodule Torrent.WebSeed do
 
   @spec load_config(Torrent.hash()) :: {:ok, %__MODULE__{}} | :none
   defp load_config(hash) do
-    with %Torrent{metadata: meta, last_index: last_index, last_piece_length: lpl} <-
+    with %Torrent{
+           kind: kind,
+           metadata: meta,
+           last_index: last_index,
+           last_piece_length: lpl
+         } <-
            safe_model_get(hash),
+         # BEP 52 aligns every file independently; the BEP 19 flat-range mapper
+         # must not request alignment gaps as HTTP file bytes.
+         false <- kind == :v2,
          urls when is_list(urls) and urls != [] <- parse_url_list(meta) do
       info = meta["info"] || %{}
 

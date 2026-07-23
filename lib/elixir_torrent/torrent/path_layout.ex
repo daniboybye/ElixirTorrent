@@ -30,6 +30,13 @@ defmodule Torrent.PathLayout do
   end
 
   @doc """
+  Returns on-disk path components for a BEP 52 file-tree path list.
+  """
+  @spec v2_layout_path(info(), [String.t()]) :: [String.t()]
+  def v2_layout_path(info, path) when is_map(info) and is_list(path),
+    do: layout_path(info, path)
+
+  @doc """
   Returns path components (under the download root) for a file path list.
   """
   @spec layout_path(info(), [String.t()]) :: [String.t()]
@@ -44,6 +51,16 @@ defmodule Torrent.PathLayout do
         else
           path
         end
+
+      # BEP 52 pure-v2 multifile torrents use `file tree` instead of `files`.
+      %{"file tree" => _, "name" => name} ->
+        path = Enum.map(path, &sanitize_v2_component/1)
+
+        if wrap_v2_loose_files?(info) do
+          [sanitize_name(name) | path]
+        else
+          path
+        end
     end
   end
 
@@ -54,6 +71,22 @@ defmodule Torrent.PathLayout do
     |> Enum.uniq()
     |> then(&(length(&1) >= 2))
   end
+
+  # Mirror BEP 3 loose-file wrapping for v2 `file tree` top-level components.
+  @spec wrap_v2_loose_files?(info()) :: boolean()
+  defp wrap_v2_loose_files?(%{"file tree" => tree}) when is_map(tree) do
+    tree
+    |> Map.keys()
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+    |> then(&(length(&1) >= 2))
+  end
+
+  defp wrap_v2_loose_files?(_), do: false
+
+  # BEP 52 file-tree components are untrusted and may use traversal names.
+  defp sanitize_v2_component(component) when component in [".", ".."], do: "_"
+  defp sanitize_v2_component(component), do: sanitize_name(component)
 
   @spec sanitize_name(String.t()) :: String.t()
   def sanitize_name(name) when is_binary(name) do

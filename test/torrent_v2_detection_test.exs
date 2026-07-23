@@ -1,12 +1,13 @@
 defmodule TorrentV2DetectionTest do
   use ExUnit.Case, async: true
 
+  alias Torrent.Merkle
+
   # BEP 52: `info["meta version"] = 2` marks a torrent as BitTorrent v2. A
   # torrent that also keeps the v1 `info["pieces"]` list is a **hybrid** —
   # both info-hashes address the same content, aligned via BEP 47 padding
-  # files. A v2-only torrent (no `pieces` field) requires the full merkle
-  # verification stack which isn't shipped yet, so parse_file! rejects it
-  # cleanly instead of half-loading it.
+  # files. Pure-v2 torrents omit `pieces` and derive piece geometry from the
+  # validated per-file Merkle metadata instead.
 
   defp bstr(binary), do: [Integer.to_string(byte_size(binary)), ":", binary]
   defp bint(n), do: ["i", Integer.to_string(n), "e"]
@@ -81,8 +82,14 @@ defmodule TorrentV2DetectionTest do
   end
 
   # A pure-v2 info dict — `meta version = 2` and `file tree`, no `pieces`
-  # and no `files`/`length`.
-  defp v2_only_info_blob(name \\ "hello") do
+  # and no `files`/`length`. `pieces root` must be a real Merkle root.
+  defp v2_only_info_blob(name \\ "hello", root \\ nil) do
+    content = :binary.copy(<<0xAB>>, 42)
+
+    root =
+      root ||
+        content |> Merkle.build() |> elem(1) |> Merkle.root()
+
     file_tree_leaf =
       IO.iodata_to_binary([
         "d",
@@ -91,7 +98,7 @@ defmodule TorrentV2DetectionTest do
         bstr("length"),
         bint(42),
         bstr("pieces root"),
-        bstr(:binary.copy(<<0>>, 32)),
+        bstr(root),
         "e",
         "e"
       ])
@@ -196,12 +203,32 @@ defmodule TorrentV2DetectionTest do
       assert length(hashes) == 16
     end
 
-    test "pure v2 → raises with a clear \"not yet supported\" message" do
-      path = write_tmp!(wrap_torrent(v2_only_info_blob()))
+    test "libtorrent pure-v2 fixture uses its truncated SHA-256 swarm hash" do
+      path = Path.join([__DIR__, "fixtures", "libtorrent_v2_only.torrent"])
+      torrent = Torrent.parse_file!(path)
 
-      assert_raise ArgumentError, ~r/BitTorrent v2 \(BEP 52\).+not yet supported/, fn ->
-        Torrent.parse_file!(path)
-      end
+      assert torrent.kind == :v2
+      assert torrent.hash == binary_part(torrent.hash_v2, 0, 20)
+      assert Base.encode16(torrent.hash) == "95E04D0C4BAD94AB206EFA884666FD89777DBE4F"
+      assert torrent.left == 1_048_576
+      assert torrent.last_index == 15
+      assert torrent.piece_lengths == List.duplicate(65_536, 16)
+    end
+
+    test "pure v2 → parses with truncated SHA-256 info-hash and piece lengths" do
+      info_blob = v2_only_info_blob()
+      path = write_tmp!(wrap_torrent(info_blob, "de"))
+      torrent = Torrent.parse_file!(path)
+
+      assert torrent.kind == :v2
+      assert torrent.hash == Torrent.info_hash(:v2, info_blob)
+      assert torrent.hash_v2 == :crypto.hash(:sha256, info_blob)
+      assert is_nil(torrent.metadata["info"]["pieces"])
+      assert torrent.merkle.piece_length == 16_384
+      assert torrent.piece_lengths == [42]
+      assert torrent.last_index == 0
+      assert torrent.last_piece_length == 42
+      assert torrent.left == 42
     end
   end
 end

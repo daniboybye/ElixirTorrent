@@ -18,6 +18,20 @@ defmodule Torrent.Removal do
   end
 
   @spec disk_paths(Torrent.t()) :: [Path.t()]
+  def disk_paths(
+        %Torrent{
+          kind: :v2,
+          merkle: %{files: files},
+          metadata: %{"info" => info}
+        } = torrent
+      ) do
+    root = download_root_for(torrent)
+
+    Enum.map(files, fn file ->
+      Path.join([root | PathLayout.layout_path(info, file.path)])
+    end)
+  end
+
   def disk_paths(%Torrent{metadata: %{"info" => info}} = torrent) do
     PathLayout.disk_paths(info, download_root_for(torrent))
   end

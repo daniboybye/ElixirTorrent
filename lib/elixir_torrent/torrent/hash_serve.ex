@@ -205,8 +205,12 @@ defmodule Torrent.HashServe do
   defp file_path(ctx, %{path: path, length: length}) do
     relative = path |> Path.join() |> String.replace("\\", "/")
 
-    case Enum.find(ctx.all_files, fn {_end, {name, len}} ->
-           len == length and path_suffix?(name, relative)
+    case Enum.find(ctx.all_files, fn
+           {_end, {:gap, _}} ->
+             false
+
+           {_end, {name, len}} ->
+             len == length and path_suffix?(name, relative)
          end) do
       {_end, {name, _}} -> {:ok, name}
       nil -> {:error, :missing_file}

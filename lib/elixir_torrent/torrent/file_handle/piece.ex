@@ -23,7 +23,7 @@ defmodule Torrent.FileHandle.Piece do
   use GenServer
   use Via
 
-  alias Torrent.{PiecesStatistic, Model, FileHandle}
+  alias Torrent.{PiecesStatistic, Model, FileHandle, Merkle}
 
   require Logger
 
@@ -209,6 +209,14 @@ defmodule Torrent.FileHandle.Piece do
 
   defp do_read(_, _, [], _), do: :error
 
+  defp do_read(offset, length, [{:gap, gap_len} | files], data) when offset >= gap_len,
+    do: do_read(offset - gap_len, length, files, data)
+
+  defp do_read(offset, length, [{:gap, gap_len} | files], data) do
+    take = min(length, gap_len - offset)
+    do_read(0, length - take, files, [data, :binary.copy(<<0>>, take)])
+  end
+
   defp do_read(offset, length, [{_, file_length} | files], data) when offset >= file_length,
     do: do_read(offset - file_length, length, files, data)
 
@@ -273,6 +281,15 @@ defmodule Torrent.FileHandle.Piece do
 
   defp do_write(_, _, <<>>), do: :ok
 
+  defp do_write(offset, [{:gap, gap_len} | files], bin) when offset >= gap_len,
+    do: do_write(offset - gap_len, files, bin)
+
+  defp do_write(offset, [{:gap, gap_len} | files], bin) do
+    skip = min(byte_size(bin), gap_len - offset)
+    <<_::binary-size(^skip), rest::binary>> = bin
+    do_write(0, files, rest)
+  end
+
   defp do_write(offset, [{_, len} | files], bin) when offset >= len,
     do: do_write(offset - len, files, bin)
 
@@ -285,19 +302,41 @@ defmodule Torrent.FileHandle.Piece do
   end
 
   defp open_files(paths) do
-    Enum.map(paths, fn {path, length} ->
-      {:ok, fd} = :file.open(path, @file_modes)
-      {fd, length}
+    Enum.map(paths, fn
+      {:gap, length} ->
+        {:gap, length}
+
+      {path, length} ->
+        {:ok, fd} = :file.open(path, @file_modes)
+        {fd, length}
     end)
   end
 
   defp close_files(fds) do
-    Enum.each(fds, fn {fd, _} -> :ok = :file.close(fd) end)
+    Enum.each(fds, fn
+      {:gap, _} -> :ok
+      {fd, _} -> :ok = :file.close(fd)
+    end)
   end
 
   defp hash_check(torrent_hash, index, piece, fds, context) do
     {:ok, block} = do_read(piece.offset, piece.length, fds)
-    res = piece.hash === :crypto.hash(:sha, block)
+
+    res =
+      case FileHandle.context(torrent_hash) do
+        %{kind: :v2, piece_specs: specs, piece_length: piece_length} when is_list(specs) ->
+          case Enum.at(specs, index) do
+            %{file: file, file_piece_index: file_piece_index} ->
+              Merkle.verify_file_piece(file, piece_length, file_piece_index, block)
+
+            _ ->
+              false
+          end
+
+        _ ->
+          # v1 and hybrid torrents keep the BEP 3 SHA-1 piece list check.
+          piece.hash === :crypto.hash(:sha, block)
+      end
 
     hash_hex = Torrent.hex_encoded_hash(torrent_hash)
 

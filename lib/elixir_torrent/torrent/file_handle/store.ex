@@ -38,19 +38,29 @@ defmodule Torrent.FileHandle.Store do
     # purely for graceful teardown.
     Process.flag(:trap_exit, true)
 
-    [metadata, last_index, last_piece_length, download_dir, merkle] =
-      Model.get(hash, [:metadata, :last_index, :last_piece_length, :download_dir, :merkle])
+    [kind, metadata, last_index, last_piece_length, download_dir, merkle, piece_lengths] =
+      Model.get(hash, [
+        :kind,
+        :metadata,
+        :last_index,
+        :last_piece_length,
+        :download_dir,
+        :merkle,
+        :piece_lengths
+      ])
 
     download_dir = download_dir || File.cwd!()
+    info = metadata["info"]
+    {all_files, piece_specs} = init_layout(kind, info, merkle, download_dir)
 
     context = %{
-      all_files: init_files(metadata["info"], download_dir),
-      # normal piece length; the final piece uses last_piece_length
-      piece_length: metadata["info"]["piece length"],
-      pieces_hash: metadata["info"]["pieces"],
-      # BEP 52 per-file roots and piece-layer hashes. Phase 5 will consume
-      # this independently from the existing v1 SHA-1 `pieces_hash` path.
+      all_files: all_files,
+      piece_length: info["piece length"],
+      pieces_hash: Map.get(info, "pieces"),
       v2_merkle: merkle,
+      kind: kind,
+      piece_lengths: piece_lengths,
+      piece_specs: piece_specs,
       last_index: last_index,
       last_piece_length: last_piece_length
     }
@@ -68,18 +78,41 @@ defmodule Torrent.FileHandle.Store do
 
   # --- layout preparation ---
 
+  defp init_layout(:v2, info, merkle, download_dir) do
+    {:ok, layout} = Torrent.Merkle.piece_stream_layout(merkle)
+
+    all_files =
+      Enum.map(layout.all_files, fn
+        {end_offset, {:file, file, _relative}} ->
+          {end_offset, ensure_file(info, file.path, file.length, download_dir)}
+
+        {end_offset, {:gap, length}} ->
+          {end_offset, {:gap, length}}
+      end)
+
+    {all_files, layout.piece_specs}
+  end
+
+  defp init_layout(_kind, info, _merkle, download_dir) do
+    {init_files(info, download_dir), nil}
+  end
+
   defp init_files(%{"files" => files} = info, download_dir) do
     files
     |> Enum.map(&Map.fetch!(&1, "length"))
     |> Enum.scan(&(&1 + &2))
-    |> Enum.zip(Enum.map(files, &ensure_file(info, &1, download_dir)))
+    |> Enum.zip(
+      Enum.map(files, fn file ->
+        ensure_file(info, file["path"], file["length"], download_dir)
+      end)
+    )
   end
 
   defp init_files(%{"length" => length, "name" => name} = info, download_dir) do
-    [{length, ensure_file(info, %{"length" => length, "path" => [name]}, download_dir)}]
+    [{length, ensure_file(info, [name], length, download_dir)}]
   end
 
-  defp ensure_file(info, %{"length" => length, "path" => path}, download_dir) do
+  defp ensure_file(info, path, length, download_dir) do
     name =
       info
       |> PathLayout.layout_path(path)

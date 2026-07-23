@@ -91,19 +91,33 @@ defmodule Torrent.FileHandle do
         :error
 
       ctx ->
-        this_length =
-          if index == ctx.last_index, do: ctx.last_piece_length, else: ctx.piece_length
-
+        this_length = piece_length_at(ctx, index)
         {offset, files} = files_for_index(index, ctx.all_files, ctx.piece_length, this_length)
+
+        hash =
+          if ctx.kind == :v2 do
+            <<0::160>>
+          else
+            binary_part(ctx.pieces_hash, index * 20, 20)
+          end
 
         {:ok,
          %Piece{
            offset: offset,
            files: files,
            length: this_length,
-           hash: binary_part(ctx.pieces_hash, index * 20, 20)
+           hash: hash
          }}
     end
+  end
+
+  defp piece_length_at(%{piece_lengths: lengths, last_index: last, last_piece_length: lpl}, index)
+       when is_list(lengths) do
+    if index == last, do: lpl, else: Enum.at(lengths, index)
+  end
+
+  defp piece_length_at(%{piece_length: pl, last_index: last, last_piece_length: lpl}, index) do
+    if index == last, do: lpl, else: pl
   end
 
   @doc """
@@ -139,6 +153,13 @@ defmodule Torrent.FileHandle do
 
     {files, [last_file | _]} = Enum.split_while(right, &(elem(&1, 0) < begin_offset + length - 1))
 
-    {offset_from_first_file, Keyword.values(files ++ [last_file])}
+    {offset_from_first_file, normalize_file_entries(files ++ [last_file])}
+  end
+
+  defp normalize_file_entries(entries) do
+    Enum.map(entries, fn
+      {_end, {:gap, gap_length}} -> {:gap, gap_length}
+      {_end, {path, file_length}} -> {path, file_length}
+    end)
   end
 end

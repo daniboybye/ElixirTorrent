@@ -15,6 +15,7 @@ defmodule Torrent.Files do
 
   alias Torrent.Bitfield
   alias Torrent.Model
+  alias Torrent.Merkle
   alias Torrent.PathLayout
 
   @doc """
@@ -74,7 +75,8 @@ defmodule Torrent.Files do
           torrent.bitfield,
           piece_length,
           torrent.last_index,
-          torrent.last_piece_length
+          torrent.last_piece_length,
+          torrent.piece_lengths
         )
 
       %Entry{
@@ -92,6 +94,29 @@ defmodule Torrent.Files do
   @spec file_specs(Torrent.t()) :: [
           %{offset: non_neg_integer(), length: pos_integer(), path: String.t(), name: String.t()}
         ]
+  defp file_specs(%Torrent{kind: :v2, merkle: merkle, metadata: %{"info" => info}})
+       when is_map(merkle) do
+    {:ok, layout} = Merkle.piece_stream_layout(merkle)
+
+    layout.all_files
+    |> Enum.flat_map(fn
+      {_end_offset, {:gap, _gap_len}} ->
+        []
+
+      {end_offset, {:file, file, _relative}} ->
+        offset = end_offset - file.length
+
+        [
+          %{
+            offset: offset,
+            length: file.length,
+            path: PathLayout.relative_path(info, file.path),
+            name: List.last(file.path)
+          }
+        ]
+    end)
+  end
+
   defp file_specs(%Torrent{metadata: %{"info" => info}}) do
     normalize_files(info)
   end
@@ -139,7 +164,8 @@ defmodule Torrent.Files do
           Torrent.bitfield(),
           pos_integer(),
           Torrent.index(),
-          Torrent.length()
+          Torrent.length(),
+          [pos_integer()] | nil
         ) :: non_neg_integer()
   defp count_downloaded_in_range(
          start_byte,
@@ -147,13 +173,14 @@ defmodule Torrent.Files do
          bitfield,
          piece_length,
          last_index,
-         last_piece_length
+         last_piece_length,
+         piece_lengths
        ) do
     Enum.reduce(0..last_index, 0, fn index, acc ->
       piece_start = index * piece_length
 
       piece_size =
-        if index == last_index, do: last_piece_length, else: piece_length
+        piece_size_at(index, piece_length, last_index, last_piece_length, piece_lengths)
 
       piece_end = piece_start + piece_size - 1
       overlap_start = max(start_byte, piece_start)
@@ -165,5 +192,17 @@ defmodule Torrent.Files do
         acc
       end
     end)
+  end
+
+  defp piece_size_at(index, _piece_length, last_index, last_piece_length, lengths)
+       when is_list(lengths) and index == last_index,
+       do: last_piece_length
+
+  defp piece_size_at(index, _piece_length, _last_index, _last_piece_length, lengths)
+       when is_list(lengths),
+       do: Enum.at(lengths, index)
+
+  defp piece_size_at(index, piece_length, last_index, last_piece_length, _piece_lengths) do
+    if index == last_index, do: last_piece_length, else: piece_length
   end
 end

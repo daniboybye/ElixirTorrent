@@ -29,6 +29,10 @@ defmodule Torrent do
     :info_blob,
     :hash_v2,
     :merkle,
+    # Per-piece byte lengths in the global stream. Nil for v1/hybrid (every
+    # piece is `piece length` except the torrent-wide last piece). Populated for
+    # pure-v2 where short final pieces can appear at every file boundary.
+    piece_lengths: nil,
     bitfield: nil,
     peer_status: nil,
     uploaded: 0,
@@ -71,6 +75,7 @@ defmodule Torrent do
           hash_v2: hash_v2() | nil,
           # Parsed and root-validated BEP 52 per-file piece hashes. Nil for v1.
           merkle: Torrent.Merkle.metadata_context() | nil,
+          piece_lengths: [pos_integer()] | nil,
           # BEP 52 § Compatibility — :v1 = no `meta version`; :hybrid = v1 +
           # v2 fields in same info dict; :v2 = only v2 (pure BEP 52).
           kind: kind()
@@ -235,22 +240,80 @@ defmodule Torrent do
     info_blob = slice_info_blob!(raw)
 
     kind = detect_kind(metadata)
-
-    if kind == :v2 do
-      # BEP 52 pure-v2 needs merkle-tree verification, piece-layers
-      # bookkeeping and the hash-request/hashes/hash-reject extension
-      # messages before any bytes can be trusted. Hybrid torrents fall
-      # through to the v1 code path (they carry both `pieces` and
-      # `file tree`); a peer that only ever speaks v2 would still be
-      # reachable via the truncated v2 info-hash — deferred to a later
-      # BEP 52 phase.
-      raise ArgumentError,
-            "BitTorrent v2 (BEP 52) pure-v2 torrents are not yet supported — " <>
-              "missing v1 `pieces` field. Hybrid v1+v2 torrents load normally."
-    end
-
     merkle = merkle_for(kind, metadata)
-    bytes = all_bytes_in_torrent(metadata)
+
+    case build_torrent_fields(kind, metadata, merkle, info_blob) do
+      {:ok, fields} ->
+        struct(__MODULE__, fields)
+
+      {:error, reason} ->
+        raise ArgumentError, "invalid BitTorrent torrent: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  Returns the wire/tracker info-hash for a torrent kind.
+
+  v1 and hybrid torrents use SHA-1(raw info). Pure-v2 torrents use the first 20
+  bytes of SHA-256(raw info) per BEP 52; the full 32-byte digest is kept in
+  `hash_v2/1`.
+  """
+  @spec info_hash(kind(), binary()) :: hash()
+  def info_hash(kind, info_blob) do
+    hash_v1 = if kind in [:v1, :hybrid], do: :crypto.hash(:sha, info_blob)
+    hash_v2 = if kind in [:hybrid, :v2], do: :crypto.hash(:sha256, info_blob)
+    {:ok, hash} = select_announce_hash(kind, hash_v1, hash_v2)
+    hash
+  end
+
+  @doc """
+  Selects the single 20-byte swarm identifier used by trackers, DHT and peers.
+
+  Hybrid torrents deliberately stay in their v1 SHA-1 swarm. A pure-v2 torrent
+  has no v1 swarm and therefore uses the first 20 bytes of its SHA-256 info-hash.
+  """
+  @spec select_announce_hash(kind(), hash() | nil, hash_v2() | nil) ::
+          {:ok, hash()} | {:error, :missing_v1_hash | :missing_v2_hash}
+  def select_announce_hash(kind, hash_v1, _hash_v2)
+      when kind in [:v1, :hybrid] and is_binary(hash_v1) and byte_size(hash_v1) == 20,
+      do: {:ok, hash_v1}
+
+  def select_announce_hash(:v2, _hash_v1, hash_v2)
+      when is_binary(hash_v2) and byte_size(hash_v2) == 32,
+      do: {:ok, binary_part(hash_v2, 0, 20)}
+
+  def select_announce_hash(kind, _hash_v1, _hash_v2) when kind in [:v1, :hybrid],
+    do: {:error, :missing_v1_hash}
+
+  def select_announce_hash(:v2, _hash_v1, _hash_v2), do: {:error, :missing_v2_hash}
+
+  @spec build_torrent_fields(kind(), map(), Torrent.Merkle.metadata_context() | nil, binary()) ::
+          {:ok, keyword()} | {:error, term()}
+  defp build_torrent_fields(:v2, metadata, merkle, info_blob) do
+    with {:ok, layout} <- Torrent.Merkle.piece_stream_layout(merkle),
+         true <- layout.piece_count > 0 || {:error, :empty_torrent} do
+      last_index = layout.piece_count - 1
+      last_piece_length = List.last(layout.piece_lengths)
+
+      {:ok,
+       [
+         hash: info_hash(:v2, info_blob),
+         hash_v2: :crypto.hash(:sha256, info_blob),
+         merkle: merkle,
+         kind: :v2,
+         left: layout.content_length,
+         last_piece_length: last_piece_length,
+         piece_lengths: layout.piece_lengths,
+         metadata: metadata,
+         last_index: last_index,
+         private?: private?(metadata),
+         info_blob: info_blob
+       ]}
+    end
+  end
+
+  defp build_torrent_fields(kind, metadata, merkle, info_blob) do
+    piece_length = metadata["info"]["piece length"]
 
     last_index =
       metadata["info"]["pieces"]
@@ -258,18 +321,22 @@ defmodule Torrent do
       |> div(20)
       |> Kernel.-(1)
 
-    %__MODULE__{
-      hash: :crypto.hash(:sha, info_blob),
-      hash_v2: hash_v2_for(kind, info_blob),
-      merkle: merkle,
-      kind: kind,
-      left: bytes,
-      last_piece_length: bytes - last_index * metadata["info"]["piece length"],
-      metadata: metadata,
-      last_index: last_index,
-      private?: private?(metadata),
-      info_blob: info_blob
-    }
+    bytes = all_bytes_in_torrent(metadata)
+
+    {:ok,
+     [
+       hash: info_hash(kind, info_blob),
+       hash_v2: hash_v2_for(kind, info_blob),
+       merkle: merkle,
+       kind: kind,
+       left: bytes,
+       last_piece_length: bytes - last_index * piece_length,
+       piece_lengths: nil,
+       metadata: metadata,
+       last_index: last_index,
+       private?: private?(metadata),
+       info_blob: info_blob
+     ]}
   end
 
   @doc """

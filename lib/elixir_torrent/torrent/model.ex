@@ -222,12 +222,19 @@ defmodule Torrent.Model do
     Process.send_after(self(), :checkpoint, @checkpoint_interval)
   end
 
+  defp do_piece_length(index, %Torrent{piece_lengths: lengths, last_index: last_index} = torrent)
+       when is_list(lengths) do
+    if index === last_index, do: torrent.last_piece_length, else: Enum.at(lengths, index)
+  end
+
   defp do_piece_length(index, %Torrent{last_index: last_index} = torrent)
        when index === last_index,
        do: torrent.last_piece_length
 
   defp do_piece_length(_, torrent),
     do: do_piece_length(torrent)
+
+  defp do_piece_length(%Torrent{piece_lengths: [first | _]}), do: first
 
   defp do_piece_length(torrent),
     do: torrent.metadata["info"]["piece length"]
@@ -277,6 +284,11 @@ defmodule Torrent.Model do
     else
       torrent
     end
+  end
+
+  defp total_bytes(%Torrent{kind: :v2, piece_lengths: lengths, last_index: last_index} = torrent)
+       when is_list(lengths) do
+    Enum.reduce(0..last_index, 0, fn index, acc -> acc + do_piece_length(index, torrent) end)
   end
 
   defp total_bytes(%Torrent{metadata: %{"info" => %{"length" => length}}}), do: length
