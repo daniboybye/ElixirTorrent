@@ -189,6 +189,18 @@ defmodule PeerSenderLoopbackTest do
       assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
     end
 
+    test "oversized hash_reject frame is rejected from its prefix" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      oversized = 1 + Peer.HashWire.header_size() + 1
+      assert :ok = :gen_tcp.send(server, <<oversized::32, 23>>)
+
+      ref = Process.monitor(sender_pid)
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
+    end
+
     test "tcp_closed stops Sender cleanly" do
       {client, server, listen, key, sender_pid} = start_sender_pair()
 
