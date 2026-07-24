@@ -118,7 +118,7 @@ defmodule SuperseedTest do
     end)
   end
 
-  test "peer with no next assignment falls back to have_all" do
+  test "peer with no next assignment reveals all pieces without mid-session have_all" do
     hash = :crypto.strong_rand_bytes(20)
 
     with_torrent(hash, 2, fn ->
@@ -134,7 +134,10 @@ defmodule SuperseedTest do
         assert {:ok, 1} = Superseed.assign(hash, other_peer, nil)
 
         assert %State{superseed_piece: :all} = State.handle_have(state, 0)
-        assert_receive {:sent, :have_all}
+        assert_receive {:sent, {:have, 0}}
+        assert_receive {:sent, {:have, 1}}
+        refute_received {:sent, :have_all}
+        refute_received {:sent, :have_none}
       end)
     end)
   end

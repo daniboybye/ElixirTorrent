@@ -380,6 +380,11 @@ defmodule Peer.Controller do
     end
   end
 
+  def handle_call({:complete_upload, index, begin, length, block}, _from, state) do
+    {reply, state} = State.complete_upload(state, index, begin, length, block)
+    {:reply, reply, state}
+  end
+
   def handle_call(:rank, _, state), do: {:reply, State.rank(state), state}
 
   def handle_call({:has_index?, index}, _, state),
@@ -638,6 +643,8 @@ defmodule Peer.Controller do
   def handle_cast({message, _}, %State{hash: hash, fast_extension: nil} = state)
       when message in [
              :handle_suggest_piece,
+             :handle_have_all,
+             :handle_have_none,
              :handle_allowed_fast,
              :handle_reject
            ] do

@@ -91,7 +91,7 @@ defmodule PeerUploadTest do
     end)
   end
 
-  test "seed transition advertises have_all to the peer" do
+  test "seed transition uses regular have messages, never mid-session have_all" do
     hash = :crypto.strong_rand_bytes(20)
     id = <<2::160>>
     key = Peer.make_key(hash, id)
@@ -123,7 +123,13 @@ defmodule PeerUploadTest do
 
       assert %State{status: :seed, interested: false} = State.seed(state)
       assert_receive {:sent, :not_interested}
-      assert_receive {:sent, :have_all}
+
+      for index <- 0..(pieces_count - 1) do
+        assert_receive {:sent, {:have, ^index}}
+      end
+
+      refute_received {:sent, :have_all}
+      refute_received {:sent, :have_none}
     end)
   end
 
@@ -176,15 +182,8 @@ defmodule Peer.SenderStub do
 
   def init({key, test_pid}), do: {:ok, {key, test_pid}}
 
-  def handle_cast(:have_all, {key, test_pid}) do
-    send(test_pid, {:sent, :have_all})
+  def handle_cast(message, {key, test_pid}) do
+    send(test_pid, {:sent, message})
     {:noreply, {key, test_pid}}
   end
-
-  def handle_cast(:not_interested, {key, test_pid}) do
-    send(test_pid, {:sent, :not_interested})
-    {:noreply, {key, test_pid}}
-  end
-
-  def handle_cast(_msg, state), do: {:noreply, state}
 end

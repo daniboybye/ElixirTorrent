@@ -28,8 +28,11 @@ defmodule Torrent.Uploader do
         Registry.register(Registry, name, nil)
 
         {:ok, block} = FileHandle.read(hash, index, begin, length)
-        callback.(block)
-        Model.uploaded_subpiece(hash, length)
+
+        case callback.(block) do
+          :cancelled -> :ok
+          _ -> Model.uploaded_subpiece(hash, length)
+        end
       end
     )
   end

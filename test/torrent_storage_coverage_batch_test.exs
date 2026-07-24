@@ -210,6 +210,27 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
     end
 
+    test "cancelled callback does not account bytes that were never sent" do
+      piece0 = random_piece()
+      {torrent, _} = build_tiny_torrent([piece0])
+      hash = torrent.hash
+      parent = self()
+
+      with_storage_stack(torrent, fn _ ->
+        write_piece!(hash, 0, piece0)
+        start_uploader_supervisor(hash)
+
+        assert {:ok, _task} =
+                 Uploader.request(hash, @peer_a, 0, 0, 128, fn _block ->
+                   send(parent, :callback_cancelled)
+                   :cancelled
+                 end)
+
+        assert_receive :callback_cancelled, 2_000
+        assert Model.get(hash, :uploaded) == 0
+      end)
+    end
+
     test "cancel terminates an in-flight upload task registered in Registry" do
       piece0 = random_piece()
       {torrent, _} = build_tiny_torrent([piece0])

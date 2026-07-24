@@ -65,6 +65,34 @@ defmodule PeerControllerStateTest do
       end)
     end
 
+    test "verified-piece availability suggests the piece to a Fast peer" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_sender_stub(hash, fn _key ->
+        state =
+          base_state(hash, 4,
+            bitfield: Torrent.Bitfield.make(4),
+            fast_extension: %Peer.Controller.FastExtension{}
+          )
+
+        assert %State{} = State.have(state, 2)
+        assert_receive {:sent, {:have, 2}}
+        assert_receive {:sent, {:suggest_piece, 2}}
+      end)
+    end
+
+    test "verified-piece availability never suggests to a non-Fast peer" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_sender_stub(hash, fn _key ->
+        state = base_state(hash, 4, bitfield: Torrent.Bitfield.make(4))
+
+        assert %State{} = State.have(state, 2)
+        assert_receive {:sent, {:have, 2}}
+        refute_received {:sent, {:suggest_piece, 2}}
+      end)
+    end
+
     test "handle_have on nil bitfield bootstraps then sets the bit" do
       hash = :crypto.strong_rand_bytes(20)
 
@@ -139,7 +167,12 @@ defmodule PeerControllerStateTest do
 
       with_model(sample_torrent(hash, 4), fn _ ->
         with_sender_stub(hash, fn _key ->
-          state = base_state(hash, 4, status: 0, interested: false)
+          state =
+            base_state(hash, 4,
+              status: 0,
+              interested: false,
+              fast_extension: %Peer.Controller.FastExtension{}
+            )
 
           assert %State{bitfield: :all, choke: false} = State.handle_have_all(state)
         end)
@@ -148,22 +181,118 @@ defmodule PeerControllerStateTest do
 
     test "handle_have_all while seeding is two_seeders error" do
       hash = :crypto.strong_rand_bytes(20)
-      state = base_state(hash, 4, status: :seed)
+
+      state =
+        base_state(hash, 4,
+          status: :seed,
+          fast_extension: %Peer.Controller.FastExtension{}
+        )
 
       assert {:error, :two_seeders, ^state} = State.handle_have_all(state)
     end
 
+    test "negotiated have_all after initial availability is protocol_error" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      state =
+        base_state(hash, 4,
+          status: 0,
+          bitfield: Torrent.Bitfield.make(4),
+          fast_extension: %Peer.Controller.FastExtension{}
+        )
+
+      assert {:error, :protocol_error, ^state} = State.handle_have_all(state)
+    end
+
     test "handle_have_none on leech sets :none" do
       hash = :crypto.strong_rand_bytes(20)
-      state = base_state(hash, 4, status: 0)
+
+      state =
+        base_state(hash, 4,
+          status: 0,
+          fast_extension: %Peer.Controller.FastExtension{}
+        )
+
       assert %State{bitfield: :none} = State.handle_have_none(state)
     end
 
     test "handle_have_none with existing bitfield is protocol_error" do
       hash = :crypto.strong_rand_bytes(20)
-      state = base_state(hash, 4, bitfield: Torrent.Bitfield.make(4))
+
+      state =
+        base_state(hash, 4,
+          bitfield: Torrent.Bitfield.make(4),
+          fast_extension: %Peer.Controller.FastExtension{}
+        )
 
       assert {:error, :protocol_error, ^state} = State.handle_have_none(state)
+    end
+
+    test "non-negotiated have_all and have_none are rejected without mutating state" do
+      hash = :crypto.strong_rand_bytes(20)
+      state = base_state(hash, 4, status: 0)
+
+      assert {:stop, {:shutdown, :protocol_error}, ^state} =
+               Peer.Controller.handle_cast({:handle_have_all, []}, state)
+
+      assert {:stop, {:shutdown, :protocol_error}, ^state} =
+               Peer.Controller.handle_cast({:handle_have_none, []}, state)
+    end
+  end
+
+  describe "BEP 6 choke request flushing" do
+    test "choke rejects queued non-allowed uploads after the choke" do
+      hash = :crypto.strong_rand_bytes(20)
+      rejected = {0, 0, @piece_len}
+      allowed = {1, 0, @piece_len}
+
+      with_sender_stub(hash, fn _key ->
+        fast = %Peer.Controller.FastExtension{allowed_fast: MapSet.new([1])}
+
+        state =
+          base_state(hash, 4,
+            choke: false,
+            fast_extension: fast,
+            upload_requests: MapSet.new([rejected, allowed])
+          )
+
+        assert %State{choke: true, upload_requests: remaining} =
+                 choked = State.choke(state)
+
+        assert remaining == MapSet.new([allowed])
+        assert_receive {:sent, :choke}
+        assert_receive {:sent, {:reject, 0, 0, @piece_len}}
+        refute_received {:sent, {:reject, 1, 0, @piece_len}}
+
+        assert {:cancelled, ^choked} =
+                 State.complete_upload(choked, 0, 0, @piece_len, <<0::size(8)>>)
+
+        refute_received {:sent, {:piece, 0, 0, _}}
+      end)
+    end
+
+    test "completed upload wins the mailbox race and is not also rejected" do
+      hash = :crypto.strong_rand_bytes(20)
+      request = {0, 0, @piece_len}
+      block = <<1, 2, 3>>
+
+      with_sender_stub(hash, fn _key ->
+        state =
+          base_state(hash, 4,
+            choke: false,
+            fast_extension: %Peer.Controller.FastExtension{},
+            upload_requests: MapSet.new([request])
+          )
+
+        assert {:sent, completed} =
+                 State.complete_upload(state, 0, 0, @piece_len, block)
+
+        assert %State{choke: true, upload_requests: remaining} = State.choke(completed)
+        assert MapSet.size(remaining) == 0
+        assert_receive {:sent, {:piece, 0, 0, ^block}}
+        assert_receive {:sent, :choke}
+        refute_received {:sent, {:reject, 0, 0, @piece_len}}
+      end)
     end
   end
 

@@ -20,6 +20,10 @@ defmodule Peer.Controller.State do
     peer_v2_support?: false,
     hash_requests: %{},
     requests: MapSet.new(),
+    # Inbound block requests accepted for asynchronous disk reads but not yet
+    # sent to the peer. BEP 6 requires a choke to explicitly reject every
+    # queued request outside the peer-specific allowed-fast set.
+    upload_requests: MapSet.new(),
     # Outbound block requests accepted by a piece worker (:ok from
     # Downloads.request/4) whose {:request, _} callback cast hasn't been
     # processed yet. Counted alongside `requests` in full_requests_queue?/1
@@ -70,6 +74,7 @@ defmodule Peer.Controller.State do
           peer_v2_support?: boolean(),
           hash_requests: %{Peer.HashTransfer.ref() => map()},
           requests: MapSet.t(subpiece()),
+          upload_requests: MapSet.t(subpiece()),
           pending_requests: non_neg_integer(),
           rank: non_neg_integer(),
           connected_at: non_neg_integer(),
@@ -161,14 +166,32 @@ defmodule Peer.Controller.State do
 
   @spec have(t(), Torrent.index()) :: t()
   def have(state, index) do
-    unless has_index?(state, index), do: Sender.have(key(state), index)
+    unless has_index?(state, index) do
+      peer_key = key(state)
+      Sender.have(peer_key, index)
+
+      # This path is driven by Torrent.Controller only after a piece was
+      # written and hash-verified. Suggesting that same piece is cheap and
+      # useful: we know it is immediately serviceable from disk.
+      if match?(%FastExtension{}, state.fast_extension) do
+        Sender.suggest_piece(peer_key, index)
+      end
+    end
+
     state
   end
 
   @spec choke(t()) :: t()
+  def choke(%__MODULE__{choke: true} = state), do: state
+
   def choke(%__MODULE__{} = state) do
-    unless state.choke, do: Sender.choke(key(state))
-    %__MODULE__{state | choke: true}
+    # BEP 6 ordering is deliberate: the choke must reach the peer before the
+    # rejects so it cannot immediately re-request the same non-allowed blocks.
+    :ok = Sender.choke(key(state))
+
+    state
+    |> flush_choked_uploads()
+    |> Map.put(:choke, true)
   end
 
   @spec unchoke(t()) :: t()
@@ -372,8 +395,10 @@ defmodule Peer.Controller.State do
   @doc false
   @spec superseed_assign(t(), Torrent.index() | nil) :: t()
   def superseed_assign(%__MODULE__{} = state, nil) do
-    :ok = Sender.have_all(key(state))
-    log_upload(state, "have_all_sent reason=superseed_peer_exhausted")
+    # This can run during a live superseed rotation. BEP 6 permits have_all
+    # only immediately after the handshake, so reveal availability with
+    # ordinary HAVE messages instead.
+    advertise_all_with_haves(state, "superseed_peer_exhausted")
     %{state | superseed_piece: :all}
   end
 
@@ -413,11 +438,44 @@ defmodule Peer.Controller.State do
   end
 
   @spec upload(t(), Torrent.length()) :: t()
-  def upload(%__MODULE__{status: :seed} = state, n) do
-    Map.update!(state, :rank, &(&1 + n))
-  end
+  def upload(%__MODULE__{status: :seed} = state, n),
+    do: Map.update!(state, :rank, &(&1 + n))
 
   def upload(state, _), do: state
+
+  @doc false
+  @spec complete_upload(
+          t(),
+          Torrent.index(),
+          Torrent.begin(),
+          Torrent.length(),
+          binary()
+        ) :: {:sent | :cancelled, t()}
+  def complete_upload(%__MODULE__{} = state, index, begin, length, block) do
+    request = {index, begin, length}
+
+    if MapSet.member?(state.upload_requests, request) do
+      Sender.piece(key(state), index, begin, block)
+
+      log_upload(
+        state,
+        "piece_sent index=#{index} begin=#{begin} len=#{byte_size(block)}",
+        :debug
+      )
+
+      state =
+        state
+        |> update_in([Access.key!(:upload_requests)], &MapSet.delete(&1, request))
+        |> upload(length)
+
+      {:sent, state}
+    else
+      # A choke won the controller mailbox race and already rejected/cancelled
+      # this request. Dropping the completed disk read preserves BEP 6's
+      # exactly-one-response guarantee.
+      {:cancelled, state}
+    end
+  end
 
   @spec handle_choke(t()) :: t()
   def handle_choke(%__MODULE__{} = state) do
@@ -625,6 +683,7 @@ defmodule Peer.Controller.State do
 
   defp do_serve_request(state, index, begin, length) do
     allowed_while_choked? = FastExtension.upload?(state.fast_extension, index)
+    request = {index, begin, length}
 
     log_upload(
       state,
@@ -642,26 +701,61 @@ defmodule Peer.Controller.State do
       Sender.reject(key(state), index, begin, length)
     end
 
-    if not state.choke or allowed_while_choked? do
-      pid = self()
-      sender_key = key(state)
+    cond do
+      match?(%FastExtension{}, state.fast_extension) and
+          MapSet.member?(state.upload_requests, request) ->
+        # Registry keys and upload tracking are one-per-subpiece. Give a
+        # duplicate Fast request its own explicit response instead of losing
+        # it behind the already queued request.
+        Sender.reject(key(state), index, begin, length)
+        state
 
-      callback = fn block ->
-        Sender.piece(sender_key, index, begin, block)
+      not state.choke or allowed_while_choked? ->
+        pid = self()
+        sender_key = key(state)
 
-        log_upload(
-          state,
-          "piece_sent index=#{index} begin=#{begin} len=#{byte_size(block)}",
-          :debug
-        )
+        callback =
+          if match?(%FastExtension{}, state.fast_extension) do
+            fn block ->
+              GenServer.call(pid, {:complete_upload, index, begin, length, block})
+            end
+          else
+            fn block ->
+              Sender.piece(sender_key, index, begin, block)
 
-        GenServer.cast(pid, {:upload, [length]})
-      end
+              log_upload(
+                state,
+                "piece_sent index=#{index} begin=#{begin} len=#{byte_size(block)}",
+                :debug
+              )
 
-      Uploader.request(state.hash, state.id, index, begin, length, callback)
+              GenServer.cast(pid, {:upload, [length]})
+            end
+          end
+
+        case Uploader.request(state.hash, state.id, index, begin, length, callback) do
+          {:ok, _task} when not is_nil(state.fast_extension) ->
+            update_in(state.upload_requests, &MapSet.put(&1, request))
+
+          {:ok, _task} ->
+            state
+
+          {:error, reason} ->
+            log_upload(
+              state,
+              "request_reject index=#{index} begin=#{begin} len=#{length} reason=#{inspect(reason)}"
+            )
+
+            if match?(%FastExtension{}, state.fast_extension) do
+              Sender.reject(key(state), index, begin, length)
+            end
+
+            state
+        end
+
+      true ->
+        state
     end
-
-    state
   end
 
   @spec handle_piece(t(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
@@ -705,23 +799,17 @@ defmodule Peer.Controller.State do
   # FastExtansionMessage begin
 
   @spec handle_have_all(t()) :: t() | {:error, :two_seeds | :protocol_error, t()}
-  def handle_have_all(%__MODULE__{bitfield: :all} = state), do: state
+  def handle_have_all(%__MODULE__{bitfield: bitfield} = state) when not is_nil(bitfield),
+    do: {:error, :protocol_error, state}
 
   def handle_have_all(%__MODULE__{status: :seed} = state) do
     if Superseed.active?(state.hash) do
       state
-      |> maybe_drop_partial_bitfield()
       |> do_handle_have_all()
       |> maybe_confirm_superseed_exit()
     else
       {:error, :two_seeders, state}
     end
-  end
-
-  def handle_have_all(%__MODULE__{bitfield: bin} = state) when is_binary(bin) do
-    state
-    |> drop_partial_bitfield(bin)
-    |> do_handle_have_all()
   end
 
   def handle_have_all(%__MODULE__{} = state), do: do_handle_have_all(state)
@@ -753,16 +841,6 @@ defmodule Peer.Controller.State do
     |> check_interested()
     |> unchoke()
   end
-
-  defp drop_partial_bitfield(%__MODULE__{} = state, bin) when is_binary(bin) do
-    PiecesStatistic.remove_peer(state.hash, bin, state.pieces_count)
-    %{state | bitfield: nil}
-  end
-
-  defp maybe_drop_partial_bitfield(%__MODULE__{bitfield: bin} = state) when is_binary(bin),
-    do: drop_partial_bitfield(state, bin)
-
-  defp maybe_drop_partial_bitfield(state), do: state
 
   defp maybe_confirm_superseed_exit(%__MODULE__{status: :seed} = state) do
     complete? =
@@ -1203,8 +1281,10 @@ defmodule Peer.Controller.State do
     if Superseed.active?(state.hash) do
       assign_superseed_piece(state)
     else
-      :ok = Sender.have_all(peer_key)
-      log_upload(state, "have_all_sent reason=seed_transition")
+      # have_all is a handshake-time availability replacement, not a
+      # mid-session state reset. Regular HAVE messages are valid at any time
+      # and also reveal the final piece to peers that saw us complete.
+      advertise_all_with_haves(state, "seed_transition", peer_key)
 
       state
       |> Map.put(:bitfield, nil)
@@ -1267,6 +1347,32 @@ defmodule Peer.Controller.State do
     do: send_allowed_fast(state)
 
   defp seed_allowed_fast(state), do: state
+
+  defp advertise_all_with_haves(%__MODULE__{} = state, reason, peer_key \\ nil) do
+    peer_key = peer_key || key(state)
+    Enum.each(0..(state.pieces_count - 1), &Sender.have(peer_key, &1))
+    log_upload(state, "have_batch_sent pieces=#{state.pieces_count} reason=#{reason}")
+    :ok
+  end
+
+  defp flush_choked_uploads(%__MODULE__{fast_extension: nil} = state), do: state
+
+  defp flush_choked_uploads(%__MODULE__{fast_extension: %FastExtension{}} = state) do
+    {allowed, rejected} =
+      Enum.split_with(state.upload_requests, fn {index, _begin, _length} ->
+        FastExtension.upload?(state.fast_extension, index)
+      end)
+
+    Enum.each(rejected, fn {index, begin, length} ->
+      :ok = Uploader.cancel(state.hash, state.id, index, begin, length)
+
+      if match?(%FastExtension{}, state.fast_extension) do
+        Sender.reject(key(state), index, begin, length)
+      end
+    end)
+
+    %{state | upload_requests: MapSet.new(allowed)}
+  end
 
   @spec bitfield_log(t()) :: String.t()
   defp bitfield_log(%__MODULE__{hash: hash, pieces_count: count}) do
