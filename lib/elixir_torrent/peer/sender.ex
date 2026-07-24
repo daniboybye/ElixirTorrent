@@ -275,6 +275,7 @@ defmodule Peer.Sender do
         {:utp, raw, data},
         %__MODULE__{socket: {:mse, raw, ciphers}, active: false} = state
       ) do
+    acknowledge_active_utp(raw, data)
     buffer_inbound(state, Peer.MSE.crypt(ciphers.recv, data))
   end
 
@@ -283,6 +284,7 @@ defmodule Peer.Sender do
   end
 
   def handle_info({:utp, raw, data}, %__MODULE__{socket: {:mse, raw, ciphers}} = state) do
+    acknowledge_active_utp(raw, data)
     drain_inbound(%{state | buffer: state.buffer <> Peer.MSE.crypt(ciphers.recv, data)})
   end
 
@@ -291,6 +293,7 @@ defmodule Peer.Sender do
   end
 
   def handle_info({:utp, socket, data}, %{socket: socket, active: false} = state) do
+    acknowledge_active_utp(socket, data)
     buffer_inbound(state, data)
   end
 
@@ -299,6 +302,7 @@ defmodule Peer.Sender do
   end
 
   def handle_info({:utp, socket, data}, %{socket: socket} = state) do
+    acknowledge_active_utp(socket, data)
     drain_inbound(%{state | buffer: state.buffer <> data})
   end
 
@@ -386,6 +390,10 @@ defmodule Peer.Sender do
       <<>> -> buffer
       pending -> buffer <> pending
     end
+  end
+
+  defp acknowledge_active_utp(socket, data) do
+    UTP.Connection.active_recv_consumed(socket, byte_size(data))
   end
 
   defp absorb_kernel_buffer_loop(socket, buffer) do

@@ -50,6 +50,7 @@ defmodule UTP.Connection do
     reply_micro: 0,
     led: nil,
     active: false,
+    active_recv_bytes: 0,
     recv_buffer: <<>>,
     pending_send: <<>>,
     recv_waiters: [],
@@ -107,6 +108,12 @@ defmodule UTP.Connection do
     GenServer.call(pid, :take_recv_buffer, 5_000)
   catch
     :exit, _ -> <<>>
+  end
+
+  @doc false
+  @spec active_recv_consumed(socket_ref(), non_neg_integer()) :: :ok
+  def active_recv_consumed({:utp, pid}, bytes) when is_integer(bytes) and bytes >= 0 do
+    GenServer.cast(pid, {:active_recv_consumed, bytes})
   end
 
   @spec controlling_process(socket_ref(), pid()) :: :ok | {:error, term()}
@@ -198,6 +205,10 @@ defmodule UTP.Connection do
       end
 
     {:stop, :normal, shutdown(state, :normal)}
+  end
+
+  def handle_cast({:active_recv_consumed, bytes}, state) do
+    {:noreply, %{state | active_recv_bytes: max(state.active_recv_bytes - bytes, 0)}}
   end
 
   @impl true
@@ -458,10 +469,8 @@ defmodule UTP.Connection do
 
   defp deliver_payload(state, payload) do
     if state.active and is_pid(state.owner) do
-      # Active mode: hand the bytes to the owner immediately. They never enter
-      # our recv_buffer, so nothing to add to the flow-control accounting.
       send(state.owner, {:utp, state.socket_ref, payload})
-      state
+      %{state | active_recv_bytes: state.active_recv_bytes + byte_size(payload)}
     else
       state = %{state | recv_buffer: state.recv_buffer <> payload}
 
@@ -474,12 +483,13 @@ defmodule UTP.Connection do
   end
 
   # Bytes currently held in RAM for this connection: delivered-but-unread in
-  # the recv_buffer + out-of-order packets parked in recv_oob. This is the
-  # true memory pressure and drives our advertised wnd_size in transmit/5.
+  # the recv_buffer, active messages not yet dequeued by the owner, and
+  # out-of-order packets parked in recv_oob. This is the true memory pressure
+  # and drives our advertised wnd_size in transmit/5.
   # Deriving it every send-time avoids the previous running-counter bug where
   # OOB payloads were charged twice and reader consumption never decremented.
   defp recv_bytes_held(state) do
-    byte_size(state.recv_buffer) + oob_bytes(state)
+    byte_size(state.recv_buffer) + state.active_recv_bytes + oob_bytes(state)
   end
 
   defp oob_bytes(state) do
