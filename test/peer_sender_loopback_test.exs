@@ -153,6 +153,19 @@ defmodule PeerSenderLoopbackTest do
       assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
     end
 
+    test "oversized ut_metadata frame is rejected from its prefix without buffering its body" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      oversized = 2 + Magnet.UtMetadata.max_message_payload_size() + 1
+      local_id = Magnet.UtMetadata.Extension.local_id()
+      assert :ok = :gen_tcp.send(server, <<oversized::32, 20, local_id>>)
+
+      ref = Process.monitor(sender_pid)
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
+    end
+
     test "truncated known message body is a protocol error" do
       {client, server, listen, key, sender_pid} = start_sender_pair()
 

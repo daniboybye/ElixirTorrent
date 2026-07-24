@@ -884,6 +884,13 @@ defmodule Magnet.Connection do
       {:ok, {:request, _}} ->
         recv_ut_metadata_loop(conn, expected_piece, deadline)
 
+      {:error, :piece_too_large} ->
+        Logger.warning(
+          "[magnet_ut] invalid_piece_size endpoint=#{endpoint(conn)} piece=#{expected_piece} reason=piece_too_large"
+        )
+
+        {:error, :invalid_piece_size}
+
       {:error, reason} ->
         Logger.warning(
           "[magnet_ut] decode_fail endpoint=#{endpoint(conn)} piece=#{expected_piece} reason=#{inspect(reason)} payload=#{wire_hex(payload, 96)}"

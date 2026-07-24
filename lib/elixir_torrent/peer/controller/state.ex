@@ -25,6 +25,9 @@ defmodule Peer.Controller.State do
     # BEP 11 outbound is per-connection: each remote that negotiates ut_pex gets its
     # own view of what we already told them (`sent`), not a torrent-global ledger.
     pex_outbound: %{initial_sent?: false, initial_pending?: false, sent: %{}},
+    # BEP 9 metadata serving is synchronous, so there is no natural outstanding
+    # queue bound. Limit accepted requests per connection/window instead.
+    ut_metadata_requests: %{window_started_at: nil, count: 0},
     hash_requests: %{},
     requests: MapSet.new(),
     # Inbound block requests accepted for asynchronous disk reads but not yet
@@ -92,6 +95,7 @@ defmodule Peer.Controller.State do
             initial_pending?: boolean(),
             sent: %{endpoint() => Peer.UtPex.Entry.t()}
           },
+          ut_metadata_requests: %{window_started_at: integer() | nil, count: non_neg_integer()},
           hash_requests: %{Peer.HashTransfer.ref() => map()},
           requests: MapSet.t(subpiece()),
           upload_requests: MapSet.t(subpiece()),
@@ -119,6 +123,10 @@ defmodule Peer.Controller.State do
   @max_unanswered_requests 64
   @request_pipeline_depth 64
   @max_pending_hash_requests 8
+  # One metadata response can carry 16 KiB. 128 requests/s still permits about
+  # 2 MiB/s per peer while bounding CPU, mailbox work, and upload amplification.
+  @ut_metadata_request_limit 128
+  @ut_metadata_request_window_ms 1_000
   # How long a peer may stay pinned to a piece with choke_me and zero bytes on
   # that pin before Swarm may reassign it. Endgame uses a shorter threshold so
   # scarce unchokes rotate across ALL remaining pieces instead of monopolizing
@@ -128,6 +136,10 @@ defmodule Peer.Controller.State do
 
   @spec key(t()) :: Peer.key()
   def key(state), do: make_key(state.hash, state.id)
+
+  @doc false
+  @spec ut_metadata_request_limit() :: pos_integer()
+  def ut_metadata_request_limit, do: @ut_metadata_request_limit
 
   @doc false
   @spec eviction_info(t()) :: %{
@@ -599,18 +611,48 @@ defmodule Peer.Controller.State do
 
     case Magnet.UtMetadata.decode_message(payload) do
       {:ok, {:request, [piece: piece]}} ->
-        case Magnet.UtMetadata.serve_piece(state.hash, piece) do
-          {:ok, data, total} when is_integer(ut_id) and ut_id > 0 ->
-            reply = Magnet.UtMetadata.encode_data(piece, total, data)
-            _ = Peer.LTEP.send_extended(key(state), ut_id, reply)
-            state
+        case gate_ut_metadata_request(state, System.monotonic_time(:millisecond)) do
+          {:allow, state} ->
+            serve_ut_metadata_request(state, ut_id, piece)
 
-          _ ->
-            maybe_reject_ut_metadata(state, ut_id, piece)
+          {:reject, state} ->
+            state
         end
 
       _ ->
         state
+    end
+  end
+
+  @spec serve_ut_metadata_request(t(), pos_integer() | nil, non_neg_integer()) :: t()
+  defp serve_ut_metadata_request(state, ut_id, piece) do
+    case Magnet.UtMetadata.serve_piece(state.hash, piece) do
+      {:ok, data, total} when is_integer(ut_id) and ut_id > 0 ->
+        reply = Magnet.UtMetadata.encode_data(piece, total, data)
+        _ = Peer.LTEP.send_extended(key(state), ut_id, reply)
+        state
+
+      _ ->
+        maybe_reject_ut_metadata(state, ut_id, piece)
+    end
+  end
+
+  @spec gate_ut_metadata_request(t(), integer()) :: {:allow, t()} | {:reject, t()}
+  defp gate_ut_metadata_request(state, now_ms) do
+    %{window_started_at: started_at, count: count} = state.ut_metadata_requests
+
+    cond do
+      is_integer(started_at) and now_ms - started_at < @ut_metadata_request_window_ms and
+          count >= @ut_metadata_request_limit ->
+        {:reject, state}
+
+      is_integer(started_at) and now_ms - started_at < @ut_metadata_request_window_ms ->
+        requests = %{window_started_at: started_at, count: count + 1}
+        {:allow, %{state | ut_metadata_requests: requests}}
+
+      true ->
+        requests = %{window_started_at: now_ms, count: 1}
+        {:allow, %{state | ut_metadata_requests: requests}}
     end
   end
 

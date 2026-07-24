@@ -12,6 +12,9 @@ defmodule Peer.Sender do
   @max_length Torrent.Downloads.piece_max_length()
   @max_hash_header_message_size 1 + Peer.HashWire.header_size()
   @max_hashes_message_size Peer.HashWire.max_hashes_message_size()
+  @ut_metadata_local_id Magnet.UtMetadata.Extension.local_id()
+  # Length includes the top-level wire id and LTEP extension id.
+  @max_ut_metadata_message_size 2 + Magnet.UtMetadata.max_message_payload_size()
 
   defstruct [:socket, :buffer, :key, active: false, utp_held_bytes: 0]
 
@@ -468,6 +471,10 @@ defmodule Peer.Sender do
   end
 
   @spec take_message(binary()) :: {:ok, binary(), binary()} | :incomplete | :protocol_error
+  defp take_message(<<len::32, @extended_id, @ut_metadata_local_id, _::binary>>)
+       when len > @max_ut_metadata_message_size,
+       do: :protocol_error
+
   defp take_message(<<len::32, id, _::binary>>)
        when id in [21, 23] and len > @max_hash_header_message_size,
        do: :protocol_error

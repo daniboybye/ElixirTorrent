@@ -8,6 +8,10 @@ defmodule Magnet.UtMetadata do
   """
 
   @block_size 16_384
+  # The bencoded data header is normally under 100 bytes. Keep a small bounded
+  # allowance for key ordering / integer widths while rejecting a declared
+  # ut_metadata frame before Peer.Sender buffers an attacker-sized body.
+  @max_header_size 1_024
 
   @type msg_type :: :request | :data | :reject
   @type extension_handshake :: %{
@@ -23,6 +27,10 @@ defmodule Magnet.UtMetadata do
   """
   @spec block_size() :: pos_integer()
   def block_size, do: @block_size
+
+  @doc false
+  @spec max_message_payload_size() :: pos_integer()
+  def max_message_payload_size, do: @block_size + @max_header_size
 
   @doc """
   Number of metadata pieces for a given total metadata byte size.
@@ -148,10 +156,15 @@ defmodule Magnet.UtMetadata do
         :data ->
           total_size = Map.get(dict, "total_size")
 
-          if is_integer(total_size) and total_size > 0 do
-            {:ok, {:data, [piece: piece, total_size: total_size, data: rest]}}
-          else
-            {:error, :missing_total_size}
+          cond do
+            not (is_integer(total_size) and total_size > 0) ->
+              {:error, :missing_total_size}
+
+            byte_size(rest) > @block_size ->
+              {:error, :piece_too_large}
+
+            true ->
+              {:ok, {:data, [piece: piece, total_size: total_size, data: rest]}}
           end
       end
     end

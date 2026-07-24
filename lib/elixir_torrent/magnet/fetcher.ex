@@ -812,9 +812,10 @@ defmodule Magnet.Fetcher do
     if connections == [], do: {:error, :no_connections}, else: {:ok, connections}
   end
 
+  @doc false
   @spec download_pieces([Magnet.Connection.t()], Torrent.hash()) ::
           {:ok, binary()} | {:error, term()}
-  defp download_pieces(connections, hash) do
+  def download_pieces(connections, hash) do
     case initial_piece_state(connections) do
       {:error, _} = error ->
         error
@@ -850,7 +851,7 @@ defmodule Magnet.Fetcher do
         {size, %{}}
 
       _ ->
-        case fetch_piece_from_any(connections, 0) do
+        case fetch_piece_from_any(connections, 0, nil) do
           {:ok, {0, data, total_size}} -> {total_size, %{0 => data}}
           {:error, _} = error -> error
         end
@@ -885,7 +886,7 @@ defmodule Magnet.Fetcher do
   defp fetch_missing_pieces(_connections, _total_size, pieces, [], _hash), do: {:ok, pieces}
 
   defp fetch_missing_pieces(connections, total_size, pieces, [index | rest], hash) do
-    case fetch_piece_from_any(connections, index) do
+    case fetch_piece_from_any(connections, index, total_size) do
       {:ok, {^index, data, ^total_size}} ->
         if rem(index + 1, 4) == 0 or rest == [] do
           Logger.debug(
@@ -906,15 +907,24 @@ defmodule Magnet.Fetcher do
     end
   end
 
-  @spec fetch_piece_from_any([Magnet.Connection.t()], non_neg_integer()) ::
+  @spec fetch_piece_from_any(
+          [Magnet.Connection.t()],
+          non_neg_integer(),
+          pos_integer() | nil
+        ) ::
           {:ok, {non_neg_integer(), binary(), pos_integer()}} | {:error, term()}
-  defp fetch_piece_from_any(connections, piece_index) do
+  defp fetch_piece_from_any(connections, piece_index, expected_total_size) do
     connections
     |> shuffle()
     |> Enum.reduce_while({:error, :all_rejected, nil}, fn conn, acc ->
       case Magnet.Connection.request_piece(conn, piece_index) do
         {:ok, data, total_size} ->
-          {:halt, {:ok, {piece_index, data, total_size}}}
+          if valid_piece_size?(data, total_size, piece_index, expected_total_size) do
+            {:halt, {:ok, {piece_index, data, total_size}}}
+          else
+            reason = {:metadata_size_mismatch, total_size, expected_total_size}
+            {:cont, {:error, :all_rejected, reason}}
+          end
 
         {:reject, ^piece_index} ->
           {:cont, acc}
@@ -930,6 +940,15 @@ defmodule Magnet.Fetcher do
     |> finalize_piece_attempt()
   end
 
+  @spec valid_piece_size?(binary(), pos_integer(), non_neg_integer(), pos_integer() | nil) ::
+          boolean()
+  defp valid_piece_size?(_data, _total_size, _piece_index, nil), do: true
+
+  defp valid_piece_size?(data, total_size, piece_index, expected_total_size) do
+    total_size == expected_total_size and
+      byte_size(data) == Magnet.UtMetadata.piece_byte_size(expected_total_size, piece_index)
+  end
+
   @spec finalize_piece_attempt(
           {:ok, {non_neg_integer(), binary(), pos_integer()}}
           | {:error, :all_rejected, term() | nil}
@@ -941,7 +960,15 @@ defmodule Magnet.Fetcher do
   defp finalize_piece_attempt({:error, :all_rejected, reason}),
     do: {:error, reason || :metadata_unavailable}
 
-  @retryable_piece_errors [:closed, :choked, :timeout, :einval, :enotconn, :error]
+  @retryable_piece_errors [
+    :closed,
+    :choked,
+    :timeout,
+    :einval,
+    :enotconn,
+    :error,
+    :invalid_piece_size
+  ]
 
   @spec retryable_piece_error?(term()) :: boolean()
   defp retryable_piece_error?(reason), do: reason in @retryable_piece_errors
