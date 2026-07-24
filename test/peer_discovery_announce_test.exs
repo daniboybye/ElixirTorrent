@@ -312,6 +312,64 @@ defmodule PeerDiscoveryAnnounceTest do
     assert new_state.last_tracker_announce_ms >= before_ms
   end
 
+  test "BEP 12 promotes out-of-order parallel successes by tracker URL, not stale index" do
+    hash = <<13::160>>
+    tracker_a = "http://tracker-a.example/announce"
+    tracker_b = "http://tracker-b.example/announce"
+    tracker_c = "http://tracker-c.example/announce"
+    ref_a = make_ref()
+    ref_b = make_ref()
+
+    torrent = %Torrent{
+      hash: hash,
+      metadata: %{"info" => %{"name" => "sticky-tracker", "private" => 1}},
+      left: 1_000,
+      last_index: 0,
+      last_piece_length: 1_000,
+      peer_status: :seed
+    }
+
+    {:ok, model_pid} = Torrent.Model.start_link(torrent)
+
+    on_exit(fn ->
+      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+    end)
+
+    state =
+      base_state(
+        hash: hash,
+        tiers: [[tracker_a, tracker_b, tracker_c]],
+        requests: %{
+          ref_a => {tracker_a, 0, 0},
+          ref_b => {tracker_b, 0, 1}
+        },
+        tier_batches: %{0 => 2}
+      )
+
+    response = %Response{
+      peers: [%Peer{ip: {203, 0, 113, 13}, port: 6_881}],
+      interval: 1_800,
+      complete: 1,
+      incomplete: 0
+    }
+
+    after_b =
+      Announce.dispatch_task_message(
+        state,
+        {ref_b, {Torrent.started(), response}}
+      )
+
+    assert after_b.tiers == [[tracker_b, tracker_a, tracker_c]]
+
+    after_a =
+      Announce.dispatch_task_message(
+        after_b,
+        {ref_a, {Torrent.started(), response}}
+      )
+
+    assert after_a.tiers == [[tracker_a, tracker_b, tracker_c]]
+  end
+
   test "BEP 12 tracker tiers are shuffled once at load and stay stable across announces" do
     hash = <<12::160>>
     tier0 = Enum.map(1..4, &"http://tier0-#{&1}.example/announce")

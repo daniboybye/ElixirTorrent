@@ -420,9 +420,8 @@ defmodule PeerDiscovery.Announce do
       {nil, _} ->
         {:noreply, state}
 
-      {{announce, tier_index, tracker_index}, requests} ->
-        state =
-          apply_tracker_response(state, announce, tier_index, tracker_index, event, response)
+      {{announce, tier_index, _tracker_index}, requests} ->
+        state = apply_tracker_response(state, announce, tier_index, event, response)
 
         state = dec_tier_batch(state, tier_index)
         {:noreply, %{state | requests: requests}}
@@ -878,11 +877,10 @@ defmodule PeerDiscovery.Announce do
           %__MODULE__{},
           String.t(),
           non_neg_integer(),
-          non_neg_integer(),
           0..3,
           Tracker.Response.t()
         ) :: %__MODULE__{}
-  defp apply_tracker_response(state, announce, tier_index, tracker_index, event, response) do
+  defp apply_tracker_response(state, announce, tier_index, event, response) do
     # The global announce floor starts only after a tracker yielded usable peers.
     # A zero-peer answer participates in whole-tier failover, and the failed URL
     # is not revisited until the tier ring wraps and applies its backoff.
@@ -890,7 +888,7 @@ defmodule PeerDiscovery.Announce do
 
     state =
       state
-      |> promote_tracker(tier_index, tracker_index)
+      |> promote_tracker(tier_index, announce)
       |> put_in([Access.key!(:peers), announce], response.peers)
       |> Map.put(:tracker_interval_sec, response.interval)
       |> Map.put(:tracker_min_interval_sec, response.min_interval)
@@ -1332,13 +1330,20 @@ defmodule PeerDiscovery.Announce do
   end
 
   # BEP 12: on success, move the working tracker to the front of its tier.
-  @spec promote_tracker(%__MODULE__{}, non_neg_integer(), non_neg_integer()) :: %__MODULE__{}
-  defp promote_tracker(%__MODULE__{tiers: tiers} = state, tier_index, tracker_index) do
+  # Parallel responses can arrive after an earlier success already reordered
+  # the tier, so identity must be the announce URL rather than its launch index.
+  @spec promote_tracker(%__MODULE__{}, non_neg_integer(), String.t()) :: %__MODULE__{}
+  defp promote_tracker(%__MODULE__{tiers: tiers} = state, tier_index, announce) do
     case Enum.fetch(tiers, tier_index) do
       {:ok, tier} ->
-        {tracker, rest} = List.pop_at(tier, tracker_index)
-        promoted_tier = [tracker | List.delete(rest, tracker)]
-        put_in(state, [Access.key!(:tiers), Access.at(tier_index)], promoted_tier)
+        case Enum.split_while(tier, &(&1 != announce)) do
+          {before, [^announce | remaining]} ->
+            promoted_tier = [announce | before ++ remaining]
+            put_in(state, [Access.key!(:tiers), Access.at(tier_index)], promoted_tier)
+
+          {_before, []} ->
+            state
+        end
 
       :error ->
         state
