@@ -22,8 +22,9 @@ defmodule Torrent.WebSeed do
       the last subpiece arrives. On verify-ok we also call `Swarm.have/2`
       so connected peers learn we can serve the piece.
     * URL selection is a simple round-robin over URLs that aren't in
-      per-URL backoff. Failures escalate the backoff exponentially per URL;
-      first success resets it.
+      per-URL backoff. Transient failures escalate the backoff exponentially
+      per URL; first success resets it. A URL that serves bytes failing piece
+      hash verification is disabled for the rest of the session.
 
   URL resolution per BEP 19:
 
@@ -61,6 +62,7 @@ defmodule Torrent.WebSeed do
     :multi_file?,
     urls: [],
     url_state: %{},
+    disabled_urls: MapSet.new(),
     tasks: %{}
   ]
 
@@ -143,8 +145,16 @@ defmodule Torrent.WebSeed do
       "[webseed] fail hash=#{Torrent.hex_encoded_hash(state.hash)} index=#{index} url=#{url} reason=#{inspect(reason)}"
     )
 
-    {:noreply,
-     %{state | tasks: tasks, url_state: penalise_url(state.url_state, url)} |> maybe_pick()}
+    state =
+      case reason do
+        :hash_mismatch ->
+          %{state | disabled_urls: MapSet.put(state.disabled_urls, url)}
+
+        _ ->
+          %{state | url_state: penalise_url(state.url_state, url)}
+      end
+
+    {:noreply, %{state | tasks: tasks} |> maybe_pick()}
   end
 
   def handle_info({:DOWN, _ref, :process, pid, reason}, %__MODULE__{tasks: tasks} = state) do
@@ -192,15 +202,16 @@ defmodule Torrent.WebSeed do
     end
   end
 
-  defp eligible_url(%__MODULE__{urls: urls, url_state: st}) do
+  defp eligible_url(%__MODULE__{urls: urls, url_state: st, disabled_urls: disabled_urls}) do
     now = System.monotonic_time(:millisecond)
 
     urls
     |> Enum.filter(fn url ->
-      case Map.get(st, url) do
-        nil -> true
-        %{next_ok_at_ms: t} -> t <= now
-      end
+      not MapSet.member?(disabled_urls, url) and
+        case Map.get(st, url) do
+          nil -> true
+          %{next_ok_at_ms: t} -> t <= now
+        end
     end)
     |> case do
       [] -> nil
@@ -213,7 +224,7 @@ defmodule Torrent.WebSeed do
   # peer swarm already handles rarest-first; webseeds fill in.
   defp pick_index(%__MODULE__{hash: hash, last_index: last_index, tasks: tasks}) do
     bitfield = Model.get(hash, :bitfield)
-    in_flight = tasks |> Map.values() |> MapSet.new(fn {i, _} -> i end)
+    in_flight = tasks |> Map.values() |> MapSet.new(fn {_ref, index, _url} -> index end)
 
     Enum.find(0..last_index, fn index ->
       not Bitfield.have?(bitfield, index) and
@@ -262,7 +273,8 @@ defmodule Torrent.WebSeed do
       false ->
         # Wrote piece but hash didn't match — FileHandle.check?/3 already
         # called Model.hash_check_failure/2, resetting the bitfield bit and
-        # the pieces_statistic slot. Treat as a URL failure so we back off.
+        # the pieces_statistic slot. This mirror is unsafe for this torrent,
+        # so the GenServer disables it for the rest of the current session.
         Logger.warning(
           "[webseed] hash_mismatch hash=#{Torrent.hex_encoded_hash(state.hash)} index=#{index} url=#{url}"
         )

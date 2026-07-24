@@ -381,6 +381,111 @@ defmodule TorrentStorageCoverageBatchTest do
         assert Model.get(hash, :left) == 0
       end)
     end
+
+    test "schedules two different pieces concurrently without crashing" do
+      piece0 = random_piece()
+      piece1 = random_piece()
+      {port, server_ref} = start_controlled_http_server()
+      url = "http://127.0.0.1:#{port}/tiny.bin"
+      {torrent, _} = build_tiny_torrent([piece0, piece1], url_list: [url])
+
+      with_webseed_stack(torrent, fn hash, pid ->
+        monitor = Process.monitor(pid)
+        send(pid, :tick)
+
+        assert_receive {:webseed_http_request, ^server_ref, first, first_request}, 2_000
+
+        send(pid, :tick)
+
+        assert_receive {:webseed_http_request, ^server_ref, second, second_request}, 2_000
+        refute first == second
+
+        indices =
+          pid
+          |> :sys.get_state()
+          |> Map.fetch!(:tasks)
+          |> Map.values()
+          |> Enum.map(fn {_ref, index, _url} -> index end)
+          |> Enum.sort()
+
+        assert indices == [0, 1]
+        refute_receive {:DOWN, ^monitor, :process, ^pid, _reason}, 0
+
+        reply_for_range(first, first_request, piece0, piece1)
+        reply_for_range(second, second_request, piece0, piece1)
+
+        assert wait_until(fn -> Model.downloaded?(hash) end, 5_000)
+        assert Process.alive?(pid)
+      end)
+    end
+
+    test "hash-mismatching mirror is disabled for the rest of the session" do
+      piece0 = random_piece()
+      {port, server_ref} = start_controlled_http_server()
+      url = "http://127.0.0.1:#{port}/tiny.bin"
+      {torrent, _} = build_tiny_torrent([piece0], url_list: [url])
+
+      with_webseed_stack(torrent, fn hash, pid ->
+        send(pid, :tick)
+        assert_receive {:webseed_http_request, ^server_ref, request_pid, _request}, 2_000
+        reply_http(request_pid, 206, corrupt_piece(piece0))
+
+        assert wait_until(
+                 fn ->
+                   state = :sys.get_state(pid)
+
+                   state.tasks == %{} and MapSet.member?(state.disabled_urls, url) and
+                     not Map.has_key?(state.url_state, url)
+                 end,
+                 2_000
+               )
+
+        send(pid, :tick)
+        send(pid, :tick)
+        refute_receive {:webseed_http_request, ^server_ref, _request_pid, _request}, 200
+        refute Torrent.have?(hash, 0)
+        assert Process.alive?(pid)
+      end)
+    end
+
+    test "transient HTTP failure backs off and retries after the deadline" do
+      piece0 = random_piece()
+      {port, server_ref} = start_controlled_http_server()
+      url = "http://127.0.0.1:#{port}/tiny.bin"
+      {torrent, _} = build_tiny_torrent([piece0], url_list: [url])
+
+      with_webseed_stack(torrent, fn hash, pid ->
+        send(pid, :tick)
+        assert_receive {:webseed_http_request, ^server_ref, first, _request}, 2_000
+        reply_http(first, 503, "temporarily unavailable")
+
+        assert wait_until(
+                 fn ->
+                   state = :sys.get_state(pid)
+
+                   state.tasks == %{} and Map.has_key?(state.url_state, url) and
+                     not MapSet.member?(state.disabled_urls, url)
+                 end,
+                 2_000
+               )
+
+        send(pid, :tick)
+        refute_receive {:webseed_http_request, ^server_ref, _request_pid, _request}, 200
+
+        :sys.replace_state(pid, fn state ->
+          update_in(state.url_state[url].next_ok_at_ms, fn _ ->
+            System.monotonic_time(:millisecond) - 1
+          end)
+        end)
+
+        send(pid, :tick)
+        assert_receive {:webseed_http_request, ^server_ref, second, _request}, 2_000
+        reply_http(second, 206, piece0)
+
+        assert wait_until(fn -> Torrent.have?(hash, 0) end, 5_000)
+        assert Process.alive?(pid)
+      end)
+    end
   end
 
   describe "Torrent.Swarm assignment and pin branches" do
@@ -866,6 +971,98 @@ defmodule TorrentStorageCoverageBatchTest do
     end)
 
     port
+  end
+
+  defp start_controlled_http_server do
+    {:ok, listen} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, port} = :inet.port(listen)
+    owner = self()
+    server_ref = make_ref()
+
+    server =
+      spawn(fn ->
+        serve_controlled_http(listen, owner, server_ref)
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(server), do: Process.exit(server, :kill)
+      :gen_tcp.close(listen)
+    end)
+
+    {port, server_ref}
+  end
+
+  defp serve_controlled_http(listen, owner, server_ref) do
+    case :gen_tcp.accept(listen) do
+      {:ok, socket} ->
+        spawn(fn ->
+          case :gen_tcp.recv(socket, 0, 5_000) do
+            {:ok, request} ->
+              send(owner, {:webseed_http_request, server_ref, self(), request})
+
+              receive do
+                {:webseed_http_reply, code, body} ->
+                  send_http_response(socket, code, body)
+              after
+                5_000 -> :ok
+              end
+
+            {:error, _} ->
+              :ok
+          end
+
+          :gen_tcp.close(socket)
+        end)
+
+        serve_controlled_http(listen, owner, server_ref)
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  defp reply_for_range(request_pid, request, piece0, piece1) do
+    cond do
+      String.contains?(request, "Range: bytes=0-255") ->
+        reply_http(request_pid, 206, piece0)
+
+      String.contains?(request, "Range: bytes=256-511") ->
+        reply_http(request_pid, 206, piece1)
+
+      true ->
+        flunk("unexpected webseed range request: #{inspect(request)}")
+    end
+  end
+
+  defp reply_http(request_pid, code, body) do
+    send(request_pid, {:webseed_http_reply, code, body})
+  end
+
+  defp corrupt_piece(<<first, rest::binary>>) do
+    <<Bitwise.bxor(first, 1), rest::binary>>
+  end
+
+  defp send_http_response(socket, code, body) do
+    status =
+      case code do
+        200 -> "200 OK"
+        206 -> "206 Partial Content"
+        503 -> "503 Service Unavailable"
+      end
+
+    response =
+      IO.iodata_to_binary([
+        "HTTP/1.1 ",
+        status,
+        "\r\nContent-Length: ",
+        Integer.to_string(byte_size(body)),
+        "\r\nConnection: close\r\n\r\n",
+        body
+      ])
+
+    :gen_tcp.send(socket, response)
   end
 
   defp serve_range_http(listen, body) do
