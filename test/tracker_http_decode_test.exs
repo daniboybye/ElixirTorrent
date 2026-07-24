@@ -55,6 +55,29 @@ defmodule TrackerHTTPDecodeTest do
 
       assert interval == Tracker.default_interval()
     end
+
+    test "keeps a 4-byte BEP 24 external IP from the decoded response" do
+      external_ip = <<203, 0, 113, 7>>
+
+      assert %Response{external_ip: ^external_ip} =
+               Tracker.decode_http_response_for_test(%{"external ip" => external_ip})
+    end
+
+    test "keeps a 16-byte BEP 24 external IP from the decoded response" do
+      external_ip = <<0x2001::16, 0xDB8::16, 0::80, 7::16>>
+
+      assert %Response{external_ip: ^external_ip} =
+               Tracker.decode_http_response_for_test(%{"external ip" => external_ip})
+    end
+
+    test "uses nil when BEP 24 external IP is absent" do
+      assert %Response{external_ip: nil} = Tracker.decode_http_response_for_test(%{})
+    end
+
+    test "uses nil when BEP 24 external IP has an invalid packed length" do
+      assert %Response{external_ip: nil} =
+               Tracker.decode_http_response_for_test(%{"external ip" => <<1, 2, 3, 4, 5>>})
+    end
   end
 
   describe "merge_http_announces_for_test/1 (multi-endpoint announce merge)" do
@@ -148,6 +171,32 @@ defmodule TrackerHTTPDecodeTest do
                )
 
       assert peer.ip == {127, 0, 0, 1}
+    end
+
+    test "malformed BEP 24 external IP does not discard peers from the full response" do
+      hash = :crypto.strong_rand_bytes(20)
+      peers_bin = <<127, 0, 0, 1, 6881::16>>
+
+      body =
+        Bento.encode!(%{
+          "interval" => 120,
+          "external ip" => <<1, 2, 3, 4, 5>>,
+          "peers" => peers_bin
+        })
+
+      {port, _pid} = start_http_tracker(fn _req -> {200, body} end)
+      stats = [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()]
+
+      assert %Response{external_ip: nil, peers: [%Peer{} = peer]} =
+               Tracker.request!(
+                 "http://127.0.0.1:#{port}/announce",
+                 hash,
+                 stats,
+                 http_timeout_ms: 5_000
+               )
+
+      assert peer.ip == {127, 0, 0, 1}
+      assert peer.port == 6881
     end
 
     test "extract_js_redirect_for_test and absolute_redirect_for_test" do

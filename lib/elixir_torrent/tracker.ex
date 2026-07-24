@@ -13,7 +13,6 @@ defmodule Tracker do
           completed: non_neg_integer()
         }
 
-  @bento_nil Bento.encode!(nil)
   # BEP-friendly HTTP/UDP budget at swarm target — keep-alive reuse and full BEP 15
   # retransmit ladder (15 * 2^n s, up to ~127 min) for healthy trackers.
   @timeout 5 * 60 * 1_000
@@ -633,10 +632,13 @@ defmodule Tracker do
       min_interval: Map.get(map, "min interval"),
       complete: Map.get(map, "complete", 0),
       incomplete: Map.get(map, "incomplete", 0),
-      external_ip: Map.get(map, "external ip", @bento_nil) |> Bento.decode!(),
+      external_ip: valid_external_ip(Map.get(map, "external ip")),
       peers: peers_v4 ++ peers_v6
     }
   end
+
+  defp valid_external_ip(ip) when is_binary(ip) and byte_size(ip) in [4, 16], do: ip
+  defp valid_external_ip(_ip), do: nil
 
   @spec merge_http_announces(list(Response.t() | Error.t())) :: Response.t() | Error.t()
   defp merge_http_announces(list) do
