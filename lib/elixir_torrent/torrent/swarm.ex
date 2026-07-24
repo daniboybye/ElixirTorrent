@@ -345,6 +345,8 @@ defmodule Torrent.Swarm do
       {_id, pid, _type, _modules} when is_pid(pid) -> [pid]
       _ -> []
     end)
+  catch
+    :exit, _ -> []
   end
 
   @spec safe_rank(pid()) :: [Peer.Controller.State.rank()]

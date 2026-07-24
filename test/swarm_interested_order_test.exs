@@ -76,6 +76,19 @@ defmodule SwarmInterestedOrderTest do
     end)
   end
 
+  test "interested_for_piece/2 is a no-op after the swarm shuts down" do
+    hash = :crypto.strong_rand_bytes(20)
+
+    with_model(hash, fn _ ->
+      start_swarm(hash)
+      swarm_pid = GenServer.whereis(swarm_via(hash))
+      safe_stop(swarm_pid)
+
+      assert Swarm.interest_peer_pids(hash, 0) == []
+      assert :ok = Swarm.interested_for_piece(hash, 0)
+    end)
+  end
+
   ## helpers -----------------------------------------------------------------
 
   defp swarm_via(hash), do: {:via, Registry, {Registry, {hash, Torrent.Swarm}}}
