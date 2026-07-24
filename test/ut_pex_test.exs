@@ -588,4 +588,102 @@ defmodule Peer.UtPexTest do
       assert routed.pex_outbound.sent == %{}
     end
   end
+
+  describe "source-aware ingest (PEX item 5)" do
+    alias Peer.ConnectionManager.Queue, as: DialQueue
+
+    defp start_manager(hash) do
+      name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
+      {:ok, pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: name)
+      pid
+    end
+
+    test "ingest with pex_source tags offers and applies scoped drops" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_manager(hash)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+
+      supplier = <<6::160>>
+      keep = {{10, 0, 0, 10}, 7010}
+      drop = {{10, 0, 0, 11}, 7011}
+
+      :ok =
+        Peer.ConnectionManager.offer_peers(hash, [%Peer{ip: elem(drop, 0), port: elem(drop, 1)}])
+
+      payload = UtPex.encode([keep], [drop])
+
+      assert {:ok, _, _} =
+               UtPex.ingest(hash, payload, pex_source: supplier, initial?: false)
+
+      state = :sys.get_state(pid)
+      assert DialQueue.get_peer(state.queue, keep) != nil
+      assert DialQueue.get_peer(state.queue, drop) != nil
+    end
+
+    test "ingest without pex_source still uses discovery offer path" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_manager(hash)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+
+      ep = {{10, 0, 0, 12}, 7012}
+      assert {:ok, _, _} = UtPex.ingest(hash, UtPex.encode([ep], []))
+
+      state = :sys.get_state(pid)
+      entry = Map.fetch!(state.queue, ep)
+      assert MapSet.member?(entry.sources, :discovery)
+    end
+
+    test "one PEX delta revokes old source-owned contacts before offering new ones" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_manager(hash)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+
+      supplier = <<7::160>>
+      old = {{10, 0, 0, 13}, 7013}
+      new = {{10, 0, 0, 14}, 7014}
+
+      :ok =
+        Peer.ConnectionManager.offer_peers_from_pex(hash, supplier, [
+          %Peer{ip: elem(old, 0), port: elem(old, 1)}
+        ])
+
+      assert {:ok, _, _} =
+               UtPex.ingest(hash, UtPex.encode([new], [old]), pex_source: supplier)
+
+      state = :sys.get_state(pid)
+      refute Map.has_key?(state.queue, old)
+      assert DialQueue.get_peer(state.queue, new) != nil
+    end
+
+    test "controller uses its remote peer id as the PEX ownership source" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_manager(hash)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+
+      supplier = <<8::160>>
+      endpoint = {{10, 0, 0, 15}, 7015}
+
+      state = %Peer.Controller.State{
+        hash: hash,
+        id: supplier,
+        fast_extension: nil,
+        status: nil,
+        pieces_count: 1,
+        socket: nil,
+        ltep: Peer.LTEP.Session.new([Peer.UtPex.Extension])
+      }
+
+      routed =
+        Peer.Controller.State.handle_extended(
+          state,
+          Peer.UtPex.Extension.local_id(),
+          UtPex.encode([endpoint], [])
+        )
+
+      manager_state = :sys.get_state(pid)
+      entry = Map.fetch!(manager_state.queue, endpoint)
+      assert MapSet.member?(entry.sources, {:pex, supplier})
+      assert MapSet.member?(routed.holepunch.pex_endpoints, endpoint)
+    end
+  end
 end

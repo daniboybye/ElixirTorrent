@@ -110,6 +110,7 @@ defmodule Peer.UtPex do
   @spec ingest(Torrent.hash(), binary(), keyword()) :: {:ok, [Peer.t()], [Peer.t()]} | :error
   def ingest(hash, payload, opts \\ []) when is_binary(payload) do
     result = if allowed?(hash), do: decode(payload, opts), else: :error
+    pex_source = Keyword.get(opts, :pex_source)
 
     case result do
       {:ok, added, dropped} ->
@@ -127,8 +128,14 @@ defmodule Peer.UtPex do
           Logger.info(
             "[ut_pex] ingest hash=#{Torrent.hex_encoded_hash(hash)} added=#{length(peers)} seeds=#{seed_count}"
           )
+        end
 
-          Acceptor.handshakes(peers, hash)
+        if is_binary(pex_source) and byte_size(pex_source) == 20 do
+          :ok = Peer.ConnectionManager.apply_pex_delta(hash, pex_source, peers, dropped)
+        else
+          if peers != [] do
+            Acceptor.handshakes(peers, hash)
+          end
         end
 
         {:ok, added, dropped}

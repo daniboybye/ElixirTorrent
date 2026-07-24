@@ -307,7 +307,10 @@ defmodule Peer.Controller.State do
         initial? = state.pex_inbound.initial?
 
         state =
-          case Peer.UtPex.ingest(state.hash, payload, initial?: initial?) do
+          case Peer.UtPex.ingest(state.hash, payload,
+                 initial?: initial?,
+                 pex_source: state.id
+               ) do
             {:ok, added, dropped} -> update_holepunch_pex(state, added, dropped)
             :error -> state
           end

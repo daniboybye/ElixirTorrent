@@ -53,7 +53,14 @@ end
 defmodule Peer.ConnectionManagerTest do
   use ExUnit.Case, async: false
 
+  alias Peer.ConnectionManager.Queue, as: DialQueue
   alias PeerDiscovery.Announce
+
+  defp start_isolated_manager(hash) do
+    name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
+    {:ok, pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: name)
+    pid
+  end
 
   setup do
     {:ok, _} = Application.ensure_all_started(:elixir_torrent)
@@ -100,7 +107,7 @@ defmodule Peer.ConnectionManagerTest do
       ])
 
     state = :sys.get_state(pid)
-    assert state.queue[{endpoint, port}].seed == true
+    assert DialQueue.get_peer(state.queue, {endpoint, port}).seed == true
   end
 
   test "offer_peers enqueues unique endpoints" do
@@ -122,6 +129,86 @@ defmodule Peer.ConnectionManagerTest do
 
     state = :sys.get_state(pid)
     assert map_size(state.queue) == 2
+  end
+
+  describe "source-aware candidate retention (PEX item 5)" do
+    alias Peer.ConnectionManager.Queue, as: DialQueue
+
+    test "discovery ownership survives a remote PEX drop" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_isolated_manager(hash)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+
+      ep = %Peer{ip: {10, 0, 0, 1}, port: 9001}
+      supplier = <<1::160>>
+
+      :ok = Peer.ConnectionManager.offer_peers(hash, [ep])
+      :ok = Peer.ConnectionManager.offer_peers_from_pex(hash, supplier, [ep])
+      :ok = Peer.ConnectionManager.revoke_pex_peers(hash, supplier, [ep])
+
+      state = :sys.get_state(pid)
+      assert DialQueue.get_peer(state.queue, {ep.ip, ep.port}) == ep
+    end
+
+    test "two PEX suppliers — drop from one leaves the other's tag" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_isolated_manager(hash)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+
+      ep = %Peer{ip: {10, 0, 0, 2}, port: 9002}
+      a = <<2::160>>
+      b = <<3::160>>
+
+      :ok = Peer.ConnectionManager.offer_peers_from_pex(hash, a, [ep])
+      :ok = Peer.ConnectionManager.offer_peers_from_pex(hash, b, [ep])
+      :ok = Peer.ConnectionManager.revoke_pex_peers(hash, a, [ep])
+
+      state = :sys.get_state(pid)
+      entry = Map.fetch!(state.queue, {ep.ip, ep.port})
+      assert MapSet.member?(entry.sources, {:pex, b})
+      refute MapSet.member?(entry.sources, {:pex, a})
+    end
+
+    test "drop from a different PEX supplier cannot revoke the owner" do
+      ep = %Peer{ip: {10, 0, 0, 22}, port: 9022}
+      owner = <<22::160>>
+      stranger = <<23::160>>
+
+      queue =
+        %{}
+        |> DialQueue.offer([ep], {:pex, owner})
+        |> DialQueue.revoke_pex(stranger, [ep])
+
+      entry = Map.fetch!(queue, {ep.ip, ep.port})
+      assert entry.sources == MapSet.new([{:pex, owner}])
+    end
+
+    test "sole PEX source drop removes endpoint from queue" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_isolated_manager(hash)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+
+      ep = %Peer{ip: {10, 0, 0, 3}, port: 9003}
+      supplier = <<4::160>>
+
+      :ok = Peer.ConnectionManager.offer_peers_from_pex(hash, supplier, [ep])
+      :ok = Peer.ConnectionManager.revoke_pex_peers(hash, supplier, [ep])
+
+      state = :sys.get_state(pid)
+      assert map_size(state.queue) == 0
+    end
+
+    test "pure queue merges seed hints across sources" do
+      ep = {10, 0, 0, 4}
+      port = 9004
+
+      q =
+        %{}
+        |> DialQueue.offer([%Peer{ip: ep, port: port}], :discovery)
+        |> DialQueue.offer([%Peer{ip: ep, port: port, seed: true}], {:pex, <<5::160>>})
+
+      assert DialQueue.get_peer(q, {ep, port}).seed == true
+    end
   end
 
   describe "throughput-aware discovery escalation" do
@@ -183,9 +270,10 @@ defmodule Peer.ConnectionManagerTest do
 
     defp fill_queue(manager_pid, n) do
       queue =
-        for i <- 1..n, into: %{} do
-          peer = %Peer{ip: {10, 0, rem(i, 250), rem(i, 250)}, port: 6000 + i}
-          {{peer.ip, peer.port}, peer}
+        for i <- 1..n, reduce: %{} do
+          acc ->
+            peer = %Peer{ip: {10, 0, rem(i, 250), rem(i, 250)}, port: 6000 + i}
+            DialQueue.offer(acc, [peer], :discovery)
         end
 
       :sys.replace_state(manager_pid, fn state ->

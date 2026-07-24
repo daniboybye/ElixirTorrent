@@ -8,6 +8,7 @@ defmodule Peer.ConnectionManager do
 
   require Logger
 
+  alias Peer.ConnectionManager.Queue, as: DialQueue
   alias Torrent.Swarm
 
   # @target_connected must stay strictly below @swarm_cap. Both `handle_info(:tick)`
@@ -44,7 +45,46 @@ defmodule Peer.ConnectionManager do
   def offer_peers(hash, peers) when is_list(peers) do
     case GenServer.whereis(via(hash)) do
       nil -> :ok
-      pid -> GenServer.cast(pid, {:offer, peers})
+      pid -> GenServer.cast(pid, {:offer, peers, :discovery})
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc false
+  @spec offer_peers_from_pex(Torrent.hash(), binary(), [Peer.t()]) :: :ok
+  def offer_peers_from_pex(hash, pex_source, peers)
+      when is_binary(hash) and byte_size(hash) == 20 and is_list(peers) and
+             is_binary(pex_source) and byte_size(pex_source) == 20 do
+    case GenServer.whereis(via(hash)) do
+      nil -> :ok
+      pid -> GenServer.cast(pid, {:offer_pex, pex_source, peers})
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc false
+  @spec revoke_pex_peers(Torrent.hash(), binary(), [Peer.t()]) :: :ok
+  def revoke_pex_peers(hash, pex_source, dropped)
+      when is_binary(hash) and byte_size(hash) == 20 and is_list(dropped) and
+             is_binary(pex_source) and byte_size(pex_source) == 20 do
+    case GenServer.whereis(via(hash)) do
+      nil -> :ok
+      pid -> GenServer.cast(pid, {:revoke_pex, pex_source, dropped})
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc false
+  @spec apply_pex_delta(Torrent.hash(), binary(), [Peer.t()], [Peer.t()]) :: :ok
+  def apply_pex_delta(hash, pex_source, added, dropped)
+      when is_binary(hash) and byte_size(hash) == 20 and is_list(added) and is_list(dropped) and
+             is_binary(pex_source) and byte_size(pex_source) == 20 do
+    case GenServer.whereis(via(hash)) do
+      nil -> :ok
+      pid -> GenServer.cast(pid, {:pex_delta, pex_source, added, dropped})
     end
   catch
     :exit, _ -> :ok
@@ -80,14 +120,30 @@ defmodule Peer.ConnectionManager do
   end
 
   @impl true
-  def handle_cast({:offer, peers}, state) do
-    queue =
-      Enum.reduce(peers, state.queue, fn %Peer{} = peer, acc ->
-        key = {peer.ip, peer.port}
-        Map.put(acc, key, merge_queue_peer(Map.get(acc, key), peer))
-      end)
+  def handle_cast({:offer, peers, source}, state) when is_list(peers) do
+    queue = DialQueue.offer(state.queue, peers, source)
+    maybe_continue_dial(state, queue, peers != [])
+  end
 
-    {:noreply, %{state | queue: queue}, {:continue, :dial}}
+  def handle_cast({:offer_pex, pex_source, peers}, state) when is_list(peers) do
+    queue = DialQueue.offer(state.queue, peers, {:pex, pex_source})
+    maybe_continue_dial(state, queue, peers != [])
+  end
+
+  def handle_cast({:revoke_pex, pex_source, dropped}, state) when is_list(dropped) do
+    queue = DialQueue.revoke_pex(state.queue, pex_source, dropped)
+    {:noreply, %{state | queue: queue}}
+  end
+
+  def handle_cast({:pex_delta, pex_source, added, dropped}, state) do
+    # One mailbox operation prevents handle_continue(:dial) from selecting a
+    # just-dropped endpoint between separate offer/revoke casts.
+    queue =
+      state.queue
+      |> DialQueue.revoke_pex(pex_source, dropped)
+      |> DialQueue.offer(added, {:pex, pex_source})
+
+    maybe_continue_dial(state, queue, added != [])
   end
 
   def handle_cast(:dial_now, state) do
@@ -171,13 +227,12 @@ defmodule Peer.ConnectionManager do
     maybe_dial(state, connected)
   end
 
-  # Preserve BEP 11 seed hints when duplicate endpoints arrive from different
-  # discovery paths (e.g. tracker first, PEX seed flag later).
-  defp merge_queue_peer(nil, %Peer{} = peer), do: peer
-
-  defp merge_queue_peer(%Peer{} = existing, %Peer{} = incoming) do
-    seed = existing.seed == true or incoming.seed == true
-    %Peer{incoming | seed: if(seed, do: true, else: incoming.seed)}
+  defp maybe_continue_dial(state, queue, continue?) do
+    if continue? do
+      {:noreply, %{state | queue: queue}, {:continue, :dial}}
+    else
+      {:noreply, %{state | queue: queue}}
+    end
   end
 
   defp maybe_dial(%{dialing?: true} = state, _connected), do: {:noreply, state}
@@ -198,7 +253,7 @@ defmodule Peer.ConnectionManager do
   defp dial_batch(%{hash: hash, queue: queue} = state, batch) do
     peers =
       hash
-      |> prioritize_dial_queue(Map.values(queue))
+      |> prioritize_dial_queue(DialQueue.peers(queue))
       |> Acceptor.Connection.Handshakes.select_peers_to_dial(hash, batch)
 
     if peers == [] do
