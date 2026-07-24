@@ -337,7 +337,7 @@ defmodule Torrent.Merkle do
           pos_integer(),
           non_neg_integer(),
           pos_integer(),
-          pos_integer(),
+          non_neg_integer(),
           non_neg_integer()
         ) :: [non_neg_integer()]
   def collect_proof_flat_siblings(block_count, index, length, _base_layer \\ 0, proof_layers) do

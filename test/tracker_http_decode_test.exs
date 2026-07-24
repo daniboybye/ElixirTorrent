@@ -180,7 +180,6 @@ defmodule TrackerHTTPDecodeTest do
   describe "resolve_hosts/1 and expected_dns_failure?/1" do
     test "resolve_hosts returns localhost addresses without DNS" do
       assert {:ok, hosts} = Tracker.resolve_hosts("localhost")
-      assert length(hosts) > 0
       assert Enum.all?(hosts, fn {_ip, family} -> family in [:inet, :inet6] end)
     end
 

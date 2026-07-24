@@ -35,10 +35,10 @@ defmodule Torrent.V2LayoutTest do
     ends = Enum.map(layout.all_files, &elem(&1, 0))
     assert ends == Enum.sort(ends, :asc)
 
-    assert Enum.count(layout.all_files, fn
+    assert Enum.any?(layout.all_files, fn
              {_, {:gap, _}} -> true
              _ -> false
-           end) >= 1
+           end)
   end
 
   test "piece_stream_layout skips empty files" do
