@@ -1,4 +1,7 @@
 defmodule ElixirTorrent do
+  @package_version Mix.Project.config() |> Keyword.fetch!(:version)
+  @peer_id_prefix "ET" <> String.replace(@package_version, ".", "-")
+
   @moduledoc """
   Public API for the ElixirTorrent BitTorrent engine.
 
@@ -55,7 +58,8 @@ defmodule ElixirTorrent do
 
   The full 20-byte peer ID is this prefix, a hyphen, and random bytes.
   """
-  def version, do: "ET0-3-0"
+  @spec version() :: String.t()
+  def version, do: @peer_id_prefix
 
   defp loop do
     parse(IO.read(:line))

@@ -63,7 +63,7 @@ defmodule Peer do
   # BEP 10 LTEP (byte 5: 0x10), BEP 5 DHT + BEP 6 Fast + BEP 52 v2 (byte 7: 0x15)
   @reserved <<0, 0, 0, 0, 0, 0x10, 0, 0x15>>
   @id_length 20
-  @id version() <> "-" <> :crypto.strong_rand_bytes(@id_length - byte_size(version()) - 1)
+  @id_key {__MODULE__, :id}
 
   @type t :: %__MODULE__{
           ip: ip(),
@@ -74,8 +74,16 @@ defmodule Peer do
 
   defp vm(hash, id), do: via(make_key(hash, id))
 
+  @doc false
+  @spec initialize_id() :: :ok
+  def initialize_id do
+    prefix = version() <> "-"
+    suffix = :crypto.strong_rand_bytes(@id_length - byte_size(prefix))
+    :persistent_term.put(@id_key, prefix <> suffix)
+  end
+
   @spec id :: id()
-  def id, do: @id
+  def id, do: :persistent_term.get(@id_key)
 
   @spec reserved :: reserved()
   def reserved, do: @reserved

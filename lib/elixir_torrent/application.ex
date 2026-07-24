@@ -14,6 +14,7 @@ defmodule ElixirTorrentApplication do
   def tracker_pool, do: @tracker_pool
 
   def start(_type, _args) do
+    :ok = Peer.initialize_id()
     :ok = start_tracker_pool()
 
     [
