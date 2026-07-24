@@ -74,10 +74,16 @@ defmodule Torrent.Superseed do
 
   @impl true
   def init(hash) do
+    # A restored complete torrent deliberately falls back to ordinary seeding.
+    # Peer assignments belong to dead connections and cannot be resumed safely;
+    # marking the phase finished also prevents the restored session from being
+    # mistaken for a newly completed initial seed.
+    phase = if Torrent.get(hash, :peer_status) == :seed, do: :finished, else: :inactive
+
     {:ok,
      %{
        hash: hash,
-       phase: :inactive,
+       phase: phase,
        assignments: %{},
        peer_pieces: %{},
        advertised: MapSet.new(),

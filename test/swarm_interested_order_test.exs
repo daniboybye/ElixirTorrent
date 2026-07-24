@@ -32,6 +32,29 @@ defmodule SwarmInterestedOrderTest do
     end)
   end
 
+  test "activation seed count treats have_all and a complete binary bitfield equally" do
+    for bitfield <- [:all, complete_bitfield(4)] do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_swarm(hash, fn _ ->
+        add_mock_peer(hash, :crypto.strong_rand_bytes(20), bitfield: bitfield)
+        {:ok, superseed} = Torrent.Superseed.start_link(hash)
+        on_exit(fn -> safe_stop(superseed) end)
+
+        assert Torrent.Swarm.confirmed_seed_count(hash) == 1
+        assert :armed = Torrent.Superseed.arm(hash)
+
+        assert :inactive =
+                 Torrent.Superseed.activate(
+                   hash,
+                   Torrent.Swarm.confirmed_seed_count(hash)
+                 )
+
+        refute Torrent.Superseed.active?(hash)
+      end)
+    end
+  end
+
   test "sort_peers_seeders_first/1 puts seeders before leechers" do
     hash = :crypto.strong_rand_bytes(20)
     seeder_id = <<1::160>>
@@ -95,6 +118,12 @@ defmodule SwarmInterestedOrderTest do
 
   defp partial_bitfield(pieces_count, index) do
     Torrent.Bitfield.set(Torrent.Bitfield.make(pieces_count), index, 1)
+  end
+
+  defp complete_bitfield(pieces_count) do
+    Enum.reduce(0..(pieces_count - 1), Torrent.Bitfield.make(pieces_count), fn index, bitfield ->
+      Torrent.Bitfield.set(bitfield, index, 1)
+    end)
   end
 
   defp with_model(hash, fun) do

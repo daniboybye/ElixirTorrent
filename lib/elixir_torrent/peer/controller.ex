@@ -479,7 +479,7 @@ defmodule Peer.Controller do
     do: {:reply, State.stale_useless_pin?(state), state}
 
   def handle_call(:has_all?, _, state),
-    do: {:reply, match?(%State{bitfield: :all}, state), state}
+    do: {:reply, state.bitfield == :all or complete_bitfield?(state), state}
 
   def handle_call(:eviction_info, _, state),
     do: {:reply, State.eviction_info(state), state}

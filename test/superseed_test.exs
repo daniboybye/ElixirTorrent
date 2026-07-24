@@ -34,6 +34,41 @@ defmodule SuperseedTest do
     end)
   end
 
+  test "restart mid-superseed cleanly falls back to ordinary full seeding" do
+    hash = :crypto.strong_rand_bytes(20)
+
+    with_torrent(hash, 3, fn ->
+      peer_id = <<1::160>>
+
+      assert :armed = Superseed.arm(hash)
+      assert :active = Superseed.activate(hash, 0)
+      assert {:ok, 0} = Superseed.assign(hash, peer_id, nil)
+      assert {:rotate, ^peer_id, 1} = Superseed.peer_have(hash, peer_id, 0)
+
+      Torrent.Model.set_peer_status(hash, :seed)
+      assert Torrent.get(hash, :peer_status) == :seed
+
+      old_superseed =
+        GenServer.whereis({:via, Registry, {Registry, {hash, Torrent.Superseed}}})
+
+      stop_quietly(old_superseed)
+      {:ok, restarted_superseed} = Superseed.start_link(hash)
+      on_exit(fn -> stop_quietly(restarted_superseed) end)
+
+      refute Superseed.active?(hash)
+      assert :inactive = Superseed.arm(hash)
+      assert :inactive = Superseed.assign(hash, peer_id, nil)
+
+      with_sender(hash, fn id ->
+        state = base_state(hash, id, 3, status: :seed)
+
+        assert %State{superseed_piece: nil} = State.first_message(state, 0)
+        assert_receive {:sent, {:bitfield, ^hash}}
+        refute_received {:sent, {:have, _index}}
+      end)
+    end)
+  end
+
   test "piece picker prefers never-advertised rare pieces and excludes peer holdings" do
     availability = [{0, 0}, {1, 2}, {2, 0}, {3, 1}]
 
@@ -187,7 +222,7 @@ defmodule SuperseedTest do
         Enum.reduce(0..(pieces_count - 1), Torrent.Bitfield.make(pieces_count), fn index, acc ->
           Torrent.Bitfield.set(acc, index, 1)
         end),
-      peer_status: :seed
+      peer_status: nil
     }
 
     {:ok, model} = Torrent.Model.start_link(torrent)
