@@ -408,17 +408,22 @@ defmodule PeerDiscovery.Announce do
     {:noreply, state}
   end
 
-  def handle_info({ref, %Tracker.Response{} = response}, state) do
+  def handle_info({ref, {event, %Tracker.Response{} = response}}, state) when event in 0..3 do
     case Map.pop(state.requests, ref) do
       {nil, _} ->
         {:noreply, state}
 
       {{announce, tier_index, tracker_index}, requests} ->
-        state = apply_tracker_response(state, announce, tier_index, tracker_index, response)
+        state =
+          apply_tracker_response(state, announce, tier_index, tracker_index, event, response)
+
         state = dec_tier_batch(state, tier_index)
         {:noreply, %{state | requests: requests}}
     end
   end
+
+  def handle_info({ref, {event, result}}, state) when event in 0..3 or is_nil(event),
+    do: handle_info({ref, result}, state)
 
   def handle_info(:dht_lookup, %__MODULE__{} = state) do
     cond do
@@ -633,10 +638,9 @@ defmodule PeerDiscovery.Announce do
           tracker_opts = tracker_request_opts_for(state)
 
           %Task{ref: ref} =
-            Task.Supervisor.async_nolink(Requests, Tracker, :request!, [
+            Task.Supervisor.async_nolink(Requests, Tracker, :request_with_event!, [
               announce,
               hash,
-              :auto,
               tracker_opts
             ])
 
@@ -866,9 +870,10 @@ defmodule PeerDiscovery.Announce do
           String.t(),
           non_neg_integer(),
           non_neg_integer(),
+          0..3,
           Tracker.Response.t()
         ) :: %__MODULE__{}
-  defp apply_tracker_response(state, announce, tier_index, tracker_index, response) do
+  defp apply_tracker_response(state, announce, tier_index, tracker_index, event, response) do
     # BEP min-interval applies only after a tracker answered — not when a batch
     # was merely dispatched (DNS nxdomain / timeout is not an announce).
     now = System.monotonic_time(:millisecond)
@@ -882,7 +887,7 @@ defmodule PeerDiscovery.Announce do
       |> maybe_stamp_last_tracker_announce(response, now)
 
     log_tracker_success(state.hash, announce, response)
-    Model.update_event(state.hash)
+    Model.update_event(state.hash, event)
 
     if dht_allowed?(state) do
       announce_dht_hashes(state)

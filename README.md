@@ -168,8 +168,8 @@ Status meanings:
 
 | BEP | Topic | Status | Notes |
 | --- | --- | --- | --- |
-| [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) | BitTorrent peer protocol | **Full** | Handshake, choke/unchoke, request/cancel, bitfield, endgame |
-| [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) | HTTP tracker announce | **Full** | `compact=1`, events, stats fields |
+| [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) | BitTorrent peer protocol | **Full** | Handshake, choke/unchoke, request/cancel, strict bitfield spare-bit validation, actual per-piece upload bounds, endgame |
+| [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) | HTTP tracker announce | **Full** | `compact=1`; one-shot `started`/`completed` and shutdown `stopped`; routine and resumed announces omit `event`; stats fields |
 | [BEP 4](https://www.bittorrent.org/beps/bep_0004.html) | Known number allocations | **Full** | Message IDs and reserved bits as used |
 | [BEP 5](https://www.bittorrent.org/beps/bep_0005.html) | DHT | **Full** | KRPC over UDP (ping, find_node, get_peers, announce_peer), k-buckets, bootstrap routers, iterative lookup, token validation, BT PORT message + reserved bit; trackerless magnets when enabled; BEP 32 IPv6 routing tables + dedicated v6 socket; routing table persisted across restarts (node id + bucket contents) for fast rejoin |
 | [BEP 6](https://www.bittorrent.org/beps/bep_0006.html) | Fast extension | **Full** | Fast-negotiated handshake availability, `allowed_fast`, verified-piece suggestions, and exactly-one `piece`/`reject` handling; choke rejects queued non-allowed requests after the choke |

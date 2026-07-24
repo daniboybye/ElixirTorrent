@@ -68,7 +68,11 @@ defmodule Torrent.Session do
         left: Map.get(session, :left, torrent.left),
         uploaded: Map.get(session, :uploaded, torrent.uploaded),
         added_at: Map.get(session, :added_at, torrent.added_at),
-        peer_status: Map.get(session, :peer_status, torrent.peer_status)
+        peer_status: Map.get(session, :peer_status, torrent.peer_status),
+        # A restored torrent is continuing an existing client session. BEP 3
+        # reserves "started" for the first announce, so its first post-resume
+        # announce is an ordinary event-less announce.
+        event: Torrent.empty()
     }
   end
 end

@@ -300,7 +300,9 @@ defmodule PeerDiscoveryAnnounceTest do
     }
 
     before_ms = System.monotonic_time(:millisecond)
-    new_state = Announce.dispatch_task_message(state, {ref, response})
+
+    new_state =
+      Announce.dispatch_task_message(state, {ref, {Torrent.started(), response}})
 
     assert new_state.requests == %{}
     assert new_state.peers == %{announce => peers}
@@ -308,6 +310,46 @@ defmodule PeerDiscoveryAnnounceTest do
     assert new_state.tracker_interval_sec == 1_800
     assert is_integer(new_state.last_tracker_announce_ms)
     assert new_state.last_tracker_announce_ms >= before_ms
+  end
+
+  test "a stale periodic tracker response does not consume a newer completed event" do
+    ref = make_ref()
+    hash = :crypto.strong_rand_bytes(20)
+    announce = "http://tracker.example/announce"
+
+    torrent = %Torrent{
+      hash: hash,
+      metadata: %{
+        "info" => %{"name" => "complete", "length" => 1_000, "piece length" => 1_000}
+      },
+      downloaded: 1_000,
+      left: 0,
+      last_index: 0,
+      last_piece_length: 1_000,
+      bitfield: Torrent.Bitfield.make(1) |> Torrent.Bitfield.set(0, 1),
+      event: Torrent.completed(),
+      peer_status: :seed
+    }
+
+    {:ok, model_pid} = Torrent.Model.start_link(torrent)
+
+    on_exit(fn ->
+      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+    end)
+
+    state =
+      base_state(
+        hash: hash,
+        requests: %{ref => {announce, 0, 0}},
+        tier_batches: %{0 => 1}
+      )
+
+    response = %Response{peers: [], complete: 1, incomplete: 0, interval: 1_800}
+
+    _state =
+      Announce.dispatch_task_message(state, {ref, {Torrent.empty(), response}})
+
+    assert Torrent.get(hash, :event) == Torrent.completed()
   end
 
   test "tracker_announce_allowed? enforces floor once a tracker yielded peers" do
@@ -740,7 +782,8 @@ defmodule PeerDiscoveryAnnounceTest do
         min_interval: 1_800
       }
 
-      new_state = Announce.dispatch_task_message(state, {ref, response})
+      new_state =
+        Announce.dispatch_task_message(state, {ref, {Torrent.started(), response}})
 
       assert Announce.tracker_peers_empty?(new_state)
       assert new_state.last_tracker_announce_ms == nil

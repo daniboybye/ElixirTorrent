@@ -146,7 +146,7 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
     end
 
-    test "completed resume promotes torrent to seed and persists session" do
+    test "completed resume promotes to seed without repeating completed and persists session" do
       piece0 = random_piece()
       piece1 = random_piece()
 
@@ -162,6 +162,7 @@ defmodule TorrentStorageCoverageBatchTest do
           left: 0
         )
 
+      torrent = %{torrent | event: Torrent.empty()}
       hash = torrent.hash
       Session.delete(hash)
 
@@ -177,7 +178,7 @@ defmodule TorrentStorageCoverageBatchTest do
 
         assert Model.downloaded?(hash)
         assert Model.get(hash, :peer_status) == :seed
-        assert Model.get(hash, :event) == Torrent.completed()
+        assert Model.get(hash, :event) == Torrent.empty()
         assert {:ok, session} = Session.load(hash)
         assert session.left == 0
         assert Bitfield.have?(session.bitfield, 0)

@@ -54,8 +54,9 @@ defmodule Torrent.Model do
   def hash_check_failure(hash, index),
     do: GenServer.cast(via(hash), {:hash_check_failure, index})
 
-  def update_event(hash),
-    do: GenServer.cast(via(hash), :update_event)
+  @spec update_event(Torrent.hash(), 0..3) :: :ok
+  def update_event(hash, announced_event),
+    do: GenServer.cast(via(hash), {:update_event, announced_event})
 
   def piece_length(hash, index),
     do: GenServer.call(via(hash), {:piece_length, index})
@@ -146,14 +147,14 @@ defmodule Torrent.Model do
   def handle_cast({:set_event, event}, %Torrent{} = torrent),
     do: {:noreply, %{torrent | event: event}}
 
-  def handle_cast(:update_event, %Torrent{event: @stopped} = torrent),
+  def handle_cast({:update_event, _announced_event}, %Torrent{event: @stopped} = torrent),
     do: {:noreply, torrent}
 
-  def handle_cast(:update_event, %Torrent{left: 0} = torrent),
-    do: {:noreply, %{torrent | event: Torrent.completed()}}
-
-  def handle_cast(:update_event, %Torrent{} = torrent),
+  def handle_cast({:update_event, event}, %Torrent{event: event} = torrent),
     do: {:noreply, %{torrent | event: Torrent.empty()}}
+
+  def handle_cast({:update_event, _announced_event}, %Torrent{} = torrent),
+    do: {:noreply, torrent}
 
   def handle_info({:detected_the_speed, download, upload}, %Torrent{} = torrent) do
     message_for_next_detection(torrent)
@@ -280,7 +281,10 @@ defmodule Torrent.Model do
     torrent = %{torrent | downloaded: downloaded, left: left}
 
     if left == 0 and total > 0 do
-      %{torrent | event: Torrent.completed(), peer_status: :seed}
+      # Reconciliation can run while restoring already-complete data. It must
+      # not synthesize a fresh BEP 3 "completed" event; only the live transition
+      # in if_downloaded/1 owns that one-shot announce.
+      %{torrent | peer_status: :seed}
     else
       torrent
     end

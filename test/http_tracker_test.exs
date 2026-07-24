@@ -1,6 +1,11 @@
 defmodule HTTPTrackerTest do
   use ExUnit.Case, async: true
 
+  setup do
+    {:ok, _} = Application.ensure_all_started(:elixir_torrent)
+    :ok
+  end
+
   describe "HTTP tracker IPv6 connect options" do
     test "request! returns Error instead of raising CaseClauseError on badarg-prone IPv6 bind" do
       hash = :crypto.strong_rand_bytes(20)
@@ -15,5 +20,89 @@ defmodule HTTPTrackerTest do
 
       assert match?(%Tracker.Response{}, result) or match?(%Tracker.Error{}, result)
     end
+  end
+
+  describe "BEP 3 HTTP announce events" do
+    test "started, periodic, completed, and stopped announces use one-shot event keys" do
+      torrent = sample_torrent()
+      start_model(torrent)
+
+      assert announce_query(torrent.hash)["event"] == "started"
+
+      Torrent.Model.update_event(torrent.hash, Torrent.started())
+      refute Map.has_key?(announce_query(torrent.hash), "event")
+
+      Torrent.Model.downloaded_piece(torrent.hash, 0)
+      assert announce_query(torrent.hash)["event"] == "completed"
+
+      # A delayed response to an older periodic announce must not consume the
+      # newly-raised completion transition.
+      Torrent.Model.update_event(torrent.hash, Torrent.empty())
+      assert announce_query(torrent.hash)["event"] == "completed"
+
+      Torrent.Model.update_event(torrent.hash, Torrent.completed())
+      refute Map.has_key?(announce_query(torrent.hash), "event")
+
+      Torrent.Model.set_event(torrent.hash, Torrent.stopped())
+      assert announce_query(torrent.hash)["event"] == "stopped"
+
+      Torrent.Model.update_event(torrent.hash, Torrent.stopped())
+      assert announce_query(torrent.hash)["event"] == "stopped"
+    end
+
+    test "a session restored from disk does not announce started again" do
+      torrent = sample_torrent()
+
+      resumed =
+        Torrent.Session.apply(torrent, %{
+          bitfield: Torrent.Bitfield.make(1),
+          downloaded: 0,
+          left: torrent.left,
+          uploaded: 123,
+          peer_status: nil
+        })
+
+      start_model(resumed)
+
+      refute Map.has_key?(announce_query(torrent.hash), "event")
+    end
+  end
+
+  defp sample_torrent do
+    hash = :crypto.strong_rand_bytes(20)
+    piece_length = 8_192
+
+    %Torrent{
+      hash: hash,
+      metadata: %{
+        "info" => %{
+          "name" => "event-test",
+          "length" => piece_length,
+          "piece length" => 16_384
+        }
+      },
+      left: piece_length,
+      last_index: 0,
+      last_piece_length: piece_length,
+      bitfield: Torrent.Bitfield.make(1),
+      peer_status: nil
+    }
+  end
+
+  defp start_model(torrent) do
+    Torrent.Session.delete(torrent.hash)
+    {:ok, pid} = Torrent.Model.start_link(torrent)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: GenServer.stop(pid)
+      Torrent.Session.delete(torrent.hash)
+    end)
+  end
+
+  defp announce_query(hash) do
+    [uploaded, downloaded, left, event] =
+      Torrent.get(hash, [:uploaded, :downloaded, :left, :event])
+
+    Tracker.build_http_announce_query(hash, uploaded, downloaded, left, event)
   end
 end

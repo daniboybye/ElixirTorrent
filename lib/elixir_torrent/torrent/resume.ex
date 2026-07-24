@@ -98,7 +98,6 @@ defmodule Torrent.Resume do
 
     if Model.downloaded?(hash) do
       Model.set_peer_status(hash, :seed)
-      Model.set_event(hash, Torrent.completed())
       :ok = Torrent.Session.save(hash, Model.get(hash))
     end
 

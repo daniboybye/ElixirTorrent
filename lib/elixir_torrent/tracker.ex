@@ -115,6 +115,26 @@ defmodule Tracker do
   end
 
   @doc false
+  @spec request_with_event!(binary(), Torrent.hash(), request_opts()) ::
+          {0..3 | nil, Response.t() | Error.t() | nil}
+  def request_with_event!(announce, hash, opts \\ []) do
+    case resolve_stats(hash, :auto) do
+      {:ok, {uploaded, downloaded, left, event}} ->
+        stats = [
+          uploaded: uploaded,
+          downloaded: downloaded,
+          left: left,
+          event: event
+        ]
+
+        {event, request!(announce, hash, stats, opts)}
+
+      :skip ->
+        {nil, nil}
+    end
+  end
+
+  @doc false
   @spec expected_dns_failure?(term()) :: boolean()
   def expected_dns_failure?(reason)
       when reason in [:nxdomain, :timeout, :econnrefused, :ehostunreach, :enetunreach],
@@ -326,10 +346,10 @@ defmodule Tracker do
       "uploaded" => uploaded,
       "downloaded" => downloaded,
       "left" => left,
-      "event" => Torrent.event_to_string(event),
       "numwant" => numwant(left),
       "key" => Acceptor.key()
     }
+    |> maybe_put_announce_param("event", Torrent.event_to_string(event))
     |> maybe_put_announce_param("ip", Acceptor.ipv4_binary())
     |> maybe_put_announce_param("ipv6", ipv6_override || Acceptor.ipv6_binary())
   end

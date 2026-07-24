@@ -1,5 +1,5 @@
 defmodule Peer.Controller.State do
-  alias Torrent.{Bitfield, PiecesStatistic, Uploader, Downloads, HashServe, Superseed}
+  alias Torrent.{Bitfield, PiecesStatistic, Uploader, Downloads, HashServe, Model, Superseed}
   alias Peer.{Sender, Controller.FastExtension, HashWire, HashTransfer}
 
   import Peer, only: [make_key: 2]
@@ -913,8 +913,16 @@ defmodule Peer.Controller.State do
 
   defp do_handle_request(state, index, begin, length) do
     cond do
-      index >= state.pieces_count ->
+      index < 0 or index >= state.pieces_count ->
         log_upload(state, "request_reject index=#{index} reason=bad_index")
+        {:error, :protocol_error, state}
+
+      not upload_request_in_bounds?(state.hash, index, begin, length) ->
+        log_upload(
+          state,
+          "request_reject index=#{index} begin=#{begin} len=#{length} reason=bad_bounds"
+        )
+
         {:error, :protocol_error, state}
 
       Superseed.active?(state.hash) and state.superseed_piece not in [index, :all] ->
@@ -950,6 +958,14 @@ defmodule Peer.Controller.State do
       true ->
         do_serve_request(state, index, begin, length)
     end
+  end
+
+  defp upload_request_in_bounds?(hash, index, begin, length) do
+    piece_length = Model.piece_length(hash, index)
+
+    is_integer(begin) and begin >= 0 and is_integer(length) and length > 0 and
+      length <= Downloads.piece_max_length() and is_integer(piece_length) and
+      begin + length <= piece_length
   end
 
   defp do_serve_request(state, index, begin, length) do

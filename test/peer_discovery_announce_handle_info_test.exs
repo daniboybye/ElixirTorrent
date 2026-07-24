@@ -44,7 +44,12 @@ defmodule PeerDiscoveryAnnounceHandleInfoTest do
       %{state | requests: %{ref => {announce, 0, 0}}, tier_batches: %{0 => 1}}
     end)
 
-    send(pid, {ref, %Response{peers: [peer], interval: 600, complete: 1, incomplete: 2}})
+    send(
+      pid,
+      {ref,
+       {Torrent.started(), %Response{peers: [peer], interval: 600, complete: 1, incomplete: 2}}}
+    )
+
     Process.sleep(30)
 
     state = :sys.get_state(pid)

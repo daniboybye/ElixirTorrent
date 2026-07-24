@@ -19,10 +19,20 @@ defmodule Torrent.Bitfield do
   @spec valid?(binary(), pos_integer()) :: boolean()
   def valid?(bitfield, pieces_count)
       when is_binary(bitfield) and is_integer(pieces_count) and pieces_count > 0 do
-    byte_size(bitfield) == expected_byte_size(pieces_count)
+    byte_size(bitfield) == expected_byte_size(pieces_count) and
+      spare_bits_zero?(bitfield, pieces_count)
   end
 
   def valid?(_, _), do: false
+
+  defp spare_bits_zero?(bitfield, pieces_count) do
+    spare_bits = rem(8 - rem(pieces_count, 8), 8)
+
+    case bitfield do
+      <<_pieces::size(^pieces_count), 0::size(^spare_bits)>> -> true
+      _ -> false
+    end
+  end
 
   @spec set(binary(), non_neg_integer(), 0 | 1) :: binary()
   def set(bitfield, index, x) do

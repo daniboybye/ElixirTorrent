@@ -63,7 +63,8 @@ defmodule Torrent do
           # The total amount downloaded
           # (since the client sent the 'started' event to the tracker)"""
           downloaded: non_neg_integer(),
-          # "started" | "empty" | "completed" | "stopped"
+          # HTTP: "started" | "completed" | "stopped"; @empty omits the key.
+          # UDP uses the same integer directly, where 0 means no event.
           event: 0..3,
           speed: speed(),
           bitfield: bitfield() | nil,
@@ -112,8 +113,8 @@ defmodule Torrent do
 
   def stopped(), do: @stopped
 
-  @spec event_to_string(0..3) :: String.t()
-  def event_to_string(@empty), do: "empty"
+  @spec event_to_string(0..3) :: String.t() | nil
+  def event_to_string(@empty), do: nil
 
   def event_to_string(@completed), do: "completed"
 

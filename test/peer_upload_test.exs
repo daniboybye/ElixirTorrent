@@ -175,6 +175,39 @@ defmodule PeerUploadTest do
       assert %State{choke: true} = State.handle_request(state, 0, 0, 16_384)
     end)
   end
+
+  test "handle_request rejects a block beyond the real final-piece length" do
+    hash = :crypto.strong_rand_bytes(20)
+    pieces_count = 2
+    last_piece_length = 6_000
+
+    bitfield =
+      Torrent.Bitfield.make(pieces_count)
+      |> Torrent.Bitfield.set(1, 1)
+
+    torrent =
+      sample_torrent(hash, pieces_count - 1,
+        bitfield: bitfield,
+        downloaded: last_piece_length,
+        left: 16_384,
+        last_piece_length: last_piece_length
+      )
+
+    with_model(torrent, fn _ ->
+      :ok = Torrent.PiecesStatistic.set(hash, 1, :complete)
+
+      state =
+        base_state(hash, pieces_count,
+          choke: false,
+          status: :seed
+        )
+
+      # 4_096 + 4_096 fits the generic 16 KiB piece length, but not this
+      # torrent's 6_000-byte final piece.
+      assert {:error, :protocol_error, ^state} =
+               State.handle_request(state, 1, 4_096, 4_096)
+    end)
+  end
 end
 
 defmodule Peer.SenderStub do

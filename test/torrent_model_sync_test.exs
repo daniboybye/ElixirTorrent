@@ -4,7 +4,7 @@ defmodule Torrent.ModelSyncTest do
   alias Torrent.Bitfield
   alias Torrent.Model
 
-  test "sync_progress reconciles counters from bitfield and marks complete" do
+  test "sync_progress reconciles counters without synthesizing a completed event" do
     torrent = %Torrent{
       hash: <<2::160>>,
       metadata: %{
@@ -17,6 +17,7 @@ defmodule Torrent.ModelSyncTest do
       },
       downloaded: 0,
       left: 32_768,
+      event: Torrent.empty(),
       last_index: 1,
       last_piece_length: 16_384,
       bitfield:
@@ -30,7 +31,7 @@ defmodule Torrent.ModelSyncTest do
     assert synced.downloaded == 32_768
     assert synced.left == 0
     assert synced.peer_status == :seed
-    assert synced.event == Torrent.completed()
+    assert synced.event == Torrent.empty()
   end
 
   test "sync_progress leaves partial downloads unchanged except counters" do

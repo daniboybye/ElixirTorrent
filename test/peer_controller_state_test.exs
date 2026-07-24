@@ -159,6 +159,19 @@ defmodule PeerControllerStateTest do
         assert {:error, :protocol_error, ^state} = State.handle_bitfield(state, <<0, 0>>)
       end)
     end
+
+    test "non-zero spare bits in the final bitfield byte are protocol_error" do
+      hash = :crypto.strong_rand_bytes(20)
+      pieces_count = 10
+      bitfield_with_spare_bit = <<0, 0b00000001>>
+
+      with_model(sample_torrent(hash, pieces_count), fn _ ->
+        state = base_state(hash, pieces_count)
+
+        assert {:error, :protocol_error, ^state} =
+                 State.handle_bitfield(state, bitfield_with_spare_bit)
+      end)
+    end
   end
 
   describe "Fast extension have_all / have_none" do
