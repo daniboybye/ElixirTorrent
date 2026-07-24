@@ -17,6 +17,8 @@ defmodule UTP.Connection do
   @min_packet_payload 150
   @recv_buffer_max 65_536
   @tick_ms 50
+  @idle_timeout_ms 30_000
+  @max_idle_probes 3
   # After shutdown we linger briefly so any final ACK for a FIN we sent can
   # arrive before we exit, then stop the process. Without this, shutdown/2 only
   # flipped a flag and left the GenServer running forever, ticking every 50ms.
@@ -57,6 +59,7 @@ defmodule UTP.Connection do
     timer_ref: nil,
     last_send_ms: 0,
     last_recv_ms: 0,
+    idle_probe_count: 0,
     fin_sent: false,
     closed: false,
     accept_notified: false
@@ -303,6 +306,7 @@ defmodule UTP.Connection do
         state
         |> Map.put(:reply_micro, reply_micro)
         |> Map.put(:last_recv_ms, now_ms())
+        |> Map.put(:idle_probe_count, 0)
         |> Map.put(:peer_wnd, header.wnd_size)
 
       state =
@@ -704,7 +708,8 @@ defmodule UTP.Connection do
           | unacked: unacked,
             cur_window: cur_window,
             seq_nr: seq_nr,
-            last_send_ms: now_ms()
+            last_send_ms: now_ms(),
+            idle_probe_count: 0
         }
 
       {:error, reason} ->
@@ -754,33 +759,75 @@ defmodule UTP.Connection do
           end
       end)
 
-    cond do
-      give_up != nil ->
+    state =
+      cond do
+        give_up != nil ->
+          Logger.warning(
+            "[utp] give_up seq=#{give_up} peer=#{inspect({state.peer_ip, state.peer_port})}"
+          )
+
+          shutdown(state, :too_many_retransmits)
+
+        timed_out == [] ->
+          state
+
+        true ->
+          state =
+            state
+            |> Map.put(:timeout_ms, min(state.timeout_ms * 2, 60_000))
+            |> Map.put(:timeout_count, state.timeout_count + 1)
+            |> put_led(LEDBAT.on_timeout(state.led))
+
+          Enum.reduce(timed_out, state, fn seq, acc ->
+            case Map.get(acc.unacked, seq) do
+              nil ->
+                acc
+
+              {type, payload, _sent_ms, _tx_count, _bytes} ->
+                transmit(acc, type, payload, seq, false)
+            end
+          end)
+      end
+
+    check_idle_timeout(state, now)
+  end
+
+  # BEP 29 resets the socket timeout counter on every send or receive and
+  # requires a minimum-window probe to restart a connection whose flow-control
+  # window reached zero. Without an in-flight packet, the per-packet timeout
+  # scan above cannot detect a dead peer, so probe an otherwise silent
+  # zero-window connection and eventually reap it if no packet answers.
+  defp check_idle_timeout(%{closed: true} = state, _now), do: state
+
+  defp check_idle_timeout(state, now) do
+    zero_window? = state.peer_wnd == 0 or state.led.max_window == 0
+    idle_for = now - max(state.last_send_ms, state.last_recv_ms)
+
+    probe_timeout =
+      if state.idle_probe_count == 0 do
+        @idle_timeout_ms
+      else
+        min(state.timeout_ms * Bitwise.bsl(1, state.idle_probe_count - 1), 60_000)
+      end
+
+    if (state.phase == :connected and zero_window?) && map_size(state.unacked) == 0 &&
+         idle_for >= probe_timeout do
+      if state.idle_probe_count >= @max_idle_probes do
         Logger.warning(
-          "[utp] give_up seq=#{give_up} peer=#{inspect({state.peer_ip, state.peer_port})}"
+          "[utp] idle_timeout peer=#{inspect({state.peer_ip, state.peer_port})} probes=#{state.idle_probe_count}"
         )
 
-        shutdown(state, :too_many_retransmits)
+        shutdown(state, :idle_timeout)
+      else
+        probe_count = state.idle_probe_count
 
-      timed_out == [] ->
         state
-
-      true ->
-        state =
-          state
-          |> Map.put(:timeout_ms, min(state.timeout_ms * 2, 60_000))
-          |> Map.put(:timeout_count, state.timeout_count + 1)
-          |> put_led(LEDBAT.on_timeout(state.led))
-
-        Enum.reduce(timed_out, state, fn seq, acc ->
-          case Map.get(acc.unacked, seq) do
-            nil ->
-              acc
-
-            {type, payload, _sent_ms, _tx_count, _bytes} ->
-              transmit(acc, type, payload, seq, false)
-          end
-        end)
+        |> put_led(LEDBAT.on_timeout(state.led))
+        |> send_state_ack()
+        |> Map.put(:idle_probe_count, probe_count + 1)
+      end
+    else
+      state
     end
   end
 

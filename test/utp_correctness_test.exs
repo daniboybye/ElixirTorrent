@@ -228,6 +228,80 @@ defmodule UTPCorrectnessTest do
     :gen_udp.close(udp)
   end
 
+  test "an unanswered idle zero-window connection is probed and reaped" do
+    {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+    recv_id = 31_004
+    peer_seq = 7000
+
+    assert {:ok, {:utp, pid} = socket} =
+             UTP.Connection.start_client(udp, {127, 0, 0, 1}, peer_port, conn_id: recv_id)
+
+    assert {:ok, {_ip, _port, _syn}} = :gen_udp.recv(peer_udp, 0, 1_000)
+    send(pid, {:utp_packet, packet(Packet.st_state(), recv_id, peer_seq, 1), <<>>, []})
+    assert :ok = UTP.Connection.await_connected(socket, 1_000)
+    assert {:ok, {_ip, _port, _handshake_ack}} = :gen_udp.recv(peer_udp, 0, 1_000)
+
+    zero_window = %{packet(Packet.st_state(), recv_id, peer_seq, 1) | wnd_size: 0}
+    send(pid, {:utp_packet, zero_window, <<>>, []})
+    assert {:ok, {_ip, _port, _zero_window_ack}} = :gen_udp.recv(peer_udp, 0, 1_000)
+
+    for expected_count <- 1..3 do
+      age_idle_connection(pid)
+      send(pid, :tick)
+      assert {:ok, {_ip, _port, probe_wire}} = :gen_udp.recv(peer_udp, 0, 1_000)
+      assert {:ok, probe, <<>>, []} = Packet.decode(probe_wire)
+      assert probe.type == Packet.st_state()
+      assert :sys.get_state(pid).idle_probe_count == expected_count
+    end
+
+    ref = Process.monitor(pid)
+    age_idle_connection(pid)
+    send(pid, :tick)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_500
+
+    :gen_udp.close(peer_udp)
+    :gen_udp.close(udp)
+  end
+
+  test "an idle zero-window connection survives when the peer answers probes" do
+    {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+    recv_id = 31_005
+    peer_seq = 8000
+
+    assert {:ok, {:utp, pid} = socket} =
+             UTP.Connection.start_client(udp, {127, 0, 0, 1}, peer_port, conn_id: recv_id)
+
+    assert {:ok, {_ip, _port, _syn}} = :gen_udp.recv(peer_udp, 0, 1_000)
+    send(pid, {:utp_packet, packet(Packet.st_state(), recv_id, peer_seq, 1), <<>>, []})
+    assert :ok = UTP.Connection.await_connected(socket, 1_000)
+    assert {:ok, {_ip, _port, _handshake_ack}} = :gen_udp.recv(peer_udp, 0, 1_000)
+
+    zero_window = %{packet(Packet.st_state(), recv_id, peer_seq, 1) | wnd_size: 0}
+    send(pid, {:utp_packet, zero_window, <<>>, []})
+    assert {:ok, {_ip, _port, _zero_window_ack}} = :gen_udp.recv(peer_udp, 0, 1_000)
+
+    for _ <- 1..4 do
+      age_idle_connection(pid)
+      send(pid, :tick)
+      assert {:ok, {_ip, _port, probe_wire}} = :gen_udp.recv(peer_udp, 0, 1_000)
+      assert {:ok, %{type: probe_type}, <<>>, []} = Packet.decode(probe_wire)
+      assert probe_type == Packet.st_state()
+
+      send(pid, {:utp_packet, zero_window, <<>>, []})
+      assert {:ok, {_ip, _port, _response_ack}} = :gen_udp.recv(peer_udp, 0, 1_000)
+      assert %{closed: false, idle_probe_count: 0} = :sys.get_state(pid)
+    end
+
+    assert Process.alive?(pid)
+    GenServer.stop(pid, :normal)
+    :gen_udp.close(peer_udp)
+    :gen_udp.close(udp)
+  end
+
   test "cumulative ack still fires after selective-ack punches holes in unacked" do
     # Drive process_acks directly via the private helper by constructing a
     # state that mirrors "we've sent 8..12, peer selective-acked 10, next
@@ -311,5 +385,13 @@ defmodule UTPCorrectnessTest do
       seq_nr: seq_nr,
       ack_nr: ack_nr
     }
+  end
+
+  defp age_idle_connection(pid) do
+    :sys.replace_state(pid, fn state ->
+      if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
+      old = System.monotonic_time(:millisecond) - 120_000
+      %{state | last_send_ms: old, last_recv_ms: old, timer_ref: nil}
+    end)
   end
 end
