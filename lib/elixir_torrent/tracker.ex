@@ -222,16 +222,8 @@ defmodule Tracker do
 
   @spec do_http_scrape(binary(), Torrent.hash()) :: scrape_result() | Error.t()
   defp do_http_scrape(base_url, hash) do
-    uri = URI.parse(base_url)
     info_hash_query = URI.encode_query(%{"info_hash" => hash})
-
-    query =
-      case uri.query do
-        nil -> info_hash_query
-        existing -> existing <> "&" <> info_hash_query
-      end
-
-    url = URI.to_string(%{uri | query: query})
+    url = append_query(base_url, info_hash_query)
 
     http_opts = [
       timeout: @scrape_http_timeout_ms,
@@ -305,7 +297,7 @@ defmodule Tracker do
       build_http_announce_query(hash, uploaded, downloaded, left, event)
       |> URI.encode_query()
 
-    url = announce <> "?" <> query
+    url = append_query(announce, query)
 
     %{inet: ip4, inet6: ip6, inet6_all: v6_all} = Acceptor.all_global_ips()
     tracker_families = http_tracker_families(announce)
@@ -330,6 +322,20 @@ defmodule Tracker do
       end)
 
     merge_http_announces(responses)
+  end
+
+  @spec append_query(binary(), binary()) :: binary()
+  defp append_query(url, encoded_query) do
+    uri = URI.parse(url)
+
+    query =
+      case uri.query do
+        nil -> encoded_query
+        "" -> encoded_query
+        existing -> existing <> "&" <> encoded_query
+      end
+
+    URI.to_string(%{uri | query: query})
   end
 
   @spec http_tracker_families(binary()) :: MapSet.t(:inet | :inet6)

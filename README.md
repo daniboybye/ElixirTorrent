@@ -169,7 +169,7 @@ Status meanings:
 | BEP | Topic | Status | Notes |
 | --- | --- | --- | --- |
 | [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) | BitTorrent peer protocol | **Full** | Handshake, choke/unchoke, request/cancel, strict bitfield spare-bit validation, actual per-piece upload bounds, endgame |
-| [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) | HTTP tracker announce | **Full** | `compact=1`; one-shot `started`/`completed` and shutdown `stopped`; routine and resumed announces omit `event`; stats fields |
+| [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) | HTTP tracker announce | **Full** | `compact=1`; existing private-tracker query/passkey authentication is preserved before generated announce parameters; one-shot `started`/`completed` and shutdown `stopped`; routine and resumed announces omit `event`; stats fields |
 | [BEP 4](https://www.bittorrent.org/beps/bep_0004.html) | Known number allocations | **Full** | Message IDs and reserved bits as used |
 | [BEP 5](https://www.bittorrent.org/beps/bep_0005.html) | DHT | **Substantially Full** | KRPC over UDP with error 204 for unknown methods; k-buckets with two-strike health and ping-before-evict; iterative peer lookup and iterative-to-self bootstrap; token validation; NAT-friendly `implied_port`; BT PORT; persisted BEP 32 dual-stack routing. Remaining strict gap: a first-seen inbound-only query source is still promoted before response reachability is proven |
 | [BEP 6](https://www.bittorrent.org/beps/bep_0006.html) | Fast extension | **Full** | Fast-negotiated handshake availability, `allowed_fast`, verified-piece suggestions, and exactly-one `piece`/`reject` handling; choke rejects queued non-allowed requests after the choke |

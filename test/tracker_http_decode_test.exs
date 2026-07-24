@@ -197,6 +197,47 @@ defmodule TrackerHTTPDecodeTest do
       assert peer.ip == {127, 0, 0, 1}
     end
 
+    test "request! preserves private tracker authentication before announce parameters" do
+      hash = :crypto.strong_rand_bytes(20)
+      test_pid = self()
+      body = Bento.encode!(%{"interval" => 120, "peers" => <<>>})
+
+      {port, _pid} =
+        start_http_tracker(fn request ->
+          send(test_pid, {:announce_request, request})
+          {200, body}
+        end)
+
+      stats = [uploaded: 10, downloaded: 20, left: 30, event: Torrent.started()]
+
+      assert %Response{interval: 120} =
+               Tracker.request!(
+                 "http://127.0.0.1:#{port}/announce?passkey=private-token&auth=opaque%2Fvalue",
+                 hash,
+                 stats,
+                 http_timeout_ms: 5_000
+               )
+
+      assert_receive {:announce_request, request}
+      [request_line | _headers] = String.split(request, "\r\n")
+      ["GET", request_target, "HTTP/1.1"] = String.split(request_line)
+
+      assert String.starts_with?(
+               request_target,
+               "/announce?passkey=private-token&auth=opaque%2Fvalue&"
+             )
+
+      query = URI.parse(request_target).query
+      params = URI.decode_query(query)
+
+      assert params["passkey"] == "private-token"
+      assert params["auth"] == "opaque/value"
+      assert params["info_hash"] == hash
+      assert params["uploaded"] == "10"
+      assert params["downloaded"] == "20"
+      assert params["left"] == "30"
+    end
+
     test "malformed BEP 24 external IP does not discard peers from the full response" do
       hash = :crypto.strong_rand_bytes(20)
       peers_bin = <<127, 0, 0, 1, 6881::16>>
