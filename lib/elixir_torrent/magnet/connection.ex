@@ -44,10 +44,13 @@ defmodule Magnet.Connection do
     :peer_key,
     :ltep,
     :metadata_size,
+    :hash,
+    :pex_source,
     peer: nil,
     transport: :tcp,
     unchoked?: false,
-    unchoke_since: nil
+    unchoke_since: nil,
+    pex_inbound: %{initial?: true, rate: Peer.UtPex.InboundRate.initial()}
   ]
 
   @type transport :: :tcp | :utp | :swarm
@@ -57,9 +60,31 @@ defmodule Magnet.Connection do
           peer_key: Peer.key() | nil,
           ltep: Peer.LTEP.Session.t(),
           metadata_size: pos_integer() | nil,
+          hash: Torrent.hash() | nil,
+          pex_source: Peer.id() | nil,
           peer: Peer.t() | nil,
-          transport: transport()
+          transport: transport(),
+          pex_inbound: %{initial?: boolean(), rate: map()}
         }
+
+  @doc false
+  @spec pex_consumer_active?(Torrent.hash()) :: boolean()
+  def pex_consumer_active?(hash) when is_binary(hash) and byte_size(hash) == 20 do
+    consume_pex_enabled?() and connection_manager_alive?(hash)
+  end
+
+  @doc false
+  @spec consume_pex_enabled?() :: boolean()
+  def consume_pex_enabled? do
+    Application.get_env(:elixir_torrent, :magnet_connection, [])
+    |> Keyword.get(:consume_pex, true)
+  end
+
+  @doc false
+  @spec route_inbound_pex_for_test(t(), binary()) :: t()
+  def route_inbound_pex_for_test(%__MODULE__{} = conn, payload) when is_binary(payload) do
+    route_inbound_pex(conn, payload)
+  end
 
   @doc """
   Opens a TCP or uTP session (TCP first, uTP fallback), completes BEP 3 + BEP 10
@@ -115,10 +140,13 @@ defmodule Magnet.Connection do
         peer_key: key,
         ltep: info.ltep,
         metadata_size: metadata_size,
+        hash: Peer.key_to_hash(key),
+        pex_source: Peer.key_to_id(key),
         transport: :swarm,
         peer: nil,
         unchoked?: unchoked?,
-        unchoke_since: if(unchoked?, do: now_ms, else: nil)
+        unchoke_since: if(unchoked?, do: now_ms, else: nil),
+        pex_inbound: %{initial?: true, rate: Peer.UtPex.InboundRate.initial()}
       }
 
       log_ltep_ready_swarm(key, conn.ltep, metadata_size)
@@ -212,8 +240,8 @@ defmodule Magnet.Connection do
   @spec do_open(Peer.Transport.socket(), Peer.t(), Torrent.hash(), transport()) ::
           {:ok, t()} | {:error, term()}
   defp do_open(socket, peer, hash, transport) do
-    with :ok <- handshake_exchange(socket, hash),
-         {:ok, ltep} <- ltep_handshake_exchange(socket),
+    with {:ok, peer_id} <- handshake_exchange(socket, hash),
+         {:ok, ltep} <- ltep_handshake_exchange(socket, hash),
          :ok <- send_interested(socket),
          true <- Peer.LTEP.Session.peer_supports?(ltep, @ut_metadata) do
       metadata_size = metadata_size_from_ltep(ltep)
@@ -226,10 +254,13 @@ defmodule Magnet.Connection do
                peer_key: nil,
                ltep: ltep,
                metadata_size: metadata_size,
+               hash: hash,
+               pex_source: peer_id,
                transport: transport,
                peer: peer,
                unchoked?: false,
-               unchoke_since: nil
+               unchoke_since: nil,
+               pex_inbound: %{initial?: true, rate: Peer.UtPex.InboundRate.initial()}
              }) do
         {:ok, conn}
       end
@@ -372,6 +403,18 @@ defmodule Magnet.Connection do
   @spec request_piece(t(), non_neg_integer()) ::
           {:ok, binary(), pos_integer()} | {:reject, non_neg_integer()} | {:error, term()}
   def request_piece(%__MODULE__{} = conn, piece_index) do
+    case request_piece_with_conn(conn, piece_index) do
+      {:ok, data, total_size, _conn} -> {:ok, data, total_size}
+      {:reject, piece, _conn} -> {:reject, piece}
+      {:error, _} = error -> error
+    end
+  end
+
+  @spec request_piece_with_conn(t(), non_neg_integer()) ::
+          {:ok, binary(), pos_integer(), t()}
+          | {:reject, non_neg_integer(), t()}
+          | {:error, term()}
+  defp request_piece_with_conn(%__MODULE__{} = conn, piece_index) do
     ut_id = Peer.LTEP.Session.peer_extension_id(conn.ltep, @ut_metadata)
 
     if is_integer(ut_id) and ut_id > 0 do
@@ -389,7 +432,7 @@ defmodule Magnet.Connection do
 
         recv_ut_metadata_response(conn, piece_index)
       else
-        {:error, :choked} ->
+        {:error, :choked, conn} ->
           Logger.info(
             "[magnet_ut] choked_send transport=#{conn.transport} endpoint=#{endpoint(conn)} piece=#{piece_index}"
           )
@@ -421,12 +464,12 @@ defmodule Magnet.Connection do
   @spec download_all_pieces(t(), Torrent.hash()) :: {:ok, map(), binary()} | {:error, term()}
   defp download_all_pieces(%__MODULE__{metadata_size: nil} = conn, hash) do
     # Learn total size from the first data message (BEP 9 § data includes total_size).
-    case request_piece(conn, 0) do
-      {:ok, data, total_size} ->
+    case request_piece_with_conn(conn, 0) do
+      {:ok, data, total_size, conn} ->
         pieces = %{0 => data}
         fetch_remaining(conn, hash, total_size, pieces, 1)
 
-      {:reject, _} ->
+      {:reject, _, _conn} ->
         {:error, :metadata_rejected}
 
       {:error, _} = error ->
@@ -456,8 +499,8 @@ defmodule Magnet.Connection do
     else
       case Map.get(pieces, next_index) do
         nil ->
-          case request_piece(conn, next_index) do
-            {:ok, data, ^total_size} ->
+          case request_piece_with_conn(conn, next_index) do
+            {:ok, data, ^total_size, conn} ->
               fetch_remaining(
                 pulse_swarm_conn(conn),
                 hash,
@@ -466,10 +509,10 @@ defmodule Magnet.Connection do
                 next_index + 1
               )
 
-            {:ok, _data, other_size} ->
+            {:ok, _data, other_size, _conn} ->
               {:error, {:metadata_size_mismatch, other_size, total_size}}
 
-            {:reject, _} ->
+            {:reject, _, _conn} ->
               {:error, :metadata_rejected}
 
             {:error, _} = error ->
@@ -486,15 +529,13 @@ defmodule Magnet.Connection do
   defp family_for_ip({_, _, _, _}), do: :inet
   defp family_for_ip({_, _, _, _, _, _, _, _}), do: :inet6
 
-  @spec handshake_exchange(t() | Peer.Transport.socket(), Torrent.hash()) ::
-          :ok | {:error, term()}
-  defp handshake_exchange(%__MODULE__{} = conn, hash), do: handshake_exchange(conn.socket, hash)
-
+  @spec handshake_exchange(Peer.Transport.socket(), Torrent.hash()) ::
+          {:ok, Peer.id()} | {:error, term()}
   defp handshake_exchange(socket, hash) do
     with :ok <- io_send_raw(socket, outbound_handshake(hash)),
-         {:ok, reserved} <- recv_handshake(socket, hash),
+         {:ok, reserved, peer_id} <- recv_handshake(socket, hash),
          true <- Peer.LTEP.extension_protocol?(reserved) do
-      :ok
+      {:ok, peer_id}
     else
       false -> {:error, :no_extension_protocol}
       other -> other
@@ -529,14 +570,13 @@ defmodule Magnet.Connection do
   end
 
   @spec recv_handshake(Peer.Transport.socket(), Torrent.hash()) ::
-          {:ok, Peer.reserved()} | {:error, term()}
+          {:ok, Peer.reserved(), Peer.id()} | {:error, term()}
   defp recv_handshake(socket, expected_hash) do
     case io_recv(socket, @handshake_length, recv_timeout_ms()) do
       {:ok,
-       <<@pstrlen, @pstr, reserved::bytes-size(8), hash::bytes-size(20),
-         _peer_id::bytes-size(20)>>} ->
+       <<@pstrlen, @pstr, reserved::bytes-size(8), hash::bytes-size(20), peer_id::bytes-size(20)>>} ->
         if hash == expected_hash do
-          {:ok, reserved}
+          {:ok, reserved, peer_id}
         else
           {:error, :info_hash_mismatch}
         end
@@ -549,10 +589,11 @@ defmodule Magnet.Connection do
     end
   end
 
-  @spec ltep_handshake_exchange(Peer.Transport.socket()) ::
+  @spec ltep_handshake_exchange(Peer.Transport.socket(), Torrent.hash()) ::
           {:ok, Peer.LTEP.Session.t()} | {:error, term()}
-  defp ltep_handshake_exchange(socket) do
-    session = Peer.LTEP.Session.new()
+  defp ltep_handshake_exchange(socket, hash) do
+    extensions = Peer.LTEP.Extensions.for_magnet(hash)
+    session = Peer.LTEP.Session.new(extensions)
     Peer.LTEP.handshake_exchange(socket, session)
   end
 
@@ -564,7 +605,8 @@ defmodule Magnet.Connection do
     io_send_raw(socket, <<0, 0, 0, 1, @interested_id>>)
   end
 
-  @spec ensure_ready_for_ut_metadata(t()) :: {:ok, t()} | {:error, term()}
+  @spec ensure_ready_for_ut_metadata(t()) ::
+          {:ok, t()} | {:error, term()} | {:error, :choked, t()}
   defp ensure_ready_for_ut_metadata(%__MODULE__{unchoked?: true} = conn), do: {:ok, conn}
 
   # BEP 9: ut_metadata exchange does not require an unchoke on the swarm path.
@@ -575,7 +617,7 @@ defmodule Magnet.Connection do
 
     case drain_until(deadline, conn, :unchoke) do
       {:ok, conn} -> {:ok, conn}
-      {:error, :choked} -> {:error, :choked}
+      {:error, :choked, conn} -> {:error, :choked, conn}
       {:error, _} = error -> error
     end
   end
@@ -600,7 +642,10 @@ defmodule Magnet.Connection do
   end
 
   @spec drain_until(integer(), t(), :unchoke | :ut_metadata | :sync) ::
-          {:ok, t()} | {:error, term()} | {:ut_metadata, t(), binary()}
+          {:ok, t()}
+          | {:error, term()}
+          | {:error, :choked, t()}
+          | {:ut_metadata, t(), binary()}
   defp drain_until(deadline, conn, mode) do
     now = System.monotonic_time(:millisecond)
     if now >= deadline, do: timeout_error(mode, conn)
@@ -635,6 +680,8 @@ defmodule Magnet.Connection do
           drain_until(deadline, conn, mode)
 
         {:ok, {:extended, ext_id, payload}} ->
+          conn = ingest_negotiated_ut_pex(conn, ext_id, payload)
+
           peer_ut_id = Peer.LTEP.Session.peer_extension_id(conn.ltep, @ut_metadata)
           local_ut_id = Peer.LTEP.Session.local_extension_id(conn.ltep, @ut_metadata)
 
@@ -704,10 +751,10 @@ defmodule Magnet.Connection do
        when is_integer(since) do
     if System.monotonic_time(:millisecond) - since >= unchoke_stable_ms(),
       do: {:ok, conn},
-      else: {:error, :choked}
+      else: {:error, :choked, conn}
   end
 
-  defp timeout_error(:unchoke, _conn), do: {:error, :choked}
+  defp timeout_error(:unchoke, conn), do: {:error, :choked, conn}
   defp timeout_error(:sync, conn), do: {:ok, conn}
   defp timeout_error(:ut_metadata, _conn), do: {:error, :timeout}
 
@@ -767,14 +814,18 @@ defmodule Magnet.Connection do
   end
 
   @spec recv_ut_metadata_response(t(), non_neg_integer()) ::
-          {:ok, binary(), pos_integer()} | {:reject, non_neg_integer()} | {:error, term()}
+          {:ok, binary(), pos_integer(), t()}
+          | {:reject, non_neg_integer(), t()}
+          | {:error, term()}
   defp recv_ut_metadata_response(%__MODULE__{} = conn, expected_piece) do
     deadline = System.monotonic_time(:millisecond) + recv_timeout_ms()
     recv_ut_metadata_loop(conn, expected_piece, deadline)
   end
 
   @spec recv_ut_metadata_loop(t(), non_neg_integer(), integer()) ::
-          {:ok, binary(), pos_integer()} | {:reject, non_neg_integer()} | {:error, term()}
+          {:ok, binary(), pos_integer(), t()}
+          | {:reject, non_neg_integer(), t()}
+          | {:error, term()}
   defp recv_ut_metadata_loop(conn, expected_piece, deadline) do
     case drain_until(deadline, conn, :ut_metadata) do
       {:ut_metadata, conn, payload} ->
@@ -794,7 +845,9 @@ defmodule Magnet.Connection do
   end
 
   @spec handle_ut_metadata_payload(t(), non_neg_integer(), binary(), integer()) ::
-          {:ok, binary(), pos_integer()} | {:reject, non_neg_integer()} | {:error, term()}
+          {:ok, binary(), pos_integer(), t()}
+          | {:reject, non_neg_integer(), t()}
+          | {:error, term()}
   defp handle_ut_metadata_payload(conn, expected_piece, payload, deadline) do
     case Magnet.UtMetadata.decode_message(payload) do
       {:ok, {:data, data_kw}} ->
@@ -811,7 +864,7 @@ defmodule Magnet.Connection do
               "[magnet_ut] piece ok endpoint=#{endpoint(conn)} piece=#{expected_piece} bytes=#{byte_size(data)} total_size=#{total_size}"
             )
 
-            {:ok, data, total_size}
+            {:ok, data, total_size, conn}
 
           true ->
             Logger.warning(
@@ -823,7 +876,7 @@ defmodule Magnet.Connection do
 
       {:ok, {:reject, piece: ^expected_piece}} ->
         Logger.info("[magnet_ut] reject endpoint=#{endpoint(conn)} piece=#{expected_piece}")
-        {:reject, expected_piece}
+        {:reject, expected_piece, conn}
 
       {:ok, {:reject, piece: _other}} ->
         recv_ut_metadata_loop(conn, expected_piece, deadline)
@@ -886,4 +939,66 @@ defmodule Magnet.Connection do
 
   defp endpoint(%__MODULE__{peer: %Peer{ip: ip, port: port}}), do: inspect({ip, port})
   defp endpoint(_), do: "?"
+
+  @spec connection_manager_alive?(Torrent.hash()) :: boolean()
+  defp connection_manager_alive?(hash) do
+    case GenServer.whereis({:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}) do
+      pid when is_pid(pid) -> Process.alive?(pid)
+      _ -> false
+    end
+  catch
+    :exit, _ -> false
+  end
+
+  @spec pex_routing_enabled?(t()) :: boolean()
+  defp pex_routing_enabled?(%__MODULE__{hash: hash, pex_source: src})
+       when is_binary(hash) and byte_size(hash) == 20 and is_binary(src) and byte_size(src) == 20 do
+    Peer.UtPex.allowed?(hash) and pex_consumer_active?(hash)
+  end
+
+  defp pex_routing_enabled?(_), do: false
+
+  @spec ingest_negotiated_ut_pex(t(), non_neg_integer(), binary()) :: t()
+  defp ingest_negotiated_ut_pex(%__MODULE__{} = conn, ext_id, payload) do
+    local_pex_id = Peer.LTEP.Session.local_extension_id(conn.ltep, Peer.UtPex.extension_name())
+
+    if pex_routing_enabled?(conn) and is_integer(local_pex_id) and ext_id == local_pex_id do
+      route_inbound_pex(conn, payload)
+    else
+      conn
+    end
+  end
+
+  @spec route_inbound_pex(t(), binary()) :: t()
+  defp route_inbound_pex(%__MODULE__{} = conn, payload) when is_binary(payload) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    inbound =
+      Map.get(conn, :pex_inbound, %{initial?: true, rate: Peer.UtPex.InboundRate.initial()})
+
+    rate = Map.get(inbound, :rate, Peer.UtPex.InboundRate.initial())
+
+    case Peer.UtPex.InboundRate.gate(rate, now_ms) do
+      {:reject, rate} ->
+        %{conn | pex_inbound: %{inbound | rate: rate}}
+
+      {:allow, rate, kind} ->
+        initial? = kind == :initial
+
+        _ =
+          Peer.UtPex.ingest(conn.hash, payload,
+            initial?: initial?,
+            pex_source: conn.pex_source
+          )
+
+        %{
+          conn
+          | pex_inbound: %{
+              inbound
+              | initial?: false,
+                rate: rate
+            }
+        }
+    end
+  end
 end

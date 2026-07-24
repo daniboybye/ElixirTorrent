@@ -21,6 +21,23 @@ defmodule Peer.LTEP.Extensions do
     [Peer.UtHolepunch.Extension | pex ++ metadata_extensions(hash)]
   end
 
+  @doc """
+  LTEP extensions for a direct BEP 9 metadata connection.
+
+  Advertises `ut_pex` only when inbound PEX can be consumed (magnet bootstrap
+  `ConnectionManager` is up) and the torrent is not known private (BEP 27).
+  """
+  @spec for_magnet(Torrent.hash()) :: [module()]
+  def for_magnet(hash) when is_binary(hash) and byte_size(hash) == 20 do
+    extensions = [Magnet.UtMetadata.Extension]
+
+    if Peer.UtPex.allowed?(hash) and Magnet.Connection.pex_consumer_active?(hash) do
+      [Peer.UtPex.Extension | extensions]
+    else
+      extensions
+    end
+  end
+
   @spec metadata_extensions(Torrent.hash()) :: [module()]
   defp metadata_extensions(hash) do
     cond do
