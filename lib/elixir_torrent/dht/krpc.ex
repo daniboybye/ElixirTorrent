@@ -14,7 +14,7 @@ defmodule DHT.KRPC do
   @type transaction_id :: binary()
   @type node_id :: <<_::160>>
   @type info_hash :: Torrent.hash()
-  @type method :: :ping | :find_node | :get_peers | :announce_peer
+  @type method :: :ping | :find_node | :get_peers | :announce_peer | {:unknown, binary()}
 
   @type query :: %{
           required(:method) => method(),
@@ -59,7 +59,7 @@ defmodule DHT.KRPC do
     envelope = %{
       "t" => tid,
       "y" => "q",
-      "q" => Atom.to_string(method),
+      "q" => method_name(method),
       "a" => args
     }
 
@@ -207,6 +207,10 @@ defmodule DHT.KRPC do
 
   defp query_args(_, _), do: %{}
 
+  @spec method_name(method()) :: binary()
+  defp method_name({:unknown, method}), do: method
+  defp method_name(method), do: Atom.to_string(method)
+
   @spec merge_query_args(query(), method(), map()) :: query()
   defp merge_query_args(query, :find_node, %{"target" => target, "want" => want})
        when is_binary(target) and is_list(want) and want != [] do
@@ -256,12 +260,13 @@ defmodule DHT.KRPC do
   defp fetch_type(%{"y" => <<type::binary-size(1)>>}), do: {:ok, type}
   defp fetch_type(_), do: {:error, :malformed}
 
-  @spec fetch_method(term()) :: {:ok, method()} | {:error, :unknown_method}
+  @spec fetch_method(term()) :: {:ok, method()} | {:error, :malformed}
   defp fetch_method("ping"), do: {:ok, :ping}
   defp fetch_method("find_node"), do: {:ok, :find_node}
   defp fetch_method("get_peers"), do: {:ok, :get_peers}
   defp fetch_method("announce_peer"), do: {:ok, :announce_peer}
-  defp fetch_method(_), do: {:error, :unknown_method}
+  defp fetch_method(method) when is_binary(method), do: {:ok, {:unknown, method}}
+  defp fetch_method(_), do: {:error, :malformed}
 
   @spec fetch_binary(map(), String.t()) :: {:ok, binary()} | {:error, :malformed}
   defp fetch_binary(map, key) do

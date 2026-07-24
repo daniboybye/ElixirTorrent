@@ -33,6 +33,13 @@ defmodule DHT.RoutingTables do
     update_in(tables, [family], &RoutingTable.insert(&1, contact, opts))
   end
 
+  @spec replacement_probe(t(), Compact.contact(), keyword()) :: RoutingTable.entry() | nil
+  def replacement_probe(tables, %{ip: ip} = contact, opts \\ []) do
+    tables
+    |> table(family_for(ip))
+    |> RoutingTable.replacement_probe(contact, opts)
+  end
+
   @spec mark_good(t(), RoutingTable.node_id() | Compact.contact(), keyword()) :: t()
   def mark_good(tables, id_or_contact, opts \\ [])
 
@@ -55,6 +62,18 @@ defmodule DHT.RoutingTables do
 
   def mark_bad(tables, id, opts) do
     update_table_with_id(tables, id, &RoutingTable.mark_bad(&1, id, opts))
+  end
+
+  @spec mark_query_failed(t(), RoutingTable.node_id() | Compact.contact(), keyword()) :: t()
+  def mark_query_failed(tables, id_or_contact, opts \\ [])
+
+  def mark_query_failed(tables, %{id: id, ip: ip}, opts) do
+    family = family_for(ip)
+    update_in(tables, [family], &RoutingTable.mark_query_failed(&1, id, opts))
+  end
+
+  def mark_query_failed(tables, id, opts) do
+    update_table_with_id(tables, id, &RoutingTable.mark_query_failed(&1, id, opts))
   end
 
   @doc "Up to `count` closest good nodes across both tables (for iterative lookup)."
@@ -111,9 +130,5 @@ defmodule DHT.RoutingTables do
   end
 
   @spec find_entry_in(RoutingTable.t(), RoutingTable.node_id()) :: RoutingTable.entry() | nil
-  defp find_entry_in(table, id) do
-    table
-    |> RoutingTable.closest(id, 160)
-    |> Enum.find(&(&1.id == id))
-  end
+  defp find_entry_in(table, id), do: RoutingTable.find_entry(table, id)
 end

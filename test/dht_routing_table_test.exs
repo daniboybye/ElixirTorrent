@@ -19,7 +19,8 @@ defmodule DHTRoutingTableTest do
     |> Map.merge(%{
       status: status,
       last_seen_ms: last_seen,
-      last_query_ms: nil
+      last_query_ms: nil,
+      failed_queries: 0
     })
   end
 
@@ -103,6 +104,23 @@ defmodule DHTRoutingTableTest do
       table = RoutingTable.insert(table, contact(10), now_ms: @now)
       refute Enum.any?(RoutingTable.closest(table, contact(10).id, 10), &(&1.id == bad.id))
     end
+
+    test "the global node cap still permits a bad-slot replacement" do
+      table = RoutingTable.new(@local_id)
+      [bucket] = table.buckets
+
+      nodes =
+        Enum.map(1..400, fn id ->
+          entry(id, status: if(id == 1, do: :bad, else: :good))
+        end)
+
+      table = %{table | buckets: [%{bucket | nodes: nodes}]}
+      table = RoutingTable.insert(table, contact(401), now_ms: @now)
+
+      assert RoutingTable.node_count(table) == 400
+      refute RoutingTable.find_entry(table, contact(1).id)
+      assert RoutingTable.find_entry(table, contact(401).id)
+    end
   end
 
   describe "node health (BEP 5 § good / questionable / bad)" do
@@ -134,6 +152,19 @@ defmodule DHTRoutingTableTest do
         |> RoutingTable.purge_bad()
 
       assert RoutingTable.node_count(table) == 0
+    end
+
+    test "a successful response resets the consecutive failure count" do
+      id = contact(1).id
+
+      table =
+        RoutingTable.new(@local_id)
+        |> RoutingTable.insert(contact(1), now_ms: @now)
+        |> RoutingTable.mark_query_failed(id, now_ms: @now + 1)
+        |> RoutingTable.mark_good(id, now_ms: @now + 2)
+        |> RoutingTable.mark_query_failed(id, now_ms: @now + 3)
+
+      assert %{status: :good, failed_queries: 1} = RoutingTable.find_entry(table, id)
     end
   end
 

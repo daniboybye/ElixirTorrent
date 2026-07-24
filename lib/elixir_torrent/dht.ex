@@ -252,8 +252,8 @@ defmodule DHT do
   end
 
   def handle_cast({:add_node, contact}, state) do
-    tables = insert_remote_contact(state.routing_tables, contact)
-    {:noreply, ping_node(%{state | routing_tables: tables}, contact)}
+    state = learn_remote_contact(state, contact)
+    {:noreply, ping_node(state, contact)}
   end
 
   def handle_cast({:seed_node, ip, port}, state) do
@@ -309,7 +309,7 @@ defmodule DHT do
 
   def handle_info({:query_timeout, tid}, state) do
     {pending, state} = pop_pending(state, tid)
-    state = maybe_mark_bad(state, pending)
+    state = handle_query_failure(state, pending)
     state = maybe_lookup_step(state, pending)
     {:noreply, state}
   end
@@ -318,6 +318,9 @@ defmodule DHT do
     case Map.get(state.lookups, ref) do
       nil ->
         {:noreply, state}
+
+      %{purpose: :bootstrap} ->
+        {:noreply, drop_lookup(state, ref)}
 
       %{purpose: :announce} = lookup ->
         {:noreply, finish_announce(state, ref, lookup)}
@@ -388,28 +391,34 @@ defmodule DHT do
           :inet | :inet6
         ) :: t()
   defp handle_query(state, ip, port, query, request_family) do
-    if valid_query_args?(query) do
-      contact = %{id: query.node_id, ip: ip, port: port}
-      tables = insert_remote_contact(state.routing_tables, contact, from_query: true)
-      state = %{state | routing_tables: tables}
+    contact = %{id: query.node_id, ip: ip, port: port}
+    state = learn_remote_contact(state, contact, from_query: true)
 
-      case query.method do
-        :ping ->
-          reply_ping(state, ip, port, query.transaction_id)
+    case query.method do
+      {:unknown, _method} ->
+        send_error(state, ip, port, query.transaction_id, 204, "Method Unknown")
+        state
 
-        :find_node ->
-          reply_find_node(state, ip, port, query, request_family)
+      method when method in [:ping, :find_node, :get_peers, :announce_peer] ->
+        if valid_query_args?(query) do
+          case method do
+            :ping ->
+              reply_ping(state, ip, port, query.transaction_id)
 
-        :get_peers ->
-          reply_get_peers(state, ip, port, query, request_family)
+            :find_node ->
+              reply_find_node(state, ip, port, query, request_family)
 
-        :announce_peer ->
-          handle_announce_peer(state, ip, port, query)
-      end
-    else
-      # BEP 5: queries with missing/invalid arguments get a 203 protocol error.
-      send_error(state, ip, port, query.transaction_id, 203, "Protocol Error")
-      state
+            :get_peers ->
+              reply_get_peers(state, ip, port, query, request_family)
+
+            :announce_peer ->
+              handle_announce_peer(state, ip, port, query)
+          end
+        else
+          # BEP 5: queries with missing/invalid arguments get a 203 protocol error.
+          send_error(state, ip, port, query.transaction_id, 203, "Protocol Error")
+          state
+        end
     end
   end
 
@@ -426,8 +435,6 @@ defmodule DHT do
     node_id_arg?(Map.get(q, :info_hash)) and is_binary(Map.get(q, :token)) and
       (Map.get(q, :implied_port) == 1 or is_integer(Map.get(q, :port)))
   end
-
-  defp valid_query_args?(_), do: false
 
   defp node_id_arg?(value), do: is_binary(value) and byte_size(value) == 20
 
@@ -588,11 +595,9 @@ defmodule DHT do
         contact = %{id: response.node_id, ip: ip, port: port}
 
         if BEP42.valid_or_exempt?(response.node_id, ip) do
-          tables =
-            state.routing_tables
-            |> RoutingTables.insert(contact)
-            |> RoutingTables.mark_good(contact, from_query: true)
+          state = learn_remote_contact(state, contact)
 
+          tables = RoutingTables.mark_good(state.routing_tables, contact, from_query: true)
           state = %{state | routing_tables: tables}
           peers = KRPC.response_peers(response)
           nodes = response |> KRPC.response_nodes() |> compliant_contacts()
@@ -701,14 +706,28 @@ defmodule DHT do
   defp bootstrap(%__MODULE__{bootstrapped?: true} = state), do: state
 
   defp bootstrap(state) do
+    ref = make_ref()
+
+    lookup = %{
+      ref: ref,
+      purpose: :bootstrap,
+      hash: state.node_id,
+      shortlist: Lookup.initial_shortlist(state.routing_tables, state.node_id),
+      peers: [],
+      queried: MapSet.new(),
+      timer_ref: Process.send_after(self(), {:lookup_timeout, ref}, Config.lookup_timeout_ms())
+    }
+
+    state = %{state | lookups: Map.put(state.lookups, ref, lookup), bootstrapped?: true}
+
     state =
       Enum.reduce(Config.bootstrap_routers(), state, fn {host, port}, acc ->
         Enum.reduce(resolve_bootstrap_hosts(host), acc, fn ip, inner ->
-          bootstrap_ip(inner, ip, port)
+          bootstrap_ip(inner, ip, port, ref)
         end)
       end)
 
-    %{state | bootstrapped?: true}
+    schedule_lookup_step(state, ref, 0)
   end
 
   @spec resolve_bootstrap_hosts(String.t()) :: [:inet.ip_address()]
@@ -730,12 +749,13 @@ defmodule DHT do
     v4 ++ v6
   end
 
-  @spec bootstrap_ip(t(), :inet.ip_address(), :inet.port_number()) :: t()
-  defp bootstrap_ip(state, ip, port) do
+  @spec bootstrap_ip(t(), :inet.ip_address(), :inet.port_number(), reference()) :: t()
+  defp bootstrap_ip(state, ip, port, lookup_ref) do
     bootstrap_id = :crypto.strong_rand_bytes(20)
     contact = %{id: bootstrap_id, ip: ip, port: port}
+    pending = %{type: :bootstrap, lookup_ref: lookup_ref, node: contact}
 
-    case send_query(state, contact, :find_node, target: state.node_id) do
+    case send_query(state, contact, :find_node, [target: state.node_id], pending: pending) do
       {:ok, _tid, new_state} -> new_state
       {:error, _, new_state} -> new_state
     end
@@ -836,6 +856,9 @@ defmodule DHT do
       nil ->
         state
 
+      %{purpose: :bootstrap} = lookup ->
+        continue_bootstrap_lookup(state, ref, lookup)
+
       %{hash: hash, shortlist: shortlist, peers: peers} = lookup ->
         shortlist = Lookup.refresh_shortlist(state.routing_tables, hash, shortlist)
 
@@ -863,6 +886,24 @@ defmodule DHT do
 
       _ ->
         state
+    end
+  end
+
+  @spec continue_bootstrap_lookup(t(), reference(), map()) :: t()
+  defp continue_bootstrap_lookup(state, ref, lookup) do
+    target = state.node_id
+    shortlist = Lookup.refresh_shortlist(state.routing_tables, target, lookup.shortlist)
+
+    cond do
+      Lookup.converged?(shortlist) and pending_for_lookup?(state, ref) ->
+        state
+
+      Lookup.converged?(shortlist) ->
+        drop_lookup(state, ref)
+
+      true ->
+        {shortlist, query_ids} = Lookup.next_queries(shortlist)
+        query_nodes_for_lookup(state, ref, target, shortlist, query_ids, lookup, [])
     end
   end
 
@@ -920,15 +961,20 @@ defmodule DHT do
             {acc, MapSet.put(q, id)}
 
           entry ->
-            pending = %{type: :lookup, lookup_ref: ref, node_id: id, node: entry}
+            {method, args, pending_type} =
+              case Map.get(lookup, :purpose) do
+                :bootstrap -> {:find_node, [target: hash], :bootstrap_lookup}
+                _ -> {:get_peers, get_peers_args(hash), :lookup}
+              end
 
-            case send_query(acc, entry, :get_peers, get_peers_args(hash), pending: pending) do
+            pending = %{type: pending_type, lookup_ref: ref, node_id: id, node: entry}
+
+            case send_query(acc, entry, method, args, pending: pending) do
               {:ok, _tid, new_state} ->
                 {new_state, MapSet.put(q, id)}
 
               {:error, _, new_state} ->
-                tables = RoutingTables.mark_bad(new_state.routing_tables, id)
-                {Map.put(new_state, :routing_tables, tables), MapSet.put(q, id)}
+                {new_state, MapSet.put(q, id)}
             end
         end
       end)
@@ -961,7 +1007,7 @@ defmodule DHT do
   end
 
   @spec dispatch_pending(t(), map(), [Peer.t()], [Compact.contact()]) :: t()
-  defp dispatch_pending(state, %{type: :lookup, lookup_ref: ref}, peers, nodes) do
+  defp dispatch_pending(state, %{lookup_ref: ref}, peers, nodes) do
     case Map.get(state.lookups, ref) do
       nil ->
         state
@@ -1022,7 +1068,7 @@ defmodule DHT do
                info_hash: hash,
                port: bt_port,
                token: token,
-               implied_port: 0
+               implied_port: 1
              ) do
           {:ok, _tid, new_state} -> new_state
           {:error, _, new_state} -> new_state
@@ -1097,14 +1143,45 @@ defmodule DHT do
 
   # --- helpers ---
 
-  @spec insert_remote_contact(RoutingTables.t(), Compact.contact(), keyword()) ::
-          RoutingTables.t()
-  defp insert_remote_contact(tables, contact, opts \\ []) do
+  @spec learn_remote_contact(t(), Compact.contact(), keyword()) :: t()
+  defp learn_remote_contact(state, contact, opts \\ []) do
     if BEP42.valid_or_exempt?(contact.id, contact.ip) do
-      RoutingTables.insert(tables, contact, opts)
+      case RoutingTables.replacement_probe(state.routing_tables, contact, opts) do
+        nil ->
+          %{state | routing_tables: RoutingTables.insert(state.routing_tables, contact, opts)}
+
+        incumbent ->
+          if replacement_probe_pending?(state, incumbent) do
+            state
+          else
+            pending = %{
+              type: :replacement_ping,
+              node: incumbent,
+              candidate: contact,
+              candidate_opts: opts,
+              attempts: 1
+            }
+
+            case send_query(state, incumbent, :ping, [], pending: pending) do
+              {:ok, _tid, new_state} -> new_state
+              {:error, _, new_state} -> new_state
+            end
+          end
+      end
     else
-      tables
+      state
     end
+  end
+
+  @spec replacement_probe_pending?(t(), RoutingTable.entry()) :: boolean()
+  defp replacement_probe_pending?(state, incumbent) do
+    Enum.any?(state.pending, fn
+      {_tid, %{type: :replacement_ping, node: %{id: id, ip: ip}}} ->
+        id == incumbent.id and ip == incumbent.ip
+
+      _ ->
+        false
+    end)
   end
 
   @spec compliant_contacts([Compact.contact()]) :: [Compact.contact()]
@@ -1117,7 +1194,7 @@ defmodule DHT do
     nodes
     |> Enum.uniq_by(& &1.id)
     |> Enum.reduce(state, fn node, acc ->
-      %{acc | routing_tables: insert_remote_contact(acc.routing_tables, node)}
+      learn_remote_contact(acc, node)
     end)
   end
 
@@ -1181,19 +1258,45 @@ defmodule DHT do
     end
   end
 
-  @spec maybe_mark_bad(t(), map() | nil) :: t()
-  # BEP 5 § bad nodes — lookup get_peers timeouts are inconclusive; do not poison the table.
-  defp maybe_mark_bad(state, %{type: :lookup}), do: state
+  @spec handle_query_failure(t(), map() | nil) :: t()
+  defp handle_query_failure(
+         state,
+         %{type: :replacement_ping, attempts: 1, node: incumbent} = pending
+       ) do
+    tables = RoutingTables.mark_query_failed(state.routing_tables, incumbent)
+    state = %{state | routing_tables: tables}
+    retry = %{pending | attempts: 2}
 
-  defp maybe_mark_bad(state, %{node: %{id: id}}) when byte_size(id) == 20 do
-    %{state | routing_tables: RoutingTables.mark_bad(state.routing_tables, id)}
+    case send_query(state, incumbent, :ping, [], pending: retry) do
+      {:ok, _tid, new_state} -> new_state
+      {:error, _, new_state} -> new_state
+    end
   end
 
-  defp maybe_mark_bad(state, %{node_id: id}) when byte_size(id) == 20 do
-    %{state | routing_tables: RoutingTables.mark_bad(state.routing_tables, id)}
+  defp handle_query_failure(
+         state,
+         %{
+           type: :replacement_ping,
+           node: incumbent,
+           candidate: candidate,
+           candidate_opts: opts
+         }
+       ) do
+    tables = RoutingTables.mark_query_failed(state.routing_tables, incumbent)
+    state = %{state | routing_tables: tables}
+    learn_remote_contact(state, candidate, opts)
   end
 
-  defp maybe_mark_bad(state, _), do: state
+  defp handle_query_failure(state, %{node: %{id: id} = contact})
+       when is_binary(id) and byte_size(id) == 20 do
+    %{state | routing_tables: RoutingTables.mark_query_failed(state.routing_tables, contact)}
+  end
+
+  defp handle_query_failure(state, %{node_id: id}) when is_binary(id) and byte_size(id) == 20 do
+    %{state | routing_tables: RoutingTables.mark_query_failed(state.routing_tables, id)}
+  end
+
+  defp handle_query_failure(state, _), do: state
 
   @spec mark_pending_bad(t(), map(), :inet.ip_address()) :: t()
   defp mark_pending_bad(state, %{node: %{id: id, ip: _ip} = contact}, _source_ip)
@@ -1218,12 +1321,20 @@ defmodule DHT do
   end
 
   @spec maybe_lookup_step(t(), map() | nil) :: t()
-  defp maybe_lookup_step(state, %{type: :lookup, lookup_ref: ref}) do
+  defp maybe_lookup_step(state, %{lookup_ref: ref}) do
     Process.send(self(), {:lookup_step, ref}, [])
     state
   end
 
   defp maybe_lookup_step(state, _), do: state
+
+  @spec pending_for_lookup?(t(), reference()) :: boolean()
+  defp pending_for_lookup?(state, ref) do
+    Enum.any?(state.pending, fn
+      {_tid, %{lookup_ref: ^ref}} -> true
+      _ -> false
+    end)
+  end
 
   @spec transaction_id() :: binary()
   defp transaction_id, do: :crypto.strong_rand_bytes(2)

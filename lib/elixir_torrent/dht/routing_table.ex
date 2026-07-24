@@ -13,6 +13,7 @@ defmodule DHT.RoutingTable do
   @id_bits 160
   @max_id trunc(:math.pow(2, @id_bits))
   @questionable_after_ms 15 * 60 * 1_000
+  @bad_after_failures 2
   @max_nodes 400
 
   @type node_id :: <<_::160>>
@@ -24,7 +25,8 @@ defmodule DHT.RoutingTable do
           port: :inet.port_number(),
           status: status(),
           last_seen_ms: non_neg_integer(),
-          last_query_ms: non_neg_integer() | nil
+          last_query_ms: non_neg_integer() | nil,
+          failed_queries: non_neg_integer()
         }
 
   @type bucket :: %{
@@ -66,20 +68,26 @@ defmodule DHT.RoutingTable do
     status = Keyword.get(opts, :status, :good)
     from_query? = Keyword.get(opts, :from_query, false)
 
-    if id == table.local_id or node_count(table) >= @max_nodes do
-      table
-    else
-      entry = %{
-        id: id,
-        ip: ip,
-        port: port,
-        status: status,
-        last_seen_ms: now,
-        last_query_ms: if(from_query?, do: now, else: nil)
-      }
+    cond do
+      id == table.local_id ->
+        table
 
-      table
-      |> insert_into_bucket(id_to_int(id), entry, now)
+      node_count(table) >= @max_nodes and find_entry(table, id) == nil and
+          not bad_slot_for_id?(table, id) ->
+        table
+
+      true ->
+        entry = %{
+          id: id,
+          ip: ip,
+          port: port,
+          status: status,
+          last_seen_ms: now,
+          last_query_ms: if(from_query?, do: now, else: nil),
+          failed_queries: 0
+        }
+
+        insert_into_bucket(table, id_to_int(id), entry, now)
     end
   end
 
@@ -94,7 +102,8 @@ defmodule DHT.RoutingTable do
         entry
         | status: :good,
           last_seen_ms: now,
-          last_query_ms: if(from_query?, do: now, else: entry.last_query_ms)
+          last_query_ms: if(from_query?, do: now, else: entry.last_query_ms),
+          failed_queries: 0
       }
     end)
     |> touch_changed(id, now)
@@ -118,6 +127,21 @@ defmodule DHT.RoutingTable do
 
     update_node(table, id, fn entry -> %{entry | status: :bad, last_seen_ms: now} end)
     |> touch_changed(id, now)
+  end
+
+  @doc "Record a missed query; BEP 5 marks a node bad only after multiple consecutive misses."
+  @spec mark_query_failed(t(), node_id(), keyword()) :: t()
+  def mark_query_failed(%__MODULE__{} = table, id, opts \\ []) do
+    now = Keyword.get(opts, :now_ms, now_ms())
+
+    table =
+      update_node(table, id, fn entry ->
+        failures = entry.failed_queries + 1
+        status = if failures >= @bad_after_failures, do: :bad, else: entry.status
+        %{entry | status: status, failed_queries: failures}
+      end)
+
+    if entry_status(table, id) == :bad, do: touch_changed(table, id, now), else: table
   end
 
   @doc "Remove bad nodes from the table."
@@ -189,14 +213,44 @@ defmodule DHT.RoutingTable do
     buckets |> Enum.flat_map(& &1.nodes)
   end
 
+  @doc "Find a node regardless of health status."
+  @spec find_entry(t(), node_id()) :: entry() | nil
+  def find_entry(%__MODULE__{} = table, id) do
+    Enum.find(entries(table), &(&1.id == id))
+  end
+
+  @doc """
+  Return the oldest questionable incumbent that must be pinged before `contact`
+  may occupy its full-bucket slot.
+  """
+  @spec replacement_probe(t(), Compact.contact(), keyword()) :: entry() | nil
+  def replacement_probe(%__MODULE__{} = table, %{id: id}, opts \\ []) do
+    now = Keyword.get(opts, :now_ms, now_ms())
+    table = age_questionable(table, now)
+
+    cond do
+      id == table.local_id or find_entry(table, id) != nil ->
+        nil
+
+      true ->
+        id_int = id_to_int(id)
+
+        table.buckets
+        |> Enum.find(&(id_int >= &1.min and id_int < &1.max))
+        |> questionable_replacement()
+    end
+  end
+
   @spec all_entries(t()) :: [entry()]
   defp all_entries(table), do: entries(table)
 
   @spec insert_into_bucket(t(), non_neg_integer(), entry(), non_neg_integer()) :: t()
-  defp insert_into_bucket(%__MODULE__{buckets: buckets} = table, id_int, entry, now) do
+  defp insert_into_bucket(%__MODULE__{} = table, id_int, entry, now) do
+    table = age_questionable(table, now)
     local_id = table.local_id
+    buckets = table.buckets
     {new_buckets, _} = insert_bucket(buckets, local_id, id_int, entry, now)
-    %{table | buckets: new_buckets} |> age_questionable(now)
+    %{table | buckets: new_buckets}
   end
 
   @spec insert_bucket([bucket()], node_id(), non_neg_integer(), entry(), non_neg_integer()) ::
@@ -230,7 +284,13 @@ defmodule DHT.RoutingTable do
       index ->
         updated =
           List.update_at(nodes, index, fn existing ->
-            %{entry | last_query_ms: existing.last_query_ms || entry.last_query_ms}
+            %{
+              existing
+              | ip: entry.ip,
+                port: entry.port,
+                last_seen_ms: max(existing.last_seen_ms, entry.last_seen_ms),
+                last_query_ms: entry.last_query_ms || existing.last_query_ms
+            }
           end)
 
         {:ok, touch_bucket(%{bucket | nodes: updated}, now)}
@@ -251,19 +311,20 @@ defmodule DHT.RoutingTable do
         split_and_insert(bucket, local_id, entry, now)
 
       true ->
-        {:ok, replace_slot(bucket, entry, now)}
+        {:ok, replace_bad_slot(bucket, entry, now)}
     end
   end
 
-  @spec replace_slot(bucket(), entry(), non_neg_integer()) :: bucket()
-  defp replace_slot(%{nodes: nodes} = bucket, entry, now) do
-    replacement_index =
-      Enum.find_index(nodes, &(&1.status == :bad)) ||
-        Enum.find_index(nodes, &(&1.status == :questionable)) ||
-        0
+  @spec replace_bad_slot(bucket(), entry(), non_neg_integer()) :: bucket()
+  defp replace_bad_slot(%{nodes: nodes} = bucket, entry, now) do
+    case Enum.find_index(nodes, &(&1.status == :bad)) do
+      nil ->
+        bucket
 
-    nodes = List.replace_at(nodes, replacement_index, entry)
-    touch_bucket(%{bucket | nodes: nodes}, now)
+      replacement_index ->
+        nodes = List.replace_at(nodes, replacement_index, entry)
+        touch_bucket(%{bucket | nodes: nodes}, now)
+    end
   end
 
   @spec split_and_insert(bucket(), node_id(), entry(), non_neg_integer()) ::
@@ -310,6 +371,29 @@ defmodule DHT.RoutingTable do
 
   @spec all_good?([entry()]) :: boolean()
   defp all_good?(nodes), do: Enum.all?(nodes, &(&1.status == :good))
+
+  @spec questionable_replacement(bucket() | nil) :: entry() | nil
+  defp questionable_replacement(%{nodes: nodes}) when length(nodes) >= @k do
+    if Enum.any?(nodes, &(&1.status == :bad)) do
+      nil
+    else
+      nodes
+      |> Enum.filter(&(&1.status == :questionable))
+      |> Enum.min_by(& &1.last_seen_ms, fn -> nil end)
+    end
+  end
+
+  defp questionable_replacement(_), do: nil
+
+  @spec bad_slot_for_id?(t(), node_id()) :: boolean()
+  defp bad_slot_for_id?(table, id) do
+    id_int = id_to_int(id)
+
+    case Enum.find(table.buckets, &(id_int >= &1.min and id_int < &1.max)) do
+      %{nodes: nodes} -> Enum.any?(nodes, &(&1.status == :bad))
+      nil -> false
+    end
+  end
 
   @spec age_questionable(t(), non_neg_integer()) :: t()
   defp age_questionable(%__MODULE__{buckets: buckets} = table, now) do
@@ -364,6 +448,14 @@ defmodule DHT.RoutingTable do
 
   @spec touch_bucket(bucket(), non_neg_integer()) :: bucket()
   defp touch_bucket(bucket, now), do: %{bucket | last_changed_ms: now}
+
+  @spec entry_status(t(), node_id()) :: status() | nil
+  defp entry_status(table, id) do
+    case find_entry(table, id) do
+      %{status: status} -> status
+      nil -> nil
+    end
+  end
 
   @spec id_to_int(node_id()) :: non_neg_integer()
   defp id_to_int(<<n::unsigned-big-integer-size(@id_bits)>>), do: n
