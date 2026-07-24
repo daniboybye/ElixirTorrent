@@ -99,6 +99,48 @@ defmodule DHTKRPCTest do
       assert decoded.info_hash == @info_hash
     end
 
+    test "find_node and get_peers round-trip every BEP 32 want combination" do
+      for want <- [["n4"], ["n6"], ["n4", "n6"]],
+          query <- [
+            %{
+              method: :find_node,
+              transaction_id: @tid,
+              node_id: @query_id,
+              target: @target_id,
+              want: want
+            },
+            %{
+              method: :get_peers,
+              transaction_id: @tid,
+              node_id: @query_id,
+              info_hash: @info_hash,
+              want: want
+            }
+          ] do
+        assert {:ok, {:query, decoded}} = query |> KRPC.encode_query() |> KRPC.decode()
+        assert decoded.method == query.method
+        assert decoded.want == want
+      end
+    end
+
+    test "empty want is treated as absent" do
+      for {method, args} <- [
+            {"find_node", %{"target" => @target_id}},
+            {"get_peers", %{"info_hash" => @info_hash}}
+          ] do
+        packet =
+          Bento.encode!(%{
+            "t" => @tid,
+            "y" => "q",
+            "q" => method,
+            "a" => Map.merge(%{"id" => @query_id, "want" => []}, args)
+          })
+
+        assert {:ok, {:query, decoded}} = KRPC.decode(packet)
+        refute Map.has_key?(decoded, :want)
+      end
+    end
+
     test "announce_peer query round-trip with implied_port" do
       query = %{
         method: :announce_peer,

@@ -350,15 +350,15 @@ defmodule DHT do
       :ok = UTP.Dispatcher.dispatch(socket, ip, port, packet)
       state
     else
-      handle_dht_packet(state, ip, port, packet)
+      handle_dht_packet(state, socket, ip, port, packet)
     end
   end
 
-  @spec handle_dht_packet(t(), :inet.ip_address(), :inet.port_number(), binary()) :: t()
-  defp handle_dht_packet(state, ip, port, packet) do
+  @spec handle_dht_packet(t(), port(), :inet.ip_address(), :inet.port_number(), binary()) :: t()
+  defp handle_dht_packet(state, socket, ip, port, packet) do
     case KRPC.decode(packet) do
       {:ok, {:query, query}} ->
-        handle_query(state, ip, port, query)
+        handle_query(state, ip, port, query, socket_family(state, socket))
 
       {:ok, {:response, response}} ->
         handle_response(state, ip, port, response)
@@ -379,8 +379,14 @@ defmodule DHT do
       state
   end
 
-  @spec handle_query(t(), :inet.ip_address(), :inet.port_number(), KRPC.query()) :: t()
-  defp handle_query(state, ip, port, query) do
+  @spec handle_query(
+          t(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          KRPC.query(),
+          :inet | :inet6
+        ) :: t()
+  defp handle_query(state, ip, port, query, request_family) do
     if valid_query_args?(query) do
       contact = %{id: query.node_id, ip: ip, port: port}
       tables = RoutingTables.insert(state.routing_tables, contact, from_query: true)
@@ -391,10 +397,10 @@ defmodule DHT do
           reply_ping(state, ip, port, query.transaction_id)
 
         :find_node ->
-          reply_find_node(state, ip, port, query)
+          reply_find_node(state, ip, port, query, request_family)
 
         :get_peers ->
-          reply_get_peers(state, ip, port, query)
+          reply_get_peers(state, ip, port, query, request_family)
 
         :announce_peer ->
           handle_announce_peer(state, ip, port, query)
@@ -431,10 +437,22 @@ defmodule DHT do
     state
   end
 
-  @spec reply_find_node(t(), :inet.ip_address(), :inet.port_number(), KRPC.query()) :: t()
-  defp reply_find_node(state, ip, port, %{transaction_id: tid, target: target} = query) do
+  @spec reply_find_node(
+          t(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          KRPC.query(),
+          :inet | :inet6
+        ) :: t()
+  defp reply_find_node(
+         state,
+         ip,
+         port,
+         %{transaction_id: tid, target: target} = query,
+         request_family
+       ) do
     want = Map.get(query, :want)
-    node_fields = reply_node_fields(state.routing_tables, target, want)
+    node_fields = reply_node_fields(state.routing_tables, target, want, request_family)
 
     response =
       Map.merge(
@@ -450,15 +468,32 @@ defmodule DHT do
     state
   end
 
-  @spec reply_get_peers(t(), :inet.ip_address(), :inet.port_number(), KRPC.query()) :: t()
-  defp reply_get_peers(state, ip, port, %{transaction_id: tid, info_hash: hash} = query) do
+  @spec reply_get_peers(
+          t(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          KRPC.query(),
+          :inet | :inet6
+        ) :: t()
+  defp reply_get_peers(
+         state,
+         ip,
+         port,
+         %{transaction_id: tid, info_hash: hash} = query,
+         request_family
+       ) do
     token = Token.issue(state.tokens, ip)
-    peers = PeerStore.get(state.peer_store, hash)
+
+    peers =
+      state.peer_store
+      |> PeerStore.get(hash)
+      |> Enum.filter(&peer_in_family?(&1, request_family))
+
     want = Map.get(query, :want)
 
     response =
       if peers == [] do
-        node_fields = reply_node_fields(state.routing_tables, hash, want)
+        node_fields = reply_node_fields(state.routing_tables, hash, want, request_family)
 
         Map.merge(
           %{
@@ -611,14 +646,17 @@ defmodule DHT do
   defp build_query(:ping, tid, node_id, _),
     do: %{method: :ping, transaction_id: tid, node_id: node_id, version: @version}
 
-  defp build_query(:find_node, tid, node_id, args),
-    do: %{
+  defp build_query(:find_node, tid, node_id, args) do
+    query = %{
       method: :find_node,
       transaction_id: tid,
       node_id: node_id,
       target: Keyword.fetch!(args, :target),
       version: @version
     }
+
+    maybe_put_query_want(query, args)
+  end
 
   defp build_query(:get_peers, tid, node_id, args) do
     query = %{
@@ -629,10 +667,7 @@ defmodule DHT do
       version: @version
     }
 
-    case Keyword.get(args, :want) do
-      want when is_list(want) and want != [] -> Map.put(query, :want, want)
-      _ -> query
-    end
+    maybe_put_query_want(query, args)
   end
 
   defp build_query(:announce_peer, tid, node_id, args),
@@ -1246,12 +1281,17 @@ defmodule DHT do
     end
   end
 
-  @spec reply_node_fields(RoutingTables.t(), RoutingTable.node_id(), [String.t()] | nil) ::
+  @spec reply_node_fields(
+          RoutingTables.t(),
+          RoutingTable.node_id(),
+          [String.t()] | nil,
+          :inet | :inet6
+        ) ::
           %{optional(:nodes) => binary(), optional(:nodes6) => binary()}
-  defp reply_node_fields(tables, target, want) do
+  defp reply_node_fields(tables, target, want, request_family) do
     %{}
-    |> maybe_reply_nodes(:v4, tables, target, want)
-    |> maybe_reply_nodes(:v6, tables, target, want)
+    |> maybe_reply_nodes(:v4, tables, target, want, request_family)
+    |> maybe_reply_nodes(:v6, tables, target, want, request_family)
   end
 
   @spec maybe_reply_nodes(
@@ -1259,11 +1299,12 @@ defmodule DHT do
           RoutingTables.family(),
           RoutingTables.t(),
           RoutingTable.node_id(),
-          [String.t()] | nil
+          [String.t()] | nil,
+          :inet | :inet6
         ) ::
           map()
-  defp maybe_reply_nodes(acc, family, tables, target, want) do
-    if include_want_family?(want, family) do
+  defp maybe_reply_nodes(acc, family, tables, target, want, request_family) do
+    if include_want_family?(want, family, request_family) do
       key = if family == :v4, do: :nodes, else: :nodes6
       encode = if family == :v4, do: &Compact.encode_nodes/1, else: &Compact.encode_nodes6/1
 
@@ -1280,12 +1321,28 @@ defmodule DHT do
     end
   end
 
-  @spec include_want_family?([String.t()] | nil, RoutingTables.family()) :: boolean()
-  defp include_want_family?(nil, _family), do: true
-  defp include_want_family?([], _family), do: true
+  @spec include_want_family?(
+          [String.t()] | nil,
+          RoutingTables.family(),
+          :inet | :inet6
+        ) :: boolean()
+  defp include_want_family?(nil, :v4, :inet), do: true
+  defp include_want_family?(nil, :v6, :inet6), do: true
+  defp include_want_family?(nil, _family, _request_family), do: false
+  defp include_want_family?(want, :v4, _request_family) when is_list(want), do: "n4" in want
+  defp include_want_family?(want, :v6, _request_family) when is_list(want), do: "n6" in want
 
-  defp include_want_family?(want, :v4) when is_list(want), do: "n4" in want
-  defp include_want_family?(want, :v6) when is_list(want), do: "n6" in want
+  @spec peer_in_family?(Peer.t(), :inet | :inet6) :: boolean()
+  defp peer_in_family?(%Peer{ip: ip}, :inet), do: tuple_size(ip) == 4
+  defp peer_in_family?(%Peer{ip: ip}, :inet6), do: tuple_size(ip) == 8
+
+  @spec maybe_put_query_want(KRPC.query(), keyword()) :: KRPC.query()
+  defp maybe_put_query_want(query, args) do
+    case Keyword.get(args, :want) do
+      want when is_list(want) and want != [] -> Map.put(query, :want, want)
+      _ -> query
+    end
+  end
 
   @spec contact_family_rank(:inet.ip_address()) :: 0 | 1
   defp contact_family_rank(ip) when tuple_size(ip) == 8, do: 0

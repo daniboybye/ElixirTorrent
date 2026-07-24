@@ -173,7 +173,13 @@ defmodule DHT.KRPC do
   defp decode_typed(_, _, _), do: {:error, :unknown_type}
 
   @spec query_args(query(), method()) :: map()
-  defp query_args(%{target: target}, :find_node) when is_binary(target), do: %{"target" => target}
+  defp query_args(%{target: target, want: want}, :find_node)
+       when is_binary(target) and is_list(want) and want != [] do
+    %{"target" => target, "want" => want}
+  end
+
+  defp query_args(%{target: target}, :find_node) when is_binary(target),
+    do: %{"target" => target}
 
   defp query_args(%{info_hash: hash, want: want}, :get_peers)
        when byte_size(hash) == 20 and is_list(want) and want != [] do
@@ -196,12 +202,17 @@ defmodule DHT.KRPC do
   defp query_args(_, _), do: %{}
 
   @spec merge_query_args(query(), method(), map()) :: query()
+  defp merge_query_args(query, :find_node, %{"target" => target, "want" => want})
+       when is_binary(target) and is_list(want) and want != [] do
+    query |> Map.put(:target, target) |> Map.put(:want, want)
+  end
+
   defp merge_query_args(query, :find_node, %{"target" => target}) when is_binary(target) do
     Map.put(query, :target, target)
   end
 
   defp merge_query_args(query, :get_peers, %{"info_hash" => hash, "want" => want})
-       when byte_size(hash) == 20 and is_list(want) do
+       when byte_size(hash) == 20 and is_list(want) and want != [] do
     query |> Map.put(:info_hash, hash) |> Map.put(:want, want)
   end
 
