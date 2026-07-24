@@ -20,6 +20,7 @@ defmodule ElixirTorrentApplication do
       {Registry, keys: :unique, name: Registry},
       Peer.Endpoints,
       Peer.DialBackoff,
+      Peer.UtPex.RecentCache,
       Peer.DialStats,
       Peer.Holepunch.Store,
       Torrents,

@@ -3,6 +3,15 @@ defmodule Peer.UtPexTest do
 
   alias Peer.UtPex
 
+  # A globally routable-shaped range used only in in-memory PEX tests.
+  defp pub4(n), do: {11, 0, 0, rem(n, 250)}
+
+  defp start_pex_manager(hash) do
+    name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
+    {:ok, pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: name)
+    pid
+  end
+
   defp start_private_model(hash) do
     torrent = %Torrent{
       hash: hash,
@@ -301,7 +310,7 @@ defmodule Peer.UtPexTest do
 
   test "controller state tracks each relay's current PEX endpoints" do
     hash = :crypto.strong_rand_bytes(20)
-    endpoint = {{10, 0, 0, 50}, 6881}
+    endpoint = {pub4(50), 6881}
 
     ltep = Peer.LTEP.Session.new([Peer.UtPex.Extension])
 
@@ -324,9 +333,15 @@ defmodule Peer.UtPexTest do
 
     assert MapSet.member?(added_state.holepunch.pex_endpoints, endpoint)
 
+    rate_cleared =
+      put_in(added_state.pex_inbound.rate, %{
+        initial?: false,
+        anchor_ms: System.monotonic_time(:millisecond) - Peer.UtPex.InboundRate.window_ms() - 1
+      })
+
     dropped_state =
       Peer.Controller.State.handle_extended(
-        added_state,
+        rate_cleared,
         Peer.UtPex.Extension.local_id(),
         UtPex.encode([], [endpoint])
       )
@@ -340,7 +355,7 @@ defmodule Peer.UtPexTest do
     compact =
       for i <- 1..51,
           into: <<>>,
-          do: <<100, 64, 0, i, 12_000 + i::16>>
+          do: <<11, 0, 0, rem(i, 250), 12_000 + i::16>>
 
     payload = Bento.encode!(%{"added" => compact})
     ltep = Peer.LTEP.Session.new([Peer.UtPex.Extension])
@@ -361,9 +376,15 @@ defmodule Peer.UtPexTest do
     assert MapSet.size(after_initial.holepunch.pex_endpoints) == 51
     refute after_initial.pex_inbound.initial?
 
+    rate_cleared =
+      put_in(after_initial.pex_inbound.rate, %{
+        initial?: false,
+        anchor_ms: System.monotonic_time(:millisecond) - Peer.UtPex.InboundRate.window_ms() - 1
+      })
+
     after_delta =
       Peer.Controller.State.handle_extended(
-        after_initial,
+        rate_cleared,
         Peer.UtPex.Extension.local_id(),
         payload
       )
@@ -375,7 +396,7 @@ defmodule Peer.UtPexTest do
   test "private torrents neither advertise nor route ut_pex" do
     hash = :crypto.strong_rand_bytes(20)
     _model = start_private_model(hash)
-    endpoint = {{10, 0, 0, 50}, 6881}
+    endpoint = {pub4(50), 6881}
 
     refute Peer.UtPex.Extension in Peer.LTEP.Extensions.for_peer(hash)
     assert :error = UtPex.ingest(hash, UtPex.encode([endpoint], []))
@@ -446,7 +467,7 @@ defmodule Peer.UtPexTest do
     test "initial snapshot on first apply without prior announce churn" do
       current =
         for i <- 1..3, into: %{} do
-          ep = {{10, 0, 0, i}, 6000 + i}
+          ep = {pub4(i), 6000 + i}
           {ep, UtPex.Entry.new(ep)}
         end
 
@@ -469,7 +490,7 @@ defmodule Peer.UtPexTest do
       end)
 
       {:ok, self_ep} = Peer.Transport.safe_peername(server)
-      other_ep = {{10, 0, 0, 99}, 6999}
+      other_ep = {pub4(99), 6999}
 
       current = %{
         self_ep => UtPex.Entry.new(self_ep),
@@ -484,9 +505,9 @@ defmodule Peer.UtPexTest do
     end
 
     test "each connection keeps independent sent maps" do
-      ep_a = {{10, 0, 0, 1}, 7001}
-      ep_b = {{10, 0, 0, 2}, 7002}
-      ep_c = {{10, 0, 0, 3}, 7003}
+      ep_a = {pub4(1), 7001}
+      ep_b = {pub4(2), 7002}
+      ep_c = {pub4(3), 7003}
 
       current = %{
         ep_a => UtPex.Entry.new(ep_a),
@@ -506,7 +527,7 @@ defmodule Peer.UtPexTest do
     end
 
     test "unchanged snapshot tick does not advance sent state" do
-      ep = {{10, 0, 0, 8}, 7008}
+      ep = {pub4(8), 7008}
       current = %{ep => UtPex.Entry.new(ep)}
 
       state =
@@ -522,7 +543,7 @@ defmodule Peer.UtPexTest do
     test "non-initial deltas spill past 50 added peers across ticks" do
       sent =
         for i <- 1..50, into: %{} do
-          ep = {{10, 1, 0, i}, 8000 + i}
+          ep = {pub4(i), 8000 + i}
           {ep, UtPex.Entry.new(ep)}
         end
 
@@ -530,7 +551,7 @@ defmodule Peer.UtPexTest do
         Map.merge(
           sent,
           for i <- 51..105, into: %{} do
-            ep = {{10, 2, 0, i}, 8100 + i}
+            ep = {pub4(200 + i), 8100 + i}
             {ep, UtPex.Entry.new(ep)}
           end
         )
@@ -579,7 +600,7 @@ defmodule Peer.UtPexTest do
     end
 
     test "failed wire send does not advance per-connection sent state" do
-      ep = {{10, 0, 0, 7}, 7007}
+      ep = {pub4(7), 7007}
       current = %{ep => UtPex.Entry.new(ep)}
       state = outbound_state(initial_sent?: true, sent: %{})
 
@@ -604,8 +625,8 @@ defmodule Peer.UtPexTest do
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
 
       supplier = <<6::160>>
-      keep = {{10, 0, 0, 10}, 7010}
-      drop = {{10, 0, 0, 11}, 7011}
+      keep = {pub4(10), 7010}
+      drop = {pub4(11), 7011}
 
       :ok =
         Peer.ConnectionManager.offer_peers(hash, [%Peer{ip: elem(drop, 0), port: elem(drop, 1)}])
@@ -625,7 +646,7 @@ defmodule Peer.UtPexTest do
       pid = start_manager(hash)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
 
-      ep = {{10, 0, 0, 12}, 7012}
+      ep = {pub4(12), 7012}
       assert {:ok, _, _} = UtPex.ingest(hash, UtPex.encode([ep], []))
 
       state = :sys.get_state(pid)
@@ -639,8 +660,8 @@ defmodule Peer.UtPexTest do
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
 
       supplier = <<7::160>>
-      old = {{10, 0, 0, 13}, 7013}
-      new = {{10, 0, 0, 14}, 7014}
+      old = {pub4(13), 7013}
+      new = {pub4(14), 7014}
 
       :ok =
         Peer.ConnectionManager.offer_peers_from_pex(hash, supplier, [
@@ -661,7 +682,7 @@ defmodule Peer.UtPexTest do
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
 
       supplier = <<8::160>>
-      endpoint = {{10, 0, 0, 15}, 7015}
+      endpoint = {pub4(15), 7015}
 
       state = %Peer.Controller.State{
         hash: hash,
@@ -684,6 +705,450 @@ defmodule Peer.UtPexTest do
       entry = Map.fetch!(manager_state.queue, endpoint)
       assert MapSet.member?(entry.sources, {:pex, supplier})
       assert MapSet.member?(routed.holepunch.pex_endpoints, endpoint)
+    end
+  end
+
+  describe "PEX items 6–7 (underpopulated list + abuse/determinism)" do
+    alias Peer.UtPex.{BEP40, DisconnectReason, Filter, InboundRate, RecentCache}
+    alias Peer.ConnectionManager.Queue, as: DialQueue
+
+    @client_v4 {123, 213, 32, 10}
+    @peer_far {98, 76, 54, 32}
+    @peer_near {123, 213, 32, 234}
+
+    test "BEP 40 official CRC32C vectors" do
+      assert {:ok, 0xEC2D7224} = BEP40.priority({@client_v4, 6881}, {@peer_far, 51413})
+      assert {:ok, 0x99568189} = BEP40.priority({@client_v4, 6881}, {@peer_near, 51413})
+    end
+
+    test "BEP 40 sort is stable and family-separated" do
+      client = {@client_v4, 6881}
+      v4 = [{@peer_far, 1}, {@peer_near, 2}]
+      v6 = [{{0x2001, 0xDB8, 0, 0, 0, 0, 0, 1}, 6001}]
+
+      assert BEP40.sort_peers(client, v4 ++ v6) ==
+               BEP40.sort_peers(client, v4) ++ BEP40.sort_peers(client, v6)
+
+      assert hd(BEP40.sort_peers(client, v4)) == {@peer_far, 1}
+    end
+
+    test "BEP 40 IPv6 masks network-order bytes at /48 boundaries" do
+      a = {{0x2001, 0xDB8, 0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666}, 1}
+      b = {{0x2606, 0x4700, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888}, 2}
+
+      expected =
+        <<0x20, 0x01, 0x0D, 0xB8, 0x11, 0x11, 0x00, 0x00, 0x11, 0x11, 0x44, 0x44, 0x55, 0x55,
+          0x44, 0x44, 0x26, 0x06, 0x47, 0x00, 0x33, 0x33, 0x44, 0x44, 0x55, 0x55, 0x44, 0x44,
+          0x55, 0x55, 0x00, 0x00>>
+
+      assert {:ok, ^expected} = BEP40.priority_bytes(a, b)
+    end
+
+    test "disconnect reason eligibility documents BEP 11 recent-list policy" do
+      assert DisconnectReason.eligible?({:shutdown, :duplicate_peer})
+      assert DisconnectReason.eligible?({:shutdown, :no_mutual_interest})
+      assert DisconnectReason.eligible?({:shutdown, :resource_limit})
+
+      refute DisconnectReason.eligible?({:shutdown, :protocol_error})
+      refute DisconnectReason.eligible?({:shutdown, :connection_closed})
+      refute DisconnectReason.eligible?(:timeout)
+      refute DisconnectReason.eligible?(:normal)
+
+      handshaken = %Peer.Controller.State{
+        hash: <<0::160>>,
+        id: <<0::160>>,
+        fast_extension: nil,
+        status: nil,
+        pieces_count: 1,
+        socket: nil,
+        ltep: nil,
+        connected_at: 1,
+        peer_reserved: nil,
+        downloaded_at_connect: nil
+      }
+
+      assert DisconnectReason.handshaken?(handshaken)
+      refute DisconnectReason.handshaken?(%{handshaken | peer_reserved: <<0::64>>})
+    end
+
+    test "recent cache supplements each family independently up to 25 and drains picks" do
+      hash = :crypto.strong_rand_bytes(20)
+      now = 1_000_000
+
+      live_v4 =
+        for i <- 1..10, into: %{} do
+          ep = {pub4(i), 7000 + i}
+          {ep, UtPex.Entry.new(ep)}
+        end
+
+      for i <- 11..40 do
+        ep = {pub4(i), 7100 + i}
+        :ok = RecentCache.record(hash, UtPex.Entry.new(ep), now - i)
+      end
+
+      {aug, drained} = RecentCache.supplement(hash, live_v4, now_ms: now)
+
+      assert map_size(live_v4) == 10
+      assert Enum.count(aug, fn {{ip, _}, _} -> tuple_size(ip) == 4 end) == 25
+      assert length(drained) == 15
+      assert map_size(aug) == 25
+
+      {aug2, drained2} = RecentCache.supplement(hash, aug, now_ms: now + 1)
+      assert map_size(aug2) == map_size(aug)
+      assert drained2 == []
+    end
+
+    test "underpopulation accounting is independent for IPv4 and IPv6" do
+      hash = :crypto.strong_rand_bytes(20)
+      now = 1_500_000
+
+      live =
+        for i <- 1..24, into: %{} do
+          endpoint = {pub4(i), 7600 + i}
+          {endpoint, UtPex.Entry.new(endpoint)}
+        end
+
+      for i <- 25..29 do
+        endpoint = {pub4(i), 7600 + i}
+        :ok = RecentCache.record(hash, UtPex.Entry.new(endpoint), now)
+      end
+
+      for i <- 1..30 do
+        endpoint = {{0x2606, 0x4700, 1, 0, 0, 0, 0, i}, 7700 + i}
+        :ok = RecentCache.record(hash, UtPex.Entry.new(endpoint), now)
+      end
+
+      {current, drained} = RecentCache.supplement(hash, live, now_ms: now)
+
+      assert Enum.count(current, fn {{ip, _}, _} -> tuple_size(ip) == 4 end) == 25
+      assert Enum.count(current, fn {{ip, _}, _} -> tuple_size(ip) == 8 end) == 25
+      assert length(drained) == 26
+    end
+
+    test "recent cache can be shared by initial snapshots before the announce tick drains it" do
+      hash = :crypto.strong_rand_bytes(20)
+      now = System.monotonic_time(:millisecond)
+      endpoint = {pub4(90), 7090}
+      :ok = RecentCache.record(hash, UtPex.Entry.new(endpoint), now)
+
+      {first, [_]} = RecentCache.supplement(hash, %{}, now_ms: now, drain?: false)
+      {second, [_]} = RecentCache.supplement(hash, %{}, now_ms: now, drain?: false)
+      assert Map.has_key?(first, endpoint)
+      assert Map.has_key?(second, endpoint)
+
+      {periodic, [_]} = RecentCache.supplement(hash, %{}, now_ms: now, drain?: true)
+      assert Map.has_key?(periodic, endpoint)
+      assert RecentCache.supplement(hash, %{}, now_ms: now) == {%{}, []}
+    end
+
+    test "outbound recent supplement defaults nil time to monotonic production time" do
+      hash = :crypto.strong_rand_bytes(20)
+      endpoint = {pub4(91), 7091}
+
+      :ok =
+        RecentCache.record(hash, UtPex.Entry.new(endpoint), System.monotonic_time(:millisecond))
+
+      {current, [_]} =
+        Peer.UtPex.Outbound.prepare_current(hash, %{},
+          supplement_recent?: true,
+          drain_recent?: false,
+          now_ms: nil
+        )
+
+      assert Map.has_key?(current, endpoint)
+    end
+
+    test "forced next dropped after supplement consumed from cache" do
+      hash = :crypto.strong_rand_bytes(20)
+      now = 2_000_000
+
+      live =
+        for i <- 1..5, into: %{} do
+          ep = {pub4(i), 7200 + i}
+          {ep, UtPex.Entry.new(ep)}
+        end
+
+      for i <- 6..30 do
+        :ok = RecentCache.record(hash, UtPex.Entry.new({pub4(i), 7300 + i}), now - i)
+      end
+
+      {current, _drained} = RecentCache.supplement(hash, live, now_ms: now)
+
+      sent = current
+
+      live_only =
+        for i <- 1..5, into: %{} do
+          ep = {pub4(i), 7200 + i}
+          {ep, UtPex.Entry.new(ep)}
+        end
+
+      {added, dropped} = UtPex.outbound_delta(sent, live_only)
+      assert added == []
+      assert length(dropped) == 20
+    end
+
+    test "controller emits supplemented recent peers as its next dropped message" do
+      hash = :crypto.strong_rand_bytes(20)
+      now = 2_500_000
+
+      live =
+        for i <- 1..5, into: %{} do
+          endpoint = {pub4(i), 7800 + i}
+          {endpoint, UtPex.Entry.new(endpoint)}
+        end
+
+      for i <- 6..25 do
+        endpoint = {pub4(i), 7800 + i}
+        :ok = RecentCache.record(hash, UtPex.Entry.new(endpoint), now)
+      end
+
+      {periodic, drained} =
+        Peer.UtPex.Outbound.prepare_current(hash, live,
+          supplement_recent?: true,
+          drain_recent?: true,
+          now_ms: now
+        )
+
+      assert length(drained) == 20
+      state = outbound_state(hash: hash, initial_sent?: true, sent: live)
+
+      after_added =
+        Peer.Controller.State.apply_pex_snapshot(state, periodic,
+          send_fun: fn payload ->
+            send(self(), {:pex_payload, payload})
+            :ok
+          end
+        )
+
+      assert_receive {:pex_payload, added_payload}
+      assert {:ok, added, []} = UtPex.decode(added_payload)
+      assert length(added) == 20
+
+      _after_dropped =
+        Peer.Controller.State.apply_pex_snapshot(after_added, live,
+          send_fun: fn payload ->
+            send(self(), {:pex_payload, payload})
+            :ok
+          end
+        )
+
+      assert_receive {:pex_payload, dropped_payload}
+      assert {:ok, [], dropped} = UtPex.decode(dropped_payload)
+      assert length(dropped) == 20
+    end
+
+    test "recent cache bound and age eviction" do
+      hash = :crypto.strong_rand_bytes(20)
+      now = 10_000_000
+
+      for i <- 1..70 do
+        :ok = RecentCache.record(hash, UtPex.Entry.new({pub4(i), 7400 + i}), now)
+      end
+
+      {aug, drained} =
+        RecentCache.supplement(hash, %{},
+          now_ms: now,
+          clients: %{inet: {@client_v4, 6881}, inet6: nil}
+        )
+
+      assert length(drained) == 25
+      assert map_size(aug) == 25
+
+      stale = now - 30 * 60 * 1_000 - 1
+      :ok = RecentCache.record(hash, UtPex.Entry.new({pub4(80), 7500}), stale)
+
+      {aug2, _} =
+        RecentCache.supplement(hash, %{},
+          now_ms: now,
+          clients: %{inet: {@client_v4, 6881}, inet6: nil}
+        )
+
+      refute Map.has_key?(aug2, {pub4(80), 7500})
+    end
+
+    test "inbound rate limiter: initial, one per minute, excess ignored" do
+      t0 = 100_000
+      {:allow, s1, :initial} = InboundRate.gate(InboundRate.initial(), t0)
+      {:reject, _} = InboundRate.gate(s1, t0 + 1)
+      t1 = t0 + InboundRate.window_ms()
+      {:allow, s2, :delta} = InboundRate.gate(s1, t1)
+      {:reject, _} = InboundRate.gate(s2, t1 + 1)
+      t2 = t1 + InboundRate.window_ms()
+      {:allow, _, :delta} = InboundRate.gate(s2, t2)
+    end
+
+    test "global unicast filter rejects private, loopback, and multicast v4/v6" do
+      refute Filter.global_unicast_endpoint?({{10, 0, 0, 1}, 6881})
+      refute Filter.global_unicast_endpoint?({{127, 0, 0, 1}, 6881})
+      refute Filter.global_unicast_endpoint?({{203, 0, 113, 1}, 6881})
+      refute Filter.global_unicast_endpoint?({{100, 127, 0, 1}, 6881})
+      refute Filter.global_unicast_endpoint?({{224, 0, 0, 1}, 6881})
+      refute Filter.global_unicast_endpoint?({{0, 1, 2, 3}, 6881})
+      refute Filter.global_unicast_endpoint?({{0, 0, 0, 0, 0, 0, 0, 1}, 6881})
+      refute Filter.global_unicast_endpoint?({{0xFF02, 0, 0, 0, 0, 0, 0, 1}, 6881})
+      refute Filter.global_unicast_endpoint?({{0xFE80, 0, 0, 0, 0, 0, 0, 1}, 6881})
+      assert Filter.global_unicast_endpoint?({pub4(1), 6881})
+      refute Filter.global_unicast_endpoint?({{0x2001, 0xDB8, 0, 0, 0, 0, 0, 1}, 6881})
+      assert Filter.global_unicast_endpoint?({{0x2606, 0x4700, 0, 0, 0, 0, 0, 1}, 6881})
+    end
+
+    test "duplicate IP different port suppressed on PEX queue insert" do
+      hash = :crypto.strong_rand_bytes(20)
+      first = %Peer{ip: pub4(1), port: 7001}
+      second = %Peer{ip: pub4(1), port: 7002}
+
+      q =
+        %{}
+        |> DialQueue.offer([first], {:pex, <<1::160>>}, hash: hash)
+        |> DialQueue.offer([second], {:pex, <<1::160>>}, hash: hash)
+
+      assert map_size(q) == 1
+      assert DialQueue.get_peer(q, {first.ip, first.port}).port == 7001
+
+      same_batch = DialQueue.offer(%{}, [first, second], {:pex, <<2::160>>}, hash: hash)
+      assert map_size(same_batch) == 1
+    end
+
+    test "PEX candidate cap preserves discovery ownership and per-source isolation" do
+      hash = :crypto.strong_rand_bytes(20)
+      client = {pub4(0), 6881}
+      disc = %Peer{ip: pub4(99), port: 7999}
+      supplier_a = <<2::160>>
+      supplier_b = <<3::160>>
+
+      q =
+        %{}
+        |> DialQueue.offer([disc], :discovery,
+          hash: hash,
+          clients: %{inet: client, inet6: nil}
+        )
+        |> then(fn base ->
+          Enum.reduce(1..DialQueue.max_pex_per_source(), base, fn i, acc ->
+            DialQueue.offer(
+              acc,
+              [%Peer{ip: pub4(100 + i), port: 8000 + i}],
+              {:pex, supplier_a},
+              hash: hash,
+              clients: %{inet: client, inet6: nil}
+            )
+          end)
+        end)
+        |> then(fn base ->
+          Enum.reduce(1..DialQueue.max_pex_per_source(), base, fn i, acc ->
+            DialQueue.offer(
+              acc,
+              [%Peer{ip: pub4(200 + i), port: 9000 + i}],
+              {:pex, supplier_b},
+              hash: hash,
+              clients: %{inet: client, inet6: nil}
+            )
+          end)
+        end)
+
+      assert DialQueue.get_peer(q, {disc.ip, disc.port}) == disc
+
+      pex_only =
+        Enum.count(q, fn {_k, entry} ->
+          not MapSet.member?(entry.sources, :discovery)
+        end)
+
+      assert pex_only <= DialQueue.max_global_pex_entries()
+    end
+
+    test "per-source cap removes only the overflowing source tag" do
+      hash = :crypto.strong_rand_bytes(20)
+      owner_a = <<31::160>>
+      owner_b = <<32::160>>
+      shared = %Peer{ip: pub4(1), port: 10_001}
+
+      queue =
+        %{}
+        |> DialQueue.offer([shared], {:pex, owner_b}, hash: hash)
+        |> DialQueue.offer([shared], {:pex, owner_a}, hash: hash)
+
+      queue =
+        Enum.reduce(2..65, queue, fn i, acc ->
+          DialQueue.offer(
+            acc,
+            [%Peer{ip: pub4(i), port: 10_000 + i}],
+            {:pex, owner_a},
+            hash: hash
+          )
+        end)
+
+      entry = Map.fetch!(queue, {shared.ip, shared.port})
+      assert entry.sources == MapSet.new([{:pex, owner_b}])
+    end
+
+    test "controller routing rejects excess inbound PEX before ingest mutates queue" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_pex_manager(hash)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+
+      ep = {pub4(40), 7040}
+      supplier = <<9::160>>
+
+      state = %Peer.Controller.State{
+        hash: hash,
+        id: supplier,
+        fast_extension: nil,
+        status: nil,
+        pieces_count: 1,
+        socket: nil,
+        ltep: Peer.LTEP.Session.new([Peer.UtPex.Extension])
+      }
+
+      payload = UtPex.encode([ep], [])
+
+      after_first =
+        Peer.Controller.State.handle_extended(
+          state,
+          Peer.UtPex.Extension.local_id(),
+          payload
+        )
+
+      _ignored =
+        Peer.Controller.State.handle_extended(
+          after_first,
+          Peer.UtPex.Extension.local_id(),
+          payload
+        )
+
+      manager = :sys.get_state(pid)
+      assert map_size(manager.queue) == 1
+    end
+
+    test "malformed inbound PEX consumes the connection rate window" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_pex_manager(hash)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+
+      state = %Peer.Controller.State{
+        hash: hash,
+        id: <<10::160>>,
+        fast_extension: nil,
+        status: nil,
+        pieces_count: 1,
+        socket: nil,
+        ltep: Peer.LTEP.Session.new([Peer.UtPex.Extension])
+      }
+
+      after_bad =
+        Peer.Controller.State.handle_extended(
+          state,
+          Peer.UtPex.Extension.local_id(),
+          <<1, 2, 3>>
+        )
+
+      after_excess =
+        Peer.Controller.State.handle_extended(
+          after_bad,
+          Peer.UtPex.Extension.local_id(),
+          UtPex.encode([{pub4(41), 7041}], [])
+        )
+
+      assert after_excess.holepunch.pex_endpoints == MapSet.new()
+      assert :sys.get_state(pid).queue == %{}
     end
   end
 end

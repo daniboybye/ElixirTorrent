@@ -1,6 +1,8 @@
 defmodule Peer.ConnectionManager.Queue do
   @moduledoc false
 
+  alias Peer.UtPex.{BEP40, Filter}
+
   # `:discovery` — tracker, DHT, LSD, magnet, productive re-offer, etc. PEX drops
   # must not revoke this tag. `{:pex, remote_id}` — one tag per remote ut_pex supplier.
   @type source :: :discovery | {:pex, binary()}
@@ -13,14 +15,28 @@ defmodule Peer.ConnectionManager.Queue do
 
   defstruct [:peer, sources: MapSet.new()]
 
+  @max_global_pex_entries 256
+  @max_pex_per_source 64
+
   @doc false
-  @spec offer(t(), [Peer.t()], source()) :: t()
-  def offer(queue, peers, source) when is_list(peers) do
-    Enum.reduce(peers, queue, fn %Peer{} = peer, acc ->
-      key = {peer.ip, peer.port}
-      entry = Map.get(acc, key)
-      Map.put(acc, key, merge_offer(entry, peer, source))
+  @spec offer(t(), [Peer.t()], source(), keyword()) :: t()
+  def offer(queue, peers, source, opts \\ []) when is_list(peers) do
+    hash = Keyword.get(opts, :hash)
+    clients = Keyword.get(opts, :clients, %{inet: nil, inet6: nil})
+
+    peers
+    |> filter_for_offer(source, hash)
+    |> sort_peers_for_offer(clients)
+    |> Enum.reduce(queue, fn %Peer{} = peer, acc ->
+      if match?({:pex, _}, source) and duplicate_ip_blocked?(acc, peer) do
+        acc
+      else
+        key = {peer.ip, peer.port}
+        entry = Map.get(acc, key)
+        Map.put(acc, key, merge_offer(entry, peer, source))
+      end
     end)
+    |> trim_pex_retention(clients)
   end
 
   @doc false
@@ -60,6 +76,152 @@ defmodule Peer.ConnectionManager.Queue do
       _ -> nil
     end
   end
+
+  @doc false
+  @spec max_global_pex_entries() :: pos_integer()
+  def max_global_pex_entries, do: @max_global_pex_entries
+
+  @doc false
+  @spec max_pex_per_source() :: pos_integer()
+  def max_pex_per_source, do: @max_pex_per_source
+
+  @spec filter_for_offer([Peer.t()], source(), Torrent.hash() | nil) :: [Peer.t()]
+  defp filter_for_offer(peers, {:pex, _}, hash) when is_binary(hash),
+    do: Filter.filter_peers(peers, hash)
+
+  defp filter_for_offer(peers, _source, _hash), do: peers
+
+  @spec sort_peers_for_offer([Peer.t()], map()) :: [Peer.t()]
+  defp sort_peers_for_offer(peers, clients) do
+    Enum.sort_by(peers, fn %Peer{ip: ip, port: port} ->
+      family = if tuple_size(ip) == 4, do: :inet, else: :inet6
+      client = Map.get(clients, family)
+
+      priority =
+        case client && BEP40.priority(client, {ip, port}) do
+          {:ok, value} -> value
+          _ -> 0
+        end
+
+      {if(family == :inet, do: 0, else: 1), Bitwise.bxor(priority, 0xFFFFFFFF), {ip, port}}
+    end)
+  end
+
+  @doc false
+  @spec duplicate_ip_blocked?(t(), Peer.t()) :: boolean()
+  def duplicate_ip_blocked?(queue, %Peer{ip: ip, port: port}) when is_map(queue) do
+    Filter.duplicate_ip_blocked?(queue, %Peer{ip: ip, port: port})
+  end
+
+  @spec trim_pex_retention(t(), term()) :: t()
+  defp trim_pex_retention(queue, clients) do
+    queue
+    |> enforce_per_source_caps(clients)
+    |> enforce_global_pex_cap(clients)
+  end
+
+  @spec enforce_per_source_caps(t(), term()) :: t()
+  defp enforce_per_source_caps(queue, clients) do
+    pex_sources =
+      queue
+      |> Map.values()
+      |> Enum.flat_map(fn %__MODULE__{sources: sources} ->
+        sources |> MapSet.to_list() |> Enum.filter(&match?({:pex, _}, &1))
+      end)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    Enum.reduce(pex_sources, queue, fn {:pex, src} = tag, acc ->
+      keys_for_source =
+        acc
+        |> Enum.filter(fn {_k, %__MODULE__{sources: sources}} -> MapSet.member?(sources, tag) end)
+        |> Enum.map(fn {k, _} -> k end)
+
+      if length(keys_for_source) <= @max_pex_per_source do
+        acc
+      else
+        evict_keys =
+          keys_for_source
+          |> sort_keys_for_eviction(acc, clients, src)
+          |> Enum.take(length(keys_for_source) - @max_pex_per_source)
+
+        Enum.reduce(evict_keys, acc, fn key, queue ->
+          remove_source_tag(queue, key, tag)
+        end)
+      end
+    end)
+  end
+
+  @spec enforce_global_pex_cap(t(), term()) :: t()
+  defp enforce_global_pex_cap(queue, clients) do
+    pex_only_keys = pex_only_keys(queue)
+
+    if length(pex_only_keys) <= @max_global_pex_entries do
+      queue
+    else
+      evict_keys =
+        pex_only_keys
+        |> sort_keys_for_eviction(queue, clients, :global)
+        |> Enum.take(length(pex_only_keys) - @max_global_pex_entries)
+
+      Enum.reduce(evict_keys, queue, &evict_pex_only/2)
+    end
+  end
+
+  @spec pex_only_keys(t()) :: [key()]
+  defp pex_only_keys(queue) do
+    Enum.flat_map(queue, fn
+      {k, %__MODULE__{sources: sources}} ->
+        if MapSet.member?(sources, :discovery), do: [], else: [k]
+
+      _ ->
+        []
+    end)
+  end
+
+  @spec evict_pex_only(key(), t()) :: t()
+  defp evict_pex_only(key, queue) do
+    case Map.get(queue, key) do
+      %__MODULE__{sources: sources} ->
+        if MapSet.member?(sources, :discovery), do: queue, else: Map.delete(queue, key)
+
+      _ ->
+        queue
+    end
+  end
+
+  @spec remove_source_tag(t(), key(), source()) :: t()
+  defp remove_source_tag(queue, key, tag) do
+    case Map.get(queue, key) do
+      %__MODULE__{sources: sources} = entry ->
+        sources = MapSet.delete(sources, tag)
+
+        if MapSet.size(sources) == 0,
+          do: Map.delete(queue, key),
+          else: Map.put(queue, key, %{entry | sources: sources})
+
+      _ ->
+        queue
+    end
+  end
+
+  @spec sort_keys_for_eviction([key()], t(), term(), term()) :: [key()]
+  defp sort_keys_for_eviction(keys, queue, clients, _scope) when is_map(clients) do
+    Enum.sort_by(keys, fn key ->
+      %__MODULE__{peer: %Peer{ip: ip, port: port}} = Map.fetch!(queue, key)
+      client = Map.get(clients, if(tuple_size(ip) == 4, do: :inet, else: :inet6))
+
+      priority =
+        case client && BEP40.priority(client, {ip, port}) do
+          {:ok, value} -> value
+          _ -> -1
+        end
+
+      {priority, key}
+    end)
+  end
+
+  defp sort_keys_for_eviction(keys, _queue, _clients, _scope), do: Enum.sort(keys)
 
   @spec merge_offer(entry() | nil, Peer.t(), source()) :: entry()
   defp merge_offer(nil, %Peer{} = peer, source) do

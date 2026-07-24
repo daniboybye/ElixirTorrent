@@ -21,7 +21,7 @@ defmodule Peer.Controller.State do
     holepunch: %{pex_endpoints: MapSet.new(), rate: nil},
     # The 50-contact BEP 11 cap does not apply to the first inbound snapshot.
     # This is connection state; an added-only delta is not inherently "initial".
-    pex_inbound: %{initial?: true},
+    pex_inbound: %{initial?: true, rate: Peer.UtPex.InboundRate.initial()},
     # BEP 11 outbound is per-connection: each remote that negotiates ut_pex gets its
     # own view of what we already told them (`sent`), not a torrent-global ledger.
     pex_outbound: %{initial_sent?: false, initial_pending?: false, sent: %{}},
@@ -86,7 +86,7 @@ defmodule Peer.Controller.State do
             pex_endpoints: MapSet.t(endpoint()),
             rate: {integer(), non_neg_integer()} | nil
           },
-          pex_inbound: %{initial?: boolean()},
+          pex_inbound: %{initial?: boolean(), rate: map()},
           pex_outbound: %{
             initial_sent?: boolean(),
             initial_pending?: boolean(),
@@ -304,18 +304,7 @@ defmodule Peer.Controller.State do
         respond_ut_metadata(state, payload)
 
       ut_pex?(state, extended_id) and Peer.UtPex.allowed?(state.hash) ->
-        initial? = state.pex_inbound.initial?
-
-        state =
-          case Peer.UtPex.ingest(state.hash, payload,
-                 initial?: initial?,
-                 pex_source: state.id
-               ) do
-            {:ok, added, dropped} -> update_holepunch_pex(state, added, dropped)
-            :error -> state
-          end
-
-        put_in(state.pex_inbound.initial?, false)
+        route_inbound_pex(state, payload)
 
       ut_holepunch?(state, extended_id) ->
         Peer.UtHolepunch.handle_inbound(state, payload)
@@ -329,6 +318,55 @@ defmodule Peer.Controller.State do
   defp ut_metadata?(state, extended_id) do
     Peer.LTEP.Session.local_extension_id(state.ltep, Magnet.UtMetadata.extension_name()) ==
       extended_id
+  end
+
+  @spec route_inbound_pex(t(), binary()) :: t()
+  defp route_inbound_pex(%__MODULE__{} = state, payload) when is_binary(payload) do
+    now_ms = System.monotonic_time(:millisecond)
+    rate = Map.get(state.pex_inbound, :rate, Peer.UtPex.InboundRate.initial())
+
+    case Peer.UtPex.InboundRate.gate(rate, now_ms) do
+      {:reject, rate} ->
+        put_in(state.pex_inbound.rate, rate)
+
+      {:allow, rate, kind} ->
+        initial? = kind == :initial
+
+        state =
+          case Peer.UtPex.ingest(state.hash, payload,
+                 initial?: initial?,
+                 pex_source: state.id
+               ) do
+            {:ok, added, dropped} -> update_holepunch_pex(state, added, dropped)
+            :error -> state
+          end
+
+        %{
+          state
+          | pex_inbound: %{
+              state.pex_inbound
+              | initial?: false,
+                rate: rate
+            }
+        }
+    end
+  end
+
+  @doc false
+  @spec record_pex_recent_disconnect(t(), term()) :: :ok
+  def record_pex_recent_disconnect(%__MODULE__{} = state, reason) do
+    if Peer.UtPex.DisconnectReason.eligible?(reason) and
+         Peer.UtPex.DisconnectReason.handshaken?(state) do
+      with {:ok, entry} <- pex_entry(state) do
+        Peer.UtPex.RecentCache.record(
+          state.hash,
+          entry,
+          System.monotonic_time(:millisecond)
+        )
+      end
+    end
+
+    :ok
   end
 
   @spec ut_pex?(t(), non_neg_integer()) :: boolean()
@@ -369,14 +407,30 @@ defmodule Peer.Controller.State do
 
   @spec deliver_pex_delta(t(), map(), keyword()) :: t()
   defp deliver_pex_delta(state, current, opts) do
-    current = Peer.UtPex.drop_self(current, own_endpoint(state))
+    self_ep = own_endpoint(state)
     initial? = Keyword.get(opts, :initial?, false)
+
+    {current, _drained} =
+      Peer.UtPex.Outbound.prepare_current(state.hash, current,
+        state: state,
+        self_ep: self_ep,
+        now_ms: Keyword.get(opts, :now_ms),
+        supplement_recent?: initial?,
+        drain_recent?: false
+      )
+
+    clients = client_for_order(state)
 
     {added, dropped} =
       if initial? do
-        {Map.values(current), []}
+        {Peer.UtPex.Outbound.order_entries(Map.values(current), clients), []}
       else
-        Peer.UtPex.outbound_delta(state.pex_outbound.sent, current)
+        {added_raw, dropped_raw} = Peer.UtPex.outbound_delta(state.pex_outbound.sent, current)
+
+        {
+          Peer.UtPex.Outbound.order_entries(added_raw, clients),
+          Peer.UtPex.Outbound.order_endpoints(dropped_raw, clients)
+        }
       end
 
     case Peer.UtPex.encode_delta(added, dropped, initial?: initial?) do
@@ -435,6 +489,9 @@ defmodule Peer.Controller.State do
         }
     }
   end
+
+  @spec client_for_order(t()) :: term()
+  defp client_for_order(state), do: Peer.UtPex.Outbound.client_refs(state)
 
   @spec pex_outbound_peer?(t()) :: boolean()
   defp pex_outbound_peer?(%__MODULE__{ltep: nil}), do: false

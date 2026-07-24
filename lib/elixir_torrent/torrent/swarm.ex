@@ -306,7 +306,7 @@ defmodule Torrent.Swarm do
   @doc false
   @spec evict_peers(Torrent.hash(), [pid()]) :: :ok
   def evict_peers(_hash, pids) when is_list(pids) do
-    Enum.each(pids, &Peer.disconnect/1)
+    Enum.each(pids, &Peer.disconnect(&1, {:shutdown, :resource_limit}))
     :ok
   end
 

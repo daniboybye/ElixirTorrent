@@ -134,12 +134,14 @@ defmodule Peer.ConnectionManagerTest do
   describe "source-aware candidate retention (PEX item 5)" do
     alias Peer.ConnectionManager.Queue, as: DialQueue
 
+    defp pub4(n), do: {11, 0, 0, rem(n, 250)}
+
     test "discovery ownership survives a remote PEX drop" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_isolated_manager(hash)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
 
-      ep = %Peer{ip: {10, 0, 0, 1}, port: 9001}
+      ep = %Peer{ip: pub4(1), port: 9001}
       supplier = <<1::160>>
 
       :ok = Peer.ConnectionManager.offer_peers(hash, [ep])
@@ -155,7 +157,7 @@ defmodule Peer.ConnectionManagerTest do
       pid = start_isolated_manager(hash)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
 
-      ep = %Peer{ip: {10, 0, 0, 2}, port: 9002}
+      ep = %Peer{ip: pub4(2), port: 9002}
       a = <<2::160>>
       b = <<3::160>>
 
@@ -170,7 +172,7 @@ defmodule Peer.ConnectionManagerTest do
     end
 
     test "drop from a different PEX supplier cannot revoke the owner" do
-      ep = %Peer{ip: {10, 0, 0, 22}, port: 9022}
+      ep = %Peer{ip: pub4(22), port: 9022}
       owner = <<22::160>>
       stranger = <<23::160>>
 
@@ -188,7 +190,7 @@ defmodule Peer.ConnectionManagerTest do
       pid = start_isolated_manager(hash)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
 
-      ep = %Peer{ip: {10, 0, 0, 3}, port: 9003}
+      ep = %Peer{ip: pub4(3), port: 9003}
       supplier = <<4::160>>
 
       :ok = Peer.ConnectionManager.offer_peers_from_pex(hash, supplier, [ep])
@@ -199,7 +201,7 @@ defmodule Peer.ConnectionManagerTest do
     end
 
     test "pure queue merges seed hints across sources" do
-      ep = {10, 0, 0, 4}
+      ep = pub4(4)
       port = 9004
 
       q =

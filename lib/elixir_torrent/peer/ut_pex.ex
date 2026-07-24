@@ -114,8 +114,11 @@ defmodule Peer.UtPex do
 
     case result do
       {:ok, added, dropped} ->
+        filtered_added = Peer.UtPex.Filter.filter_peers(added, hash)
+        filtered_dropped = Peer.UtPex.Filter.filter_peers(dropped, hash)
+
         peers =
-          added
+          filtered_added
           |> prioritize_seed_peers()
           |> Enum.filter(&Acceptor.Connection.Handshakes.connectable_peer?/1)
           |> Enum.take(@max_inbound_offer)
@@ -131,14 +134,14 @@ defmodule Peer.UtPex do
         end
 
         if is_binary(pex_source) and byte_size(pex_source) == 20 do
-          :ok = Peer.ConnectionManager.apply_pex_delta(hash, pex_source, peers, dropped)
+          :ok = Peer.ConnectionManager.apply_pex_delta(hash, pex_source, peers, filtered_dropped)
         else
           if peers != [] do
             Acceptor.handshakes(peers, hash)
           end
         end
 
-        {:ok, added, dropped}
+        {:ok, filtered_added, filtered_dropped}
 
       :error ->
         :error

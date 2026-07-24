@@ -119,9 +119,9 @@ defmodule Peer.Controller do
 
   Sends cancel / not interested / choke per BEP 3, shuts down the TCP socket, then stops.
   """
-  @spec disconnect(Peer.key()) :: :ok
-  def disconnect(key) do
-    GenServer.call(via(key), :disconnect, 5_000)
+  @spec disconnect(Peer.key(), term()) :: :ok
+  def disconnect(key, reason \\ :normal) do
+    GenServer.call(via(key), {:disconnect, reason}, 5_000)
   catch
     :exit, _ -> :ok
   end
@@ -339,6 +339,7 @@ defmodule Peer.Controller do
   end
 
   def terminate(reason, %State{} = state) do
+    State.record_pex_recent_disconnect(state, reason)
     State.notify_hash_request_disconnect(state, reason)
     # :shutdown / {:shutdown,_} are normal OTP stop paths (app teardown, swarm
     # cap eviction, supervisor restart). Logging them at :info floods mix test
@@ -393,6 +394,24 @@ defmodule Peer.Controller do
   end
 
   defp maybe_mark_productive_endpoint(_), do: :ok
+
+  @spec stop_reason(term()) :: term()
+  defp stop_reason({:shutdown, _} = r), do: r
+  defp stop_reason(:normal), do: :normal
+  defp stop_reason(other), do: other
+
+  @spec maybe_claim_peer_id_for_pex(State.t()) :: {:ok, State.t()} | {:duplicate, State.t()}
+  defp maybe_claim_peer_id_for_pex(%State{} = state) do
+    with {:ok, {ip, port}} <- Peer.Transport.safe_peername(state.socket),
+         :ok <- Peer.Endpoints.claim_peer_id(state.hash, state.id, ip, port, self()) do
+      {:ok, state}
+    else
+      {:duplicate, _} -> {:duplicate, state}
+      _ -> {:ok, state}
+    end
+  catch
+    _, _ -> {:ok, state}
+  end
 
   def handle_info(:pex_initial_snapshot, %State{} = state) do
     if state.pex_outbound.initial_pending? and not state.pex_outbound.initial_sent? do
@@ -465,12 +484,15 @@ defmodule Peer.Controller do
   def handle_call(:eviction_info, _, state),
     do: {:reply, State.eviction_info(state), state}
 
-  def handle_call(:disconnect, _, %State{} = state) do
+  def handle_call({:disconnect, reason}, _, %State{} = state) do
     {operations, state} = State.disconnect_operations(state)
     key = State.key(state)
     :ok = Sender.send_operations(key, operations)
+    # Resource-limit/no-interest exits must capture peername before closing the
+    # socket; terminate/2 runs after close and can no longer recover the endpoint.
+    State.record_pex_recent_disconnect(state, stop_reason(reason))
     close_socket(state.socket)
-    {:stop, :normal, state}
+    {:stop, stop_reason(reason), state}
   end
 
   def handle_call(:start_protocol, _, %State{} = state) do
@@ -481,7 +503,14 @@ defmodule Peer.Controller do
       |> Map.put(:peer_reserved, nil)
       |> maybe_schedule_pex_initial()
 
-    {:reply, :ok, state}
+    case maybe_claim_peer_id_for_pex(state) do
+      {:ok, state} ->
+        {:reply, :ok, state}
+
+      {:duplicate, state} ->
+        State.record_pex_recent_disconnect(state, {:shutdown, :duplicate_peer})
+        {:stop, {:shutdown, :duplicate_peer}, {:error, :duplicate_peer}, state}
+    end
   end
 
   def handle_call(:metadata_session, _, %State{ltep: ltep} = state) when not is_nil(ltep) do

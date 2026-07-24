@@ -1253,7 +1253,15 @@ defmodule PeerDiscovery.Announce do
   defp maybe_broadcast_pex(%__MODULE__{hash: hash} = state) do
     current =
       try do
-        Peer.UtPex.snapshot_map(hash)
+        live = Peer.UtPex.snapshot_map(hash)
+
+        {current, _drained} =
+          Peer.UtPex.Outbound.prepare_current(hash, live,
+            supplement_recent?: true,
+            drain_recent?: true
+          )
+
+        current
       catch
         :exit, _ -> state.pex_snapshot
       end

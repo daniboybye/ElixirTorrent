@@ -8,6 +8,7 @@ defmodule Peer.Endpoints do
   alias Torrent.Swarm
 
   @table :elixir_torrent_peer_endpoints
+  @peer_id_table :elixir_torrent_peer_ids
   # A peer that completes the handshake but drops within this window is churn:
   # it isn't useful right now (often a seeder-to-seeder pair with nothing to
   # trade), so back it off to break the connect→drop→re-dial reconnect loop.
@@ -22,6 +23,15 @@ defmodule Peer.Endpoints do
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @spec claim_peer_id(Torrent.hash(), Peer.id(), :inet.ip_address(), :inet.port_number(), pid()) ::
+          :ok | {:duplicate, {:inet.ip_address(), :inet.port_number()}}
+  def claim_peer_id(hash, peer_id, ip, port, pid)
+      when is_binary(peer_id) and byte_size(peer_id) == 20 and is_pid(pid) do
+    GenServer.call(__MODULE__, {:claim_peer_id, hash, peer_id, ip, port, pid})
+  catch
+    :exit, _ -> :ok
   end
 
   @spec register(Torrent.hash(), :inet.ip_address(), :inet.port_number(), pid()) :: :ok
@@ -62,10 +72,40 @@ defmodule Peer.Endpoints do
   @impl true
   def init(_) do
     table = :ets.new(@table, [:set, :protected, read_concurrency: true])
-    {:ok, %{table: table, monitors: %{}}}
+    peer_ids = :ets.new(@peer_id_table, [:set, :protected, read_concurrency: true])
+    {:ok, %{table: table, peer_ids: peer_ids, monitors: %{}}}
   end
 
   @impl true
+  def handle_call(
+        {:claim_peer_id, hash, peer_id, ip, port, pid},
+        _,
+        %{peer_ids: peer_ids} = state
+      ) do
+    key = {hash, peer_id}
+    endpoint = {ip, port}
+
+    reply =
+      case :ets.lookup(peer_ids, key) do
+        [{^key, existing_ep, existing_pid}] ->
+          cond do
+            existing_ep == endpoint -> :ok
+            existing_pid == pid -> :ok
+            Process.alive?(existing_pid) -> {:duplicate, existing_ep}
+            true -> :ok
+          end
+
+        _ ->
+          :ok
+      end
+
+    if reply == :ok do
+      :ets.insert(peer_ids, {key, endpoint, pid})
+    end
+
+    {:reply, reply, state}
+  end
+
   def handle_call(
         {:register, hash, ip, port, pid},
         _,
@@ -146,6 +186,7 @@ defmodule Peer.Endpoints do
 
       {{key, connected_at}, monitors} ->
         :ets.delete(state.table, key)
+        drop_peer_id(state.peer_ids, key)
         maybe_backoff_churn(key, connected_at)
         log_disconnect(key, reason)
         {:noreply, %{state | monitors: monitors}}
@@ -167,6 +208,13 @@ defmodule Peer.Endpoints do
   @spec endpoint_key(Torrent.hash(), :inet.ip_address(), :inet.port_number()) ::
           {Torrent.hash(), :inet.ip_address(), :inet.port_number()}
   defp endpoint_key(hash, ip, port), do: {hash, ip, port}
+
+  @spec drop_peer_id(:ets.table(), {Torrent.hash(), :inet.ip_address(), :inet.port_number()}) ::
+          :ok
+  defp drop_peer_id(peer_ids, {hash, ip, port}) do
+    :ets.match_delete(peer_ids, {{hash, :_}, {ip, port}, :_})
+    :ok
+  end
 
   @spec drop_monitors_for_key(map(), term()) :: map()
   defp drop_monitors_for_key(monitors, key) do

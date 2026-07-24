@@ -166,9 +166,9 @@ defmodule Peer do
     if key = get_key(pid), do: Controller.peer_v2_support?(key)
   end
 
-  @spec disconnect(pid()) :: :ok
-  def disconnect(pid) when is_pid(pid) do
-    if key = get_key(pid), do: Controller.disconnect(key), else: :ok
+  @spec disconnect(pid(), term()) :: :ok
+  def disconnect(pid, reason \\ :normal) when is_pid(pid) do
+    if key = get_key(pid), do: Controller.disconnect(key, reason), else: :ok
   end
 
   @doc false

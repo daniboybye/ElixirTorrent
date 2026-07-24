@@ -121,12 +121,12 @@ defmodule Peer.ConnectionManager do
 
   @impl true
   def handle_cast({:offer, peers, source}, state) when is_list(peers) do
-    queue = DialQueue.offer(state.queue, peers, source)
+    queue = DialQueue.offer(state.queue, peers, source, offer_opts(state))
     maybe_continue_dial(state, queue, peers != [])
   end
 
   def handle_cast({:offer_pex, pex_source, peers}, state) when is_list(peers) do
-    queue = DialQueue.offer(state.queue, peers, {:pex, pex_source})
+    queue = DialQueue.offer(state.queue, peers, {:pex, pex_source}, offer_opts(state))
     maybe_continue_dial(state, queue, peers != [])
   end
 
@@ -141,7 +141,7 @@ defmodule Peer.ConnectionManager do
     queue =
       state.queue
       |> DialQueue.revoke_pex(pex_source, dropped)
-      |> DialQueue.offer(added, {:pex, pex_source})
+      |> then(fn q -> DialQueue.offer(q, added, {:pex, pex_source}, offer_opts(state)) end)
 
     maybe_continue_dial(state, queue, added != [])
   end
@@ -506,4 +506,20 @@ defmodule Peer.ConnectionManager do
   defp eviction_reason_label(%{downloaded_bytes: 0}), do: "zero_upload"
 
   defp eviction_reason_label(_), do: "useless"
+
+  @spec offer_opts(map()) :: keyword()
+  defp offer_opts(%{hash: hash}) do
+    [hash: hash, clients: dial_client_refs(hash)]
+  end
+
+  @spec dial_client_refs(Torrent.hash()) :: map()
+  defp dial_client_refs(_hash) do
+    ips = Acceptor.primary_ips()
+    port = Application.get_env(:elixir_torrent, :listen_port, 6881)
+
+    %{
+      inet: if(is_tuple(ips.inet), do: {ips.inet, port}),
+      inet6: if(is_tuple(ips.inet6), do: {ips.inet6, port})
+    }
+  end
 end
