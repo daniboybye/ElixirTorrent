@@ -63,6 +63,19 @@ defmodule SuperseedTest do
     end)
   end
 
+  test "release is a no-op after the application Registry has stopped" do
+    hash = :crypto.strong_rand_bytes(20)
+    peer_id = :crypto.strong_rand_bytes(20)
+
+    try do
+      assert :ok = Application.stop(:elixir_torrent)
+      assert Process.whereis(Registry) == nil
+      assert :ok = Superseed.release(hash, peer_id)
+    after
+      {:ok, _} = Application.ensure_all_started(:elixir_torrent)
+    end
+  end
+
   test "new seed connection receives one fabricated have while active" do
     hash = :crypto.strong_rand_bytes(20)
 

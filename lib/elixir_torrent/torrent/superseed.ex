@@ -38,8 +38,14 @@ defmodule Torrent.Superseed do
   def release(hash, peer_id) do
     case GenServer.whereis(via(hash)) do
       nil -> :ok
-      _pid -> GenServer.cast(via(hash), {:release, peer_id})
+      pid -> GenServer.cast(pid, {:release, peer_id})
     end
+  rescue
+    # Peer.Controller.terminate/2 may finish after the application Registry has
+    # stopped. Cleanup is best-effort because the Superseed process is gone too.
+    ArgumentError -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   @doc false
