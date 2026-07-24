@@ -41,6 +41,18 @@ defmodule TrackerHTTPDecodeTest do
       assert Enum.any?(peers, fn %Peer{ip: ip} -> tuple_size(ip) == 8 end)
     end
 
+    test "ignores a malformed non-list, non-binary peers value" do
+      assert %Response{peers: []} =
+               Tracker.decode_http_response_for_test(%{"peers" => %{"ip" => "203.0.113.1"}})
+    end
+
+    test "cleanly skips an unsupported dictionary peer hostname" do
+      assert %Response{peers: []} =
+               Tracker.decode_http_response_for_test(%{
+                 "peers" => [%{"ip" => "tracker-peer.invalid", "port" => 6881}]
+               })
+    end
+
     test "converts BEP 31 retry_in minutes to internal seconds" do
       assert %Error{reason: "unregistered torrent", retry_in: 300} =
                Tracker.decode_http_response_for_test(%{

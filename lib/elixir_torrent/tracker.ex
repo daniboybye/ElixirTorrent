@@ -1101,9 +1101,10 @@ defmodule Tracker do
   # HTTP trackers typically return:
   # - "peers": compact IPv4 peers (6-byte entries) when compact=1 (BEP 23)
   # - "peers6": compact IPv6 peers (18-byte entries) (BEP 7, widely deployed)
-  @spec to_peers_v4(binary() | list()) :: list(Peer.t())
+  @spec to_peers_v4(binary() | list() | any()) :: list(Peer.t())
   defp to_peers_v4(bin) when is_binary(bin), do: UDP.parse_compact_peers(bin, :inet)
   defp to_peers_v4(list) when is_list(list), do: parse_peer_dicts(list)
+  defp to_peers_v4(_), do: []
 
   @spec to_peers_v6(binary() | list() | any()) :: list(Peer.t())
   defp to_peers_v6(bin) when is_binary(bin), do: UDP.parse_compact_peers(bin, :inet6)
@@ -1134,6 +1135,9 @@ defmodule Tracker do
   defp parse_ip(ip) when is_tuple(ip), do: {:ok, ip}
 
   defp parse_ip(ip) when is_binary(ip) do
+    # Dictionary-model hostnames are deliberately not resolved here. Tracker
+    # responses are untrusted and resolving an unbounded list would put
+    # synchronous DNS work on the announce decode path.
     ip
     |> String.to_charlist()
     |> :inet.parse_address()
