@@ -36,14 +36,16 @@ defmodule DHT.KRPC do
           optional(:nodes6) => binary(),
           optional(:values) => [binary()],
           optional(:token) => binary(),
-          optional(:version) => binary()
+          optional(:version) => binary(),
+          optional(:ip) => binary()
         }
 
   @type error_response :: %{
           required(:transaction_id) => transaction_id(),
           required(:code) => 201..204,
           required(:message) => String.t(),
-          optional(:version) => binary()
+          optional(:version) => binary(),
+          optional(:ip) => binary()
         }
 
   @doc "BEP 5 § KRPC — encode a query packet."
@@ -85,6 +87,7 @@ defmodule DHT.KRPC do
 
     envelope
     |> maybe_put_version(response)
+    |> maybe_put_ip(response)
     |> Bento.encode!()
   end
 
@@ -95,6 +98,7 @@ defmodule DHT.KRPC do
 
     envelope
     |> maybe_put_version(error)
+    |> maybe_put_ip(error)
     |> Bento.encode!()
   end
 
@@ -145,7 +149,8 @@ defmodule DHT.KRPC do
         nodes6: body["nodes6"],
         values: body["values"],
         token: body["token"],
-        version: map["v"]
+        version: map["v"],
+        ip: map["ip"]
       }
 
       {:ok, {:response, response}}
@@ -163,7 +168,8 @@ defmodule DHT.KRPC do
           transaction_id: tid,
           code: code,
           message: message,
-          version: map["v"]
+          version: map["v"],
+          ip: map["ip"]
         }}}
     else
       _ -> {:error, :malformed_error}
@@ -239,6 +245,12 @@ defmodule DHT.KRPC do
     do: Map.put(envelope, "v", v)
 
   defp maybe_put_version(envelope, _), do: envelope
+
+  @spec maybe_put_ip(map(), map()) :: map()
+  defp maybe_put_ip(envelope, %{ip: ip}) when is_binary(ip) and byte_size(ip) in [6, 18],
+    do: Map.put(envelope, "ip", ip)
+
+  defp maybe_put_ip(envelope, _), do: envelope
 
   @spec fetch_type(map()) :: {:ok, String.t()} | {:error, :malformed}
   defp fetch_type(%{"y" => <<type::binary-size(1)>>}), do: {:ok, type}

@@ -1,7 +1,7 @@
 defmodule DHTIPv6RoutingTest do
   use ExUnit.Case, async: true
 
-  alias DHT.{KRPC, PeerStore, RoutingTable, RoutingTables, Token}
+  alias DHT.{Compact, KRPC, PeerStore, RoutingTable, RoutingTables, Token}
 
   @local_id <<0::160>>
   @query_id <<1::160>>
@@ -226,6 +226,7 @@ defmodule DHTIPv6RoutingTest do
 
     assert {:ok, {_server_ip, _server_port, packet}} = :gen_udp.recv(client, 0, 1_000)
     assert {:ok, {:response, response}} = KRPC.decode(packet)
+    assert response.ip == compact_endpoint(source_ip, source_port)
     response
   end
 
@@ -234,4 +235,9 @@ defmodule DHTIPv6RoutingTest do
 
   defp maybe_put_want(query, nil), do: query
   defp maybe_put_want(query, want), do: Map.put(query, :want, want)
+
+  defp compact_endpoint({_, _, _, _} = ip, port), do: Compact.encode_peer(ip, port)
+
+  defp compact_endpoint({_, _, _, _, _, _, _, _} = ip, port),
+    do: Compact.encode_ipv6_peer(ip, port)
 end

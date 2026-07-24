@@ -166,6 +166,16 @@ defmodule DHTKRPCTest do
       assert decoded.node_id == @response_id
     end
 
+    test "observed compact endpoint is encoded at the top KRPC level" do
+      observed = Compact.encode_peer({203, 0, 113, 9}, 6_881)
+      response = %{transaction_id: @tid, node_id: @response_id, ip: observed}
+      packet = KRPC.encode_response(response)
+
+      assert {:ok, %{"ip" => ^observed, "r" => body}} = Bento.decode(packet)
+      refute Map.has_key?(body, "ip")
+      assert {:ok, {:response, %{ip: ^observed}}} = KRPC.decode(packet)
+    end
+
     test "get_peers response with values and token" do
       peer_blob = Compact.encode_peer({127, 0, 0, 1}, 6881)
 
@@ -201,10 +211,12 @@ defmodule DHTKRPCTest do
 
   describe "KRPC errors (BEP 5 § Errors)" do
     test "error packet round-trip" do
-      error = %{transaction_id: @tid, code: 203, message: "Protocol Error"}
+      observed = Compact.encode_ipv6_peer({0x2001, 0xDB8, 0, 0, 0, 0, 0, 1}, 6_881)
+      error = %{transaction_id: @tid, code: 203, message: "Protocol Error", ip: observed}
       assert {:ok, {:error, decoded}} = error |> KRPC.encode_error() |> KRPC.decode()
       assert decoded.code == 203
       assert decoded.message == "Protocol Error"
+      assert decoded.ip == observed
     end
 
     test "decode/1 rejects malformed packets" do

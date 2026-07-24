@@ -1,7 +1,7 @@
 defmodule DHTTokenTest do
   use ExUnit.Case, async: true
 
-  alias DHT.Token
+  alias DHT.{BEP42, Token}
 
   @ip {192, 168, 0, 2}
   @now 1_000_000
@@ -41,6 +41,22 @@ defmodule DHTTokenTest do
   test "valid?/3 rejects wrong token" do
     store = Token.new(now_ms: @now)
     refute Token.valid?(store, @ip, <<0::64>>, now_ms: @now)
+  end
+
+  test "issue_for_node/3 refuses an invalid public contact" do
+    ip = {192, 0, 2, 10}
+    <<first, rest::binary>> = BEP42.generate(ip, 42)
+    invalid_id = <<Bitwise.bxor(first, 0xFF), rest::binary>>
+
+    assert Token.issue_for_node(Token.new(now_ms: @now), invalid_id, ip) == nil
+  end
+
+  test "issue_for_node/3 keeps the BEP 42 local-address exemption" do
+    arbitrary_id = :binary.copy(<<0xCC>>, 20)
+    token = Token.issue_for_node(Token.new(now_ms: @now), arbitrary_id, @ip)
+
+    assert is_binary(token)
+    assert byte_size(token) == 8
   end
 end
 

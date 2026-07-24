@@ -33,13 +33,27 @@ defmodule DHT.RoutingTables do
     update_in(tables, [family], &RoutingTable.insert(&1, contact, opts))
   end
 
-  @spec mark_good(t(), RoutingTable.node_id(), keyword()) :: t()
-  def mark_good(tables, id, opts \\ []) do
+  @spec mark_good(t(), RoutingTable.node_id() | Compact.contact(), keyword()) :: t()
+  def mark_good(tables, id_or_contact, opts \\ [])
+
+  def mark_good(tables, %{id: id, ip: ip}, opts) do
+    family = family_for(ip)
+    update_in(tables, [family], &RoutingTable.mark_good(&1, id, opts))
+  end
+
+  def mark_good(tables, id, opts) do
     update_table_with_id(tables, id, &RoutingTable.mark_good(&1, id, opts))
   end
 
-  @spec mark_bad(t(), RoutingTable.node_id(), keyword()) :: t()
-  def mark_bad(tables, id, opts \\ []) do
+  @spec mark_bad(t(), RoutingTable.node_id() | Compact.contact(), keyword()) :: t()
+  def mark_bad(tables, id_or_contact, opts \\ [])
+
+  def mark_bad(tables, %{id: id, ip: ip}, opts) do
+    family = family_for(ip)
+    update_in(tables, [family], &RoutingTable.mark_bad(&1, id, opts))
+  end
+
+  def mark_bad(tables, id, opts) do
     update_table_with_id(tables, id, &RoutingTable.mark_bad(&1, id, opts))
   end
 

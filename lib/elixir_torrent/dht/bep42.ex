@@ -27,16 +27,34 @@ defmodule DHT.BEP42 do
     <<byte0(crc)::8, byte1(crc)::8, b2::8, middle::binary-size(16), rand_byte::8>>
   end
 
-  @doc "True when the first 21 bits + last byte of `node_id` match `ip` per BEP 42."
+  @doc "True when the first 21 bits match `ip` and the id's 3-bit seed per BEP 42."
   @spec valid?(<<_::160>>, ip()) :: boolean()
   def valid?(<<id::binary-size(20)>>, ip) do
     r = Bitwise.band(:binary.at(id, 19), 0x07)
     crc = ip |> mask_ip(r) |> crc32c()
 
     byte0(crc) == :binary.at(id, 0) and byte1(crc) == :binary.at(id, 1) and
-      Bitwise.band(Bitwise.bsr(crc, 8), 0xF8) == Bitwise.band(:binary.at(id, 2), 0xF8) and
-      Bitwise.band(:binary.at(id, 19), 0x07) == r
+      Bitwise.band(Bitwise.bsr(crc, 8), 0xF8) == Bitwise.band(:binary.at(id, 2), 0xF8)
   end
+
+  @doc """
+  True when a remote node id is valid for its source address or the address is
+  exempt from BEP 42 enforcement because it is local/private.
+  """
+  @spec valid_or_exempt?(<<_::160>>, ip()) :: boolean()
+  def valid_or_exempt?(<<id::binary-size(20)>>, ip), do: local_address?(ip) or valid?(id, ip)
+
+  @doc false
+  @spec local_address?(ip()) :: boolean()
+  def local_address?({10, _, _, _}), do: true
+  def local_address?({172, b, _, _}) when b in 16..31, do: true
+  def local_address?({192, 168, _, _}), do: true
+  def local_address?({169, 254, _, _}), do: true
+  def local_address?({127, _, _, _}), do: true
+  def local_address?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  def local_address?({a, _, _, _, _, _, _, _}) when a in 0xFC00..0xFDFF, do: true
+  def local_address?({a, _, _, _, _, _, _, _}) when a in 0xFE80..0xFEBF, do: true
+  def local_address?(_), do: false
 
   defp byte0(crc), do: Bitwise.band(Bitwise.bsr(crc, 24), 0xFF)
   defp byte1(crc), do: Bitwise.band(Bitwise.bsr(crc, 16), 0xFF)
@@ -49,11 +67,14 @@ defmodule DHT.BEP42 do
   end
 
   defp mask_ip({a, b, c, d, e, f, g, h}, r) do
+    <<i0, i1, i2, i3, i4, i5, i6, i7, _::binary>> =
+      <<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>
+
     {m0, m1, m2, m3, m4, m5, m6, m7} = @v6_mask
 
-    <<Bitwise.bor(Bitwise.band(a, m0), Bitwise.bsl(r, 5)), Bitwise.band(b, m1),
-      Bitwise.band(c, m2), Bitwise.band(d, m3), Bitwise.band(e, m4), Bitwise.band(f, m5),
-      Bitwise.band(g, m6), Bitwise.band(h, m7)>>
+    <<Bitwise.bor(Bitwise.band(i0, m0), Bitwise.bsl(r, 5)), Bitwise.band(i1, m1),
+      Bitwise.band(i2, m2), Bitwise.band(i3, m3), Bitwise.band(i4, m4), Bitwise.band(i5, m5),
+      Bitwise.band(i6, m6), Bitwise.band(i7, m7)>>
   end
 
   # CRC32C (Castagnoli) — BEP 42 mandates this polynomial, not IEEE CRC32.

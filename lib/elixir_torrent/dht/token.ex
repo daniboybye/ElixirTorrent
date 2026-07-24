@@ -10,6 +10,8 @@ defmodule DHT.Token do
   @accept_ms 10 * 60 * 1_000
   @token_size 8
 
+  alias DHT.BEP42
+
   @type t :: %__MODULE__{
           current_secret: binary(),
           previous_secret: binary() | nil,
@@ -52,6 +54,12 @@ defmodule DHT.Token do
     store
     |> maybe_rotate()
     |> do_issue(ip, & &1.current_secret)
+  end
+
+  @doc "Issue a token only when `node_id` is BEP-42-valid for `ip` (or locally exempt)."
+  @spec issue_for_node(t(), <<_::160>>, :inet.ip_address()) :: binary() | nil
+  def issue_for_node(%__MODULE__{} = store, <<node_id::binary-size(20)>>, ip) do
+    if BEP42.valid_or_exempt?(node_id, ip), do: issue(store, ip)
   end
 
   @doc "Validate a token for `ip`, accepting current or previous secret."

@@ -15,7 +15,7 @@ defmodule DHT.RoutingStore do
 
   require Logger
 
-  alias DHT.{RoutingTable, RoutingTables}
+  alias DHT.{BEP42, RoutingTable, RoutingTables}
 
   @filename "dht_routing_table.bin"
   @format_version 1
@@ -89,7 +89,7 @@ defmodule DHT.RoutingStore do
   @spec seed(RoutingTables.t(), [map()]) :: RoutingTables.t()
   defp seed(tables, contacts) do
     Enum.reduce(contacts, tables, fn contact, acc ->
-      if valid_contact?(contact) do
+      if valid_contact?(contact) and BEP42.valid_or_exempt?(contact.id, contact.ip) do
         RoutingTables.insert(acc, Map.take(contact, [:id, :ip, :port]), status: :questionable)
       else
         acc

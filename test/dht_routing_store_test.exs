@@ -27,9 +27,9 @@ defmodule DHT.RoutingStoreTest do
   test "save then load round-trips v4 and v6 contacts" do
     tables =
       tables_with([
-        contact(0x01, {1, 2, 3, 4}, 6881),
-        contact(0x02, {5, 6, 7, 8}, 6882),
-        contact(0x03, {0x2001, 0xDB8, 0, 0, 0, 0, 0, 1}, 6883)
+        contact(0x01, {10, 0, 0, 1}, 6881),
+        contact(0x02, {172, 16, 0, 2}, 6882),
+        contact(0x03, {0xFD00, 0, 0, 0, 0, 0, 0, 1}, 6883)
       ])
 
     assert :ok = RoutingStore.save(tables)
@@ -47,7 +47,7 @@ defmodule DHT.RoutingStoreTest do
   end
 
   test "reloaded contacts are marked :questionable for re-verification" do
-    :ok = RoutingStore.save(tables_with([contact(0x09, {9, 9, 9, 9}, 6881)]))
+    :ok = RoutingStore.save(tables_with([contact(0x09, {10, 0, 0, 9}, 6881)]))
 
     loaded = RoutingStore.load(RoutingTables.new(@node_id))
     [entry] = RoutingTable.entries(loaded.v4)
@@ -83,7 +83,7 @@ defmodule DHT.RoutingStoreTest do
     payload = %{
       version: 1,
       v4: [
-        %{id: :binary.copy(<<1>>, 20), ip: {1, 2, 3, 4}, port: 6881},
+        %{id: :binary.copy(<<1>>, 20), ip: {10, 0, 0, 1}, port: 6881},
         %{id: "too-short", ip: {1, 2, 3, 4}, port: 6881},
         %{id: :binary.copy(<<2>>, 20), ip: {1, 2, 3, 4}, port: 0}
       ],
@@ -95,5 +95,19 @@ defmodule DHT.RoutingStoreTest do
 
     loaded = RoutingStore.load(RoutingTables.new(@node_id))
     assert RoutingTable.node_count(loaded.v4) == 1
+  end
+
+  test "persisted public contacts with invalid BEP 42 ids are skipped" do
+    payload = %{
+      version: 1,
+      v4: [%{id: :binary.copy(<<1>>, 20), ip: {192, 0, 2, 1}, port: 6881}],
+      v6: []
+    }
+
+    File.mkdir_p!(Path.dirname(RoutingStore.path()))
+    File.write!(RoutingStore.path(), :erlang.term_to_binary(payload))
+
+    loaded = RoutingStore.load(RoutingTables.new(@node_id))
+    assert RoutingTable.node_count(loaded.v4) == 0
   end
 end
