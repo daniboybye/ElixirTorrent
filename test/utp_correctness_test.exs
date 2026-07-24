@@ -70,6 +70,89 @@ defmodule UTPCorrectnessTest do
   end
 
   # ---------- Connection: selective-ACK + cumulative-ACK interplay ----------
+  test "out-of-order receive emits the BEP 29 selective ACK bitmask" do
+    {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+    ip = {127, 0, 0, 1}
+    recv_id = 31_001
+    peer_seq = 4000
+
+    assert {:ok, {:utp, pid}} =
+             UTP.Connection.start_client(udp, ip, peer_port, conn_id: recv_id)
+
+    assert {:ok, {_ip, _port, syn_wire}} = :gen_udp.recv(peer_udp, 0, 1_000)
+    assert {:ok, %{type: syn_type}, <<>>, []} = Packet.decode(syn_wire)
+    assert syn_type == Packet.st_syn()
+
+    handshake = packet(Packet.st_state(), recv_id, peer_seq, 1)
+    send(pid, {:utp_packet, handshake, <<>>, []})
+    assert :ok = UTP.Connection.await_connected({:utp, pid}, 1_000)
+    assert {:ok, {_ip, _port, _state_ack}} = :gen_udp.recv(peer_udp, 0, 1_000)
+
+    # Receive packets 1, 2, 4 and 5 relative to this stream, leaving packet 3
+    # as the implicit ack_nr + 1 hole. Bits zero and one therefore ACK packets
+    # 4 and 5, yielding <<0b00000011, 0, 0, 0>>.
+    for offset <- [0, 1] do
+      header = packet(Packet.st_data(), recv_id, Packet.seq_add(peer_seq, offset), 1)
+      send(pid, {:utp_packet, header, <<offset>>, []})
+      assert {:ok, {_ip, _port, _ack}} = :gen_udp.recv(peer_udp, 0, 1_000)
+    end
+
+    for offset <- [3, 4] do
+      header = packet(Packet.st_data(), recv_id, Packet.seq_add(peer_seq, offset), 1)
+      send(pid, {:utp_packet, header, <<offset>>, []})
+      assert {:ok, {_ip, _port, ack_wire}} = :gen_udp.recv(peer_udp, 0, 1_000)
+      assert {:ok, decoded, <<>>, extensions} = Packet.decode(ack_wire)
+
+      if offset == 4 do
+        assert decoded.ack_nr == Packet.seq_add(peer_seq, 1)
+        assert extensions == [{:selective_ack, <<0b00000011, 0, 0, 0>>}]
+
+        assert Packet.selective_ack_acks(decoded, extensions) == [
+                 Packet.seq_add(peer_seq, 3),
+                 Packet.seq_add(peer_seq, 4)
+               ]
+      end
+    end
+
+    :ok = UTP.Connection.close({:utp, pid})
+    :gen_udp.close(peer_udp)
+    :gen_udp.close(udp)
+  end
+
+  test "three later selective ACKs fast-retransmit every preceding hole" do
+    initial = %UTP.Connection{
+      udp_socket: :placeholder,
+      peer_ip: {127, 0, 0, 1},
+      peer_port: 0,
+      recv_conn_id: 0,
+      send_conn_id: 0,
+      seq_nr: 15,
+      ack_nr: 0,
+      last_peer_ack: 8,
+      unacked: %{
+        10 => {<<10>>, 0, 1, 1},
+        11 => {<<11>>, 0, 1, 1},
+        12 => {<<12>>, 0, 1, 1},
+        13 => {<<13>>, 0, 1, 1},
+        14 => {<<14>>, 0, 1, 1}
+      },
+      cur_window: 5,
+      led: LEDBAT.new()
+    }
+
+    hdr = packet(Packet.st_state(), 0, 100, 9)
+    bitmask = <<0b00001110, 0, 0, 0>>
+    state = run_packet(initial, hdr, [{:selective_ack, bitmask}])
+
+    assert %{10 => {<<10>>, _sent_10, 2, 1}, 11 => {<<11>>, _sent_11, 2, 1}} =
+             state.unacked
+    refute Map.has_key?(state.unacked, 12)
+    refute Map.has_key?(state.unacked, 13)
+    refute Map.has_key?(state.unacked, 14)
+  end
+
   test "cumulative ack still fires after selective-ack punches holes in unacked" do
     # Drive process_acks directly via the private helper by constructing a
     # state that mirrors "we've sent 8..12, peer selective-acked 10, next
@@ -126,7 +209,9 @@ defmodule UTPCorrectnessTest do
     end
 
     {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
-    state = %{state | udp_socket: udp, phase: :connected}
+    {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+    state = %{state | udp_socket: udp, peer_port: peer_port, phase: :connected}
 
     {:ok, pid} = GenServer.start(UTP.Connection, state)
     :sys.replace_state(pid, fn _ -> state end)
@@ -134,7 +219,22 @@ defmodule UTPCorrectnessTest do
     Process.sleep(20)
     result = :sys.get_state(pid)
     GenServer.stop(pid, :normal)
+    :gen_udp.close(peer_udp)
     :gen_udp.close(udp)
     result
+  end
+
+  defp packet(type, conn_id, seq_nr, ack_nr) do
+    %Packet{
+      type: type,
+      version: 1,
+      extension: 0,
+      conn_id: conn_id,
+      timestamp: 1,
+      timestamp_difference: 0,
+      wnd_size: 65_536,
+      seq_nr: seq_nr,
+      ack_nr: ack_nr
+    }
   end
 end

@@ -421,7 +421,9 @@ defmodule UTP.Connection do
         )
 
         recv_oob = Map.put(state.recv_oob, seq, {payload, type})
+
         %{state | recv_oob: recv_oob}
+        |> send_state_ack()
 
       true ->
         Logger.debug(
@@ -495,16 +497,30 @@ defmodule UTP.Connection do
   end
 
   defp process_acks(state, header, extensions) do
+    selective_acks = Packet.selective_ack_acks(header, extensions)
     state = cumulative_ack(state, header.ack_nr)
 
     state =
-      header
-      |> Packet.selective_ack_acks(extensions)
-      |> Enum.reduce(state, fn seq, acc -> ack_exact_seq(acc, seq) end)
+      Enum.reduce(selective_acks, state, fn seq, acc -> ack_exact_seq(acc, seq) end)
+
+    sack_losses =
+      state.unacked
+      |> Map.keys()
+      |> Enum.filter(fn unacked_seq ->
+        Enum.count(selective_acks, &Packet.seq_after?(&1, unacked_seq)) >= 3
+      end)
+
+    state = Enum.reduce(sack_losses, state, &retransmit_loss(&2, &1))
 
     if map_size(state.unacked) > 0 and header.ack_nr == state.last_peer_ack and
          state.dup_acks >= 3 do
-      retransmit_loss(state, Packet.seq_add(header.ack_nr, 1))
+      missing_seq = Packet.seq_add(header.ack_nr, 1)
+
+      if missing_seq in sack_losses do
+        state
+      else
+        retransmit_loss(state, missing_seq)
+      end
     else
       state
     end
@@ -616,17 +632,19 @@ defmodule UTP.Connection do
 
   defp transmit(state, type, payload, seq, increment?) do
     increment? = increment? and type != @st_state
+    extensions = selective_ack_extensions(state)
 
     header = %Packet{
       type: type,
       version: 1,
-      extension: 0,
+      extension: if(extensions == [], do: 0, else: 1),
       conn_id: packet_conn_id(state, type),
       timestamp: rem(:os.system_time(:microsecond), 0x1_0000_0000),
       timestamp_difference: state.reply_micro,
       wnd_size: max(@recv_buffer_max - recv_bytes_held(state), 0),
       seq_nr: seq,
-      ack_nr: state.ack_nr
+      ack_nr: state.ack_nr,
+      extensions: extensions
     }
 
     wire = Packet.encode(header, payload)
@@ -831,6 +849,49 @@ defmodule UTP.Connection do
 
   defp packet_conn_id(state, @st_syn), do: state.recv_conn_id
   defp packet_conn_id(state, _), do: state.send_conn_id
+
+  # BEP 29 selective ACK: ack_nr + 1 is the implicit hole, so bit zero
+  # represents ack_nr + 2. The mask is little-bit-endian within each byte and
+  # must be at least 32 bits, in multiples of 32 bits.
+  defp selective_ack_extensions(%{recv_oob: recv_oob, ack_nr: ack_nr}) do
+    offsets =
+      recv_oob
+      |> Map.keys()
+      |> Enum.map(&(Packet.seq_diff(&1, ack_nr) - 2))
+      |> Enum.filter(&(&1 >= 0))
+
+    case offsets do
+      [] ->
+        []
+
+      _ ->
+        byte_count =
+          offsets
+          |> Enum.max()
+          |> Kernel.+(1)
+          |> then(&max(div(&1 + 31, 32) * 4, 4))
+
+        offsets = MapSet.new(offsets)
+
+        bitmask =
+          for byte_index <- 0..(byte_count - 1), into: <<>> do
+            byte =
+              Enum.reduce(0..7, 0, fn bit_index, acc ->
+                offset = byte_index * 8 + bit_index
+
+                if MapSet.member?(offsets, offset) do
+                  Bitwise.bor(acc, Bitwise.bsl(1, bit_index))
+                else
+                  acc
+                end
+              end)
+
+            <<byte>>
+          end
+
+        [{:selective_ack, bitmask}]
+    end
+  end
 
   defp put_led(state, led), do: %{state | led: led}
 
