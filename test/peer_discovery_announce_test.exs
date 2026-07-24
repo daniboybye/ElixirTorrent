@@ -312,6 +312,56 @@ defmodule PeerDiscoveryAnnounceTest do
     assert new_state.last_tracker_announce_ms >= before_ms
   end
 
+  test "BEP 12 tracker tiers are shuffled once at load and stay stable across announces" do
+    hash = <<12::160>>
+    tier0 = Enum.map(1..4, &"http://tier0-#{&1}.example/announce")
+    tier1 = Enum.map(1..3, &"http://tier1-#{&1}.example/announce")
+    tiers = [tier0, tier1]
+    seed = {101, 102, 103}
+
+    :rand.seed(:exsss, seed)
+    expected_tiers = Enum.map(tiers, &Enum.shuffle/1)
+    refute expected_tiers == tiers
+
+    torrent = %Torrent{
+      hash: hash,
+      metadata: %{
+        "announce-list" => tiers,
+        "info" => %{"name" => "tier-shuffle", "private" => 1}
+      },
+      left: 1_000,
+      last_index: 0,
+      last_piece_length: 1_000,
+      peer_status: :seed
+    }
+
+    {:ok, model_pid} = Torrent.Model.start_link(torrent)
+
+    on_exit(fn ->
+      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+    end)
+
+    :rand.seed(:exsss, seed)
+    assert {:ok, state} = Announce.init([self(), torrent, []])
+    assert state.tiers == expected_tiers
+
+    working = hd(state.tiers |> hd())
+    peer = %Peer{ip: {198, 51, 100, 12}, port: 6_881}
+    response = %Response{peers: [peer], interval: 1_800, complete: 1, incomplete: 0}
+
+    state =
+      Enum.reduce(1..2, state, fn _, acc ->
+        ref = make_ref()
+
+        acc
+        |> Map.put(:requests, %{ref => {working, 0, 0}})
+        |> Map.put(:tier_batches, %{0 => 1})
+        |> Announce.dispatch_task_message({ref, {Torrent.started(), response}})
+      end)
+
+    assert state.tiers == expected_tiers
+  end
+
   test "a stale periodic tracker response does not consume a newer completed event" do
     ref = make_ref()
     hash = :crypto.strong_rand_bytes(20)
@@ -915,6 +965,91 @@ defmodule PeerDiscoveryAnnounceTest do
       assert map_size(new_state.tier_batches) == 1
       assert Map.has_key?(new_state.tier_batches, 0)
       refute Map.has_key?(new_state.tier_batches, 1)
+    end
+
+    test "at swarm target advances only after the whole tier yields no peers" do
+      hash = <<78::160>>
+      empty = "http://empty.example/announce"
+      failing = "http://failing.example/announce"
+      backup = "http://backup.example/announce"
+      empty_ref = make_ref()
+      failing_ref = make_ref()
+
+      torrent = %Torrent{
+        hash: hash,
+        metadata: %{"info" => %{"name" => "at-target-backup", "private" => 1}},
+        left: 1_000,
+        last_index: 0,
+        last_piece_length: 1_000,
+        peer_status: :seed
+      }
+
+      {:ok, model_pid} = Torrent.Model.start_link(torrent)
+
+      on_exit(fn ->
+        if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+      end)
+
+      start_swarm_with_connected(hash, 80)
+
+      state =
+        base_state(
+          hash: hash,
+          tiers: [[empty, failing], [backup]],
+          requests: %{
+            empty_ref => {empty, 0, 0},
+            failing_ref => {failing, 0, 1}
+          },
+          tier_batches: %{0 => 2},
+          peers: %{},
+          last_tracker_announce_ms: nil
+        )
+
+      empty_response = %Response{
+        peers: [],
+        interval: 1_800,
+        min_interval: 1_800,
+        complete: 0,
+        incomplete: 0
+      }
+
+      one_remaining =
+        Announce.dispatch_task_message(
+          state,
+          {empty_ref, {Torrent.started(), empty_response}}
+        )
+
+      assert one_remaining.tier_batches == %{0 => 1}
+      refute_receive {:parallel_announce, 1}, 20
+
+      failed_tier =
+        Announce.dispatch_task_message(
+          one_remaining,
+          {failing_ref, %Error{reason: :timeout}}
+        )
+
+      refute Announce.tier_batches_active?(failed_tier)
+      assert failed_tier.last_tracker_announce_ms == nil
+      assert_receive {:parallel_announce, 1} = next_announce, 100
+
+      backup_started = Announce.dispatch_task_message(failed_tier, next_announce)
+      assert backup_started.tier_index == 1
+      assert backup_started.tier_batches == %{1 => 1}
+
+      assert [{backup_ref, {^backup, 1, 0}}] = Map.to_list(backup_started.requests)
+
+      peer = %Peer{ip: {203, 0, 113, 78}, port: 6_881}
+      backup_response = %Response{peers: [peer], interval: 1_800, complete: 1, incomplete: 0}
+
+      promoted =
+        Announce.dispatch_task_message(
+          backup_started,
+          {backup_ref, {Torrent.started(), backup_response}}
+        )
+
+      assert promoted.tier_index == 1
+      assert promoted.peers[backup] == [peer]
+      refute Announce.tier_batches_active?(promoted)
     end
   end
 

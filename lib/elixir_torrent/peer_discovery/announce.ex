@@ -20,6 +20,10 @@ defmodule PeerDiscovery.Announce do
             # (tier_index => in-flight tracker Task count). At/over target only one tier key
             # is present — BEP tier preference preserved when the swarm is healthy.
             tier_batches: %{},
+            # Tier indices whose current batch yielded at least one peer. This is
+            # batch-local so stale peers from a previous announce cannot keep an
+            # at-target dead tier ahead of a working backup.
+            tier_batch_successes: MapSet.new(),
             # Highest tier index started in the current under-target fan-out wave; used to
             # pick the next wave start after all batches complete with no peers.
             fanout_high_tier: nil,
@@ -263,7 +267,10 @@ defmodule PeerDiscovery.Announce do
   def init([pid, torrent, opts]) do
     Process.monitor(pid)
 
-    tiers = extract_tiers(torrent.metadata)
+    # BEP 12 chooses the initial tracker order once per torrent session. Keep
+    # that order in state thereafter; successful trackers may still move to
+    # the front, but ordinary re-announces must not reshuffle the tier.
+    tiers = torrent.metadata |> extract_tiers() |> Enum.map(&Enum.shuffle/1)
     bootstrap_torrent_nodes(torrent.metadata)
     seed_peers = PeerDiscovery.SeedPeers.take(torrent.hash)
 
@@ -648,12 +655,14 @@ defmodule PeerDiscovery.Announce do
         end)
 
       tier_batches = Map.put(state.tier_batches, tier_index, length(alive))
+      tier_batch_successes = MapSet.delete(state.tier_batch_successes, tier_index)
 
       %{
         state
         | tier_index: tier_index,
           requests: requests,
-          tier_batches: tier_batches
+          tier_batches: tier_batches,
+          tier_batch_successes: tier_batch_successes
       }
     end
   end
@@ -874,8 +883,9 @@ defmodule PeerDiscovery.Announce do
           Tracker.Response.t()
         ) :: %__MODULE__{}
   defp apply_tracker_response(state, announce, tier_index, tracker_index, event, response) do
-    # BEP min-interval applies only after a tracker answered — not when a batch
-    # was merely dispatched (DNS nxdomain / timeout is not an announce).
+    # The global announce floor starts only after a tracker yielded usable peers.
+    # A zero-peer answer participates in whole-tier failover, and the failed URL
+    # is not revisited until the tier ring wraps and applies its backoff.
     now = System.monotonic_time(:millisecond)
 
     state =
@@ -884,6 +894,7 @@ defmodule PeerDiscovery.Announce do
       |> put_in([Access.key!(:peers), announce], response.peers)
       |> Map.put(:tracker_interval_sec, response.interval)
       |> Map.put(:tracker_min_interval_sec, response.min_interval)
+      |> mark_tier_batch_success(tier_index, response.peers)
       |> maybe_stamp_last_tracker_announce(response, now)
 
     log_tracker_success(state.hash, announce, response)
@@ -908,15 +919,41 @@ defmodule PeerDiscovery.Announce do
 
       1 ->
         batches = Map.delete(batches, tier_index)
-        state = %{state | tier_batches: batches}
+        batch_succeeded? = MapSet.member?(state.tier_batch_successes, tier_index)
+
+        state = %{
+          state
+          | tier_batches: batches,
+            tier_batch_successes: MapSet.delete(state.tier_batch_successes, tier_index)
+        }
 
         state =
-          if reschedule_same_tier_after_batch?(state) do
-            interval = batch_announce_interval(state)
-            schedule_parallel_announce(state, tier_index, interval)
-            state
-          else
-            maybe_continue_fanout_wave(state, tier_index)
+          cond do
+            Swarm.count(state.hash) >= @swarm_target_peers and batch_succeeded? ->
+              interval = batch_announce_interval(state)
+              schedule_parallel_announce(state, tier_index, interval)
+              state
+
+            Swarm.count(state.hash) >= @swarm_target_peers ->
+              next = next_tier_index(state.tiers, tier_index)
+
+              interval =
+                parallel_tier_failure_advance_sec(
+                  state,
+                  tier_index,
+                  Tracker.default_failure_interval()
+                )
+
+              schedule_parallel_announce(state, next, interval)
+              state
+
+            reschedule_same_tier_after_batch?(state) ->
+              interval = batch_announce_interval(state)
+              schedule_parallel_announce(state, tier_index, interval)
+              state
+
+            true ->
+              maybe_continue_fanout_wave(state, tier_index)
           end
 
         state
@@ -956,11 +993,9 @@ defmodule PeerDiscovery.Announce do
   end
 
   # A tier had no live trackers to contact (all disabled or BEP-48 dead scrape).
-  # Under swarm target, hop to the next tier immediately — no announce was sent
-  # so BEP min-interval does not apply. After a full tier ring with nothing to
-  # announce, back off to the under-target cadence (~30 s) instead of
-  # default_interval (30 min), which would park peer discovery for half an hour
-  # behind CGNAT when tier-0 is dead (e.g. defunct rarbg).
+  # Hop to the next tier immediately because no announce was sent. After a full
+  # ring, under-target discovery backs off ~30 s while an at-target swarm uses
+  # its normal tracker interval.
   @spec dead_tier_advance_sec(%__MODULE__{}, non_neg_integer()) :: non_neg_integer()
   defp dead_tier_advance_sec(%__MODULE__{hash: hash} = state, tier_index) do
     next = next_tier_index(state.tiers, tier_index)
@@ -971,6 +1006,9 @@ defmodule PeerDiscovery.Announce do
 
       Swarm.count(hash) < @swarm_target_peers ->
         @under_target_announce_sec
+
+      next != 0 ->
+        0
 
       true ->
         parallel_tier_reschedule_sec(state, Tracker.default_interval())
@@ -997,10 +1035,10 @@ defmodule PeerDiscovery.Announce do
     end
   end
 
-  # After a failed parallel batch with zero peers, hop to the next tier. Under
-  # target, advance immediately (interval 0) so a dead tier-0 rarbg does not
-  # block tier 1+ for 30 s while DHT peers time out on dial. Wrap to tier 0
-  # uses the under-target cadence to avoid hammering the full ring.
+  # After a failed parallel batch with zero peers, hop to the next tier
+  # immediately. Under target this preserves the CGNAT fan-out cadence; at
+  # target it implements BEP-order backup failover. Wrapping to tier 0 backs
+  # off so a completely dead announce-list is not hammered.
   @spec parallel_tier_failure_advance_sec(%__MODULE__{}, non_neg_integer(), non_neg_integer()) ::
           non_neg_integer()
   defp parallel_tier_failure_advance_sec(
@@ -1016,6 +1054,9 @@ defmodule PeerDiscovery.Announce do
 
       Swarm.count(hash) < @swarm_target_peers ->
         @under_target_announce_sec
+
+      next != 0 ->
+        0
 
       true ->
         parallel_tier_reschedule_sec(state, fallback_sec)
@@ -1241,12 +1282,19 @@ defmodule PeerDiscovery.Announce do
 
   @spec maybe_stamp_last_tracker_announce(%__MODULE__{}, Tracker.Response.t(), non_neg_integer()) ::
           %__MODULE__{}
-  defp maybe_stamp_last_tracker_announce(%__MODULE__{hash: hash} = state, response, now_ms) do
-    if response.peers != [] or Swarm.count(hash) >= @swarm_target_peers do
+  defp maybe_stamp_last_tracker_announce(%__MODULE__{} = state, response, now_ms) do
+    if response.peers != [] do
       Map.put(state, :last_tracker_announce_ms, now_ms)
     else
       state
     end
+  end
+
+  @spec mark_tier_batch_success(%__MODULE__{}, non_neg_integer(), [Peer.t()]) :: %__MODULE__{}
+  defp mark_tier_batch_success(state, _tier_index, []), do: state
+
+  defp mark_tier_batch_success(%__MODULE__{} = state, tier_index, [_peer | _rest]) do
+    Map.update!(state, :tier_batch_successes, &MapSet.put(&1, tier_index))
   end
 
   @spec schedule_pex(pid(), pos_integer()) :: reference()
