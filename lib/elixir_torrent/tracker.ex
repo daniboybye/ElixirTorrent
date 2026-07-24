@@ -222,8 +222,16 @@ defmodule Tracker do
 
   @spec do_http_scrape(binary(), Torrent.hash()) :: scrape_result() | Error.t()
   defp do_http_scrape(base_url, hash) do
-    url =
-      base_url <> "?" <> URI.encode_query(%{"info_hash" => hash})
+    uri = URI.parse(base_url)
+    info_hash_query = URI.encode_query(%{"info_hash" => hash})
+
+    query =
+      case uri.query do
+        nil -> info_hash_query
+        existing -> existing <> "&" <> info_hash_query
+      end
+
+    url = URI.to_string(%{uri | query: query})
 
     http_opts = [
       timeout: @scrape_http_timeout_ms,
@@ -284,13 +292,11 @@ defmodule Tracker do
     uri = URI.parse(announce)
     path = uri.path || ""
 
-    case Regex.run(~r|/announce([^/]*)$|, path) do
-      [_full, suffix] ->
-        new_path = String.replace_suffix(path, "/announce" <> suffix, "/scrape" <> suffix)
-        {:ok, URI.to_string(%{uri | path: new_path, query: nil})}
-
-      nil ->
-        :not_scrapeable
+    if Path.basename(path) == "announce" do
+      new_path = String.replace_suffix(path, "announce", "scrape")
+      {:ok, URI.to_string(%{uri | path: new_path})}
+    else
+      :not_scrapeable
     end
   end
 

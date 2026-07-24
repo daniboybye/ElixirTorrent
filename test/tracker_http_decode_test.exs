@@ -269,6 +269,36 @@ defmodule TrackerHTTPDecodeTest do
       assert %{seeders: 2, leechers: 3, completed: 4} =
                Tracker.scrape("http://127.0.0.1:#{port}/announce", hash)
     end
+
+    test "scrape/2 preserves a private passkey and appends info_hash with an ampersand" do
+      hash = :crypto.strong_rand_bytes(20)
+      test_pid = self()
+
+      body =
+        Bento.encode!(%{
+          "files" => %{
+            hash => %{"complete" => 2, "incomplete" => 3, "downloaded" => 4}
+          }
+        })
+
+      {port, _pid} =
+        start_http_tracker(fn request ->
+          send(test_pid, {:scrape_request, request})
+          {200, body}
+        end)
+
+      assert %{seeders: 2, leechers: 3, completed: 4} =
+               Tracker.scrape(
+                 "http://127.0.0.1:#{port}/announce?passkey=private-token",
+                 hash
+               )
+
+      expected_query =
+        "passkey=private-token&" <> URI.encode_query(%{"info_hash" => hash})
+
+      assert_receive {:scrape_request, request}
+      assert request =~ "GET /scrape?#{expected_query} HTTP/1.1"
+    end
   end
 
   describe "resolve_hosts/1 and expected_dns_failure?/1" do

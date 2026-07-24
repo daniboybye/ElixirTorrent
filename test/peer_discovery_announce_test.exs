@@ -829,6 +829,23 @@ defmodule PeerDiscoveryAnnounceTest do
       assert {2, :live} = Announce.resolve_announcable_tier_index(state, 0)
     end
 
+    test "fresh zero-peer scrape marks only that tracker swarm dead and skips its tier" do
+      dead = "https://tracker.example/announce?passkey=dead-swarm"
+      live = "https://backup.example/announce?passkey=live-swarm"
+      now_ms = System.monotonic_time(:millisecond)
+
+      state =
+        base_state(
+          tiers: [[dead], [live]],
+          scrape_stats: %{
+            dead => %{seeders: 0, leechers: 0, completed: 12, ts_ms: now_ms}
+          }
+        )
+
+      assert {1, :live} = Announce.resolve_announcable_tier_index(state, 0)
+      assert {1, :live} = Announce.resolve_announcable_tier_index(state, 1)
+    end
+
     test "parallel_announce from tier 0 reaches first live tier without intermediate hops" do
       dead0 = "udp://dead0.example:6969/announce"
       dead1 = "udp://dead1.example:6969/announce"

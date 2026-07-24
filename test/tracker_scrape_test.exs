@@ -7,14 +7,21 @@ defmodule TrackerScrapeTest do
                Tracker.http_scrape_url("http://tracker.example.com:6969/announce")
     end
 
-    test "preserves suffix after 'announce' (announce.php → scrape.php)" do
-      assert {:ok, "http://tracker.example.com/scrape.php"} =
+    test "preserves a private tracker's query-string passkey" do
+      assert {:ok, "https://user@tracker.example.com/private/scrape?passkey=secret&auth=token"} =
+               Tracker.http_scrape_url(
+                 "https://user@tracker.example.com/private/announce?passkey=secret&auth=token"
+               )
+    end
+
+    test "does not treat announce.php as the exact announce path segment" do
+      assert :not_scrapeable =
                Tracker.http_scrape_url("http://tracker.example.com/announce.php")
     end
 
-    test "drops the query string on the announce URL" do
-      assert {:ok, "http://tracker.example.com/scrape"} =
-               Tracker.http_scrape_url("http://tracker.example.com/announce?foo=bar")
+    test "does not mangle an announcement path segment into scrapement" do
+      assert :not_scrapeable =
+               Tracker.http_scrape_url("http://tracker.example.com/announcement")
     end
 
     test "returns :not_scrapeable when no announce segment is present" do
