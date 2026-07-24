@@ -9,6 +9,7 @@ defmodule Peer.UtPexTest do
   defp start_pex_manager(hash) do
     name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
     {:ok, pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: name)
+    :sys.replace_state(pid, &%{&1 | dialing?: true})
     pid
   end
 
@@ -616,6 +617,7 @@ defmodule Peer.UtPexTest do
     defp start_manager(hash) do
       name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
       {:ok, pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: name)
+      :sys.replace_state(pid, &%{&1 | dialing?: true})
       pid
     end
 

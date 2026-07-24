@@ -9,6 +9,7 @@ defmodule Magnet.PexTest do
 
   defp start_manager(hash) do
     {:ok, pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: manager_via(hash))
+    :sys.replace_state(pid, &%{&1 | dialing?: true})
     pid
   end
 
