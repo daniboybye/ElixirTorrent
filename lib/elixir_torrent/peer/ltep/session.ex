@@ -34,12 +34,13 @@ defmodule Peer.LTEP.Session do
   """
   @spec new([module()]) :: t()
   def new(extensions \\ Peer.LTEP.Extensions.all()) do
-    local_m =
+    registrations =
       extensions
       |> Enum.map(fn mod -> {Extension.name(mod), Extension.local_id(mod)} end)
-      |> Map.new()
 
-    %__MODULE__{local_m: local_m, extensions: extensions}
+    validate_registrations!(registrations)
+
+    %__MODULE__{local_m: Map.new(registrations), extensions: extensions}
   end
 
   @doc """
@@ -131,5 +132,32 @@ defmodule Peer.LTEP.Session do
   @spec default_client_version() :: String.t()
   defp default_client_version do
     "ElixirTorrent #{ElixirTorrent.version()}"
+  end
+
+  @spec validate_registrations!([{term(), term()}]) :: :ok
+  defp validate_registrations!(registrations) do
+    Enum.each(registrations, fn
+      {name, id} when is_binary(name) and name != "" and id in 1..255 ->
+        :ok
+
+      registration ->
+        raise ArgumentError,
+              "invalid LTEP extension registration #{inspect(registration)}; " <>
+                "names must be non-empty binaries and local ids must be in 1..255"
+    end)
+
+    ensure_unique!(registrations, 0, "names")
+    ensure_unique!(registrations, 1, "local ids")
+  end
+
+  @spec ensure_unique!([{term(), term()}], 0 | 1, String.t()) :: :ok
+  defp ensure_unique!(registrations, position, label) do
+    values = Enum.map(registrations, &elem(&1, position))
+
+    if MapSet.size(MapSet.new(values)) != length(values) do
+      raise ArgumentError, "LTEP extension #{label} must be unique: #{inspect(values)}"
+    end
+
+    :ok
   end
 end

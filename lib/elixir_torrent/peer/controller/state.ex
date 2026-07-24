@@ -274,9 +274,11 @@ defmodule Peer.Controller.State do
   end
 
   @doc """
-  Performs BEP 10 extension handshake when the peer advertises LTEP.
+  Starts BEP 10 negotiation when the peer advertises LTEP.
 
-  Completed torrents also advertise BEP 9 `metadata_size` so magnet leechers can fetch metadata.
+  The reply is merged asynchronously so failed negotiation cannot block the base
+  protocol. Completed torrents also advertise BEP 9 `metadata_size` so magnet
+  leechers can fetch metadata.
   """
   @spec start_ltep(t()) :: t()
   def start_ltep(%__MODULE__{} = state) do
@@ -292,13 +294,17 @@ defmodule Peer.Controller.State do
           []
       end
 
-    # BEP 10: advertise listen port and global addresses so peers can dial us (incl. IPv6).
-    case Peer.LTEP.handshake_exchange(key(state), session, opts) do
-      {:ok, ltep} ->
-        Map.put(state, :ltep, ltep)
+    # BEP 10: send immediately, but do not synchronously wait for id 0. A peer
+    # may advertise LTEP in its base handshake and never complete the extension
+    # handshake; base-protocol traffic must still start and stay live. Sender
+    # preserves wire order, so a later valid id-0 message is merged before any
+    # following extension payload from that peer.
+    case Peer.LTEP.send_handshake(key(state), session, opts) do
+      :ok ->
+        Map.put(state, :ltep, session)
 
       {:error, _} ->
-        state
+        Map.put(state, :ltep, nil)
     end
   end
 

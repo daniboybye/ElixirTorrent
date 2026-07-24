@@ -166,6 +166,19 @@ defmodule PeerSenderLoopbackTest do
       assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
     end
 
+    test "oversized unknown LTEP frame is rejected from its prefix without buffering its body" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      oversized = Peer.LTEP.max_message_size() + 1
+      assert :ok = :gen_tcp.send(server, <<oversized::32, 20, 254>>)
+
+      ref = Process.monitor(sender_pid)
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
+      refute_received {:controller, :handle_extended, _}
+    end
+
     test "truncated known message body is a protocol error" do
       {client, server, listen, key, sender_pid} = start_sender_pair()
 

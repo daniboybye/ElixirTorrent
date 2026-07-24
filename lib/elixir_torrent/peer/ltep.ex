@@ -15,6 +15,10 @@ defmodule Peer.LTEP do
   @handshake_id 0
 
   @default_recv_timeout 30_000
+  # BEP 10 leaves extension payload sizes unspecified. Bound the generic
+  # transport frame so an attacker-controlled length prefix cannot make either
+  # the active peer path or a passive handshake reader retain an unbounded body.
+  @max_message_size 1_048_576
 
   @doc """
   Whether the peer set BEP 10 extension-protocol bit 20 in the reserved bytes.
@@ -35,6 +39,10 @@ defmodule Peer.LTEP do
   @spec handshake_id() :: 0
   def handshake_id, do: @handshake_id
 
+  @doc false
+  @spec max_message_size() :: pos_integer()
+  def max_message_size, do: @max_message_size
+
   @doc """
   Sends an LTEP extended message (BEP 10 § extended message layout).
 
@@ -43,7 +51,7 @@ defmodule Peer.LTEP do
   """
   @spec send_extended(:gen_tcp.socket(), non_neg_integer(), iodata()) :: :ok | {:error, term()}
   def send_extended(socket, extended_id, payload)
-      when is_port(socket) and is_integer(extended_id) and extended_id >= 0 do
+      when is_port(socket) and is_integer(extended_id) and extended_id in 0..255 do
     case extended_message_wire(extended_id, payload) do
       wire -> :gen_tcp.send(socket, wire)
     end
@@ -52,7 +60,7 @@ defmodule Peer.LTEP do
   @doc false
   @spec send_extended(Peer.key(), non_neg_integer(), iodata()) :: :ok | {:error, term()}
   def send_extended(key, extended_id, payload)
-      when is_tuple(key) and is_integer(extended_id) and extended_id >= 0 do
+      when is_tuple(key) and is_integer(extended_id) and extended_id in 0..255 do
     Peer.Sender.socket_send_raw(key, extended_message_wire(extended_id, payload))
   end
 
@@ -64,7 +72,7 @@ defmodule Peer.LTEP do
   """
   @spec extended_message_wire(non_neg_integer(), iodata()) :: binary()
   def extended_message_wire(extended_id, payload)
-      when is_integer(extended_id) and extended_id >= 0 do
+      when is_integer(extended_id) and extended_id in 0..255 do
     payload = IO.iodata_to_binary(payload)
     # BEP 3 length prefix covers message id + extended id + payload.
     length = 1 + 1 + byte_size(payload)
@@ -83,6 +91,7 @@ defmodule Peer.LTEP do
   def recv_extended(socket, timeout) when is_port(socket) do
     with {:ok, <<length::32>>} <- :gen_tcp.recv(socket, 4, timeout),
          true <- length >= 2,
+         true <- length <= @max_message_size,
          {:ok, message} <- :gen_tcp.recv(socket, length, timeout),
          <<message_id, extended_id, payload::binary>> <- message do
       {:ok, message_id, extended_id, payload}
@@ -96,6 +105,7 @@ defmodule Peer.LTEP do
   def recv_extended(key, timeout) when is_tuple(key) do
     with {:ok, <<length::32>>} <- Peer.Sender.socket_recv(key, 4, timeout),
          true <- length >= 2,
+         true <- length <= @max_message_size,
          {:ok, message} <- Peer.Sender.socket_recv(key, length, timeout),
          <<message_id, extended_id, payload::binary>> <- message do
       {:ok, message_id, extended_id, payload}
@@ -104,6 +114,19 @@ defmodule Peer.LTEP do
       {:error, _} = error -> error
       _ -> {:error, :invalid_message}
     end
+  end
+
+  @doc """
+  Sends our extension handshake without waiting for the peer's reply.
+
+  Normal peer connections use this form so a missing or malformed LTEP reply
+  cannot block the base BitTorrent protocol. Any valid id-0 reply is merged
+  later by the active peer message path.
+  """
+  @spec send_handshake(:gen_tcp.socket() | Peer.key(), Session.t(), keyword()) ::
+          :ok | {:error, term()}
+  def send_handshake(socket_or_key, %Session{} = session, opts \\ []) do
+    send_extended(socket_or_key, @handshake_id, Session.outbound_handshake(session, opts))
   end
 
   @doc """
@@ -116,11 +139,10 @@ defmodule Peer.LTEP do
   def handshake_exchange(socket_or_key, session, opts \\ [])
 
   def handshake_exchange(socket, %Session{} = session, opts) when is_port(socket) do
-    outbound = Session.outbound_handshake(session, opts)
     timeout = Keyword.get(opts, :timeout, @default_recv_timeout)
     deadline = System.monotonic_time(:millisecond) + timeout
 
-    with :ok <- send_extended(socket, @handshake_id, outbound),
+    with :ok <- send_handshake(socket, session, opts),
          {:ok, reply} <- recv_until_peer_handshake(socket, deadline),
          {:ok, peer_hs} <- Handshake.decode(reply) do
       {:ok, Session.apply_peer_handshake(session, peer_hs)}
@@ -131,11 +153,10 @@ defmodule Peer.LTEP do
   end
 
   def handshake_exchange(key, %Session{} = session, opts) when is_tuple(key) do
-    outbound = Session.outbound_handshake(session, opts)
     timeout = Keyword.get(opts, :timeout, @default_recv_timeout)
     deadline = System.monotonic_time(:millisecond) + timeout
 
-    with :ok <- send_extended(key, @handshake_id, outbound),
+    with :ok <- send_handshake(key, session, opts),
          {:ok, reply} <- recv_until_peer_handshake(key, deadline),
          {:ok, peer_hs} <- Handshake.decode(reply) do
       {:ok, Session.apply_peer_handshake(session, peer_hs)}
@@ -233,6 +254,9 @@ defmodule Peer.LTEP do
   @spec read_framed_body(:gen_tcp.socket() | Peer.key(), non_neg_integer(), non_neg_integer()) ::
           {:ok, framed()} | {:error, term()}
   defp read_framed_body(_socket, 0, _timeout), do: {:ok, :keepalive}
+
+  defp read_framed_body(_socket, length, _timeout) when length > @max_message_size,
+    do: {:error, :message_too_large}
 
   defp read_framed_body(socket, length, timeout) when is_port(socket) and length > 0 do
     body_timeout = max(timeout, min(@default_recv_timeout, max(length, 1_000)))

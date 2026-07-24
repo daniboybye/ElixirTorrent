@@ -60,6 +60,98 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
       end)
     end
 
+    test "a peer that never replies to LTEP still continues on the base protocol" do
+      hash = :crypto.strong_rand_bytes(20)
+      remote_id = <<13::160>>
+      ltep_reserved = <<0, 0, 0, 0, 0, 0x10, 0, 0>>
+
+      with_torrent_stack(hash, fn _hash ->
+        {:ok, listen, port, ip} = listen_on_loopback()
+
+        accept_task =
+          Task.async(fn ->
+            {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
+            assert :ok = Handshakes.recv(accepted)
+          end)
+
+        {:ok, client} = connect_loopback(ip, port)
+        assert :ok = :gen_tcp.send(client, bt_handshake(hash, remote_id, ltep_reserved))
+
+        assert {:ok, <<19, "BitTorrent protocol"::binary, _::binary>>} =
+                 :gen_tcp.recv(client, 68, @timeout)
+
+        assert {:ok, <<len::32>>} = :gen_tcp.recv(client, 4, @timeout)
+        assert {:ok, <<20, 0, local_handshake::binary>>} = :gen_tcp.recv(client, len, @timeout)
+        assert {:ok, %Peer.LTEP.Handshake{}} = Peer.LTEP.Handshake.decode(local_handshake)
+
+        # Deliberately omit the peer's id-0 reply. Base-wire traffic must not
+        # wait for the optional LTEP negotiation or tear the peer down.
+        assert :ok = :gen_tcp.send(client, <<1::32, 1>>)
+        wait_for_peer_protocol(hash, remote_id)
+        state = wait_for_peer_unchoked(hash, remote_id)
+
+        assert %Peer.LTEP.Session{} = state.ltep
+        refute Peer.LTEP.Session.peer_supports?(state.ltep, "ut_metadata")
+        assert Process.alive?(controller_pid(hash, remote_id))
+
+        assert :ok = Task.await(accept_task, @timeout)
+        :gen_tcp.close(client)
+        :gen_tcp.close(listen)
+      end)
+    end
+
+    test "live LTEP re-handshake adds and disables ids while unknown ids are ignored" do
+      hash = :crypto.strong_rand_bytes(20)
+      remote_id = <<14::160>>
+      ltep_reserved = <<0, 0, 0, 0, 0, 0x10, 0, 0>>
+
+      with_torrent_stack(hash, fn _hash ->
+        {:ok, listen, port, ip} = listen_on_loopback()
+
+        accept_task =
+          Task.async(fn ->
+            {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
+            assert :ok = Handshakes.recv(accepted)
+          end)
+
+        {:ok, client} = connect_loopback(ip, port)
+        assert :ok = :gen_tcp.send(client, bt_handshake(hash, remote_id, ltep_reserved))
+        assert {:ok, _base_reply} = :gen_tcp.recv(client, 68, @timeout)
+        assert {:ok, <<len::32>>} = :gen_tcp.recv(client, 4, @timeout)
+        assert {:ok, <<20, 0, _local_handshake::binary>>} = :gen_tcp.recv(client, len, @timeout)
+
+        initial = Bento.encode!(%{"m" => %{"ut_metadata" => 7}})
+        assert :ok = :gen_tcp.send(client, Peer.LTEP.extended_message_wire(0, initial))
+
+        wait_for_peer_state(hash, remote_id, fn state ->
+          Peer.LTEP.Session.peer_extension_id(state.ltep, "ut_metadata") == 7
+        end)
+
+        changed = Bento.encode!(%{"m" => %{"ut_metadata" => 0, "ut_holepunch" => 9}})
+
+        assert :ok =
+                 :gen_tcp.send(client, [
+                   Peer.LTEP.extended_message_wire(0, changed),
+                   Peer.LTEP.extended_message_wire(254, <<1, 2, 3>>),
+                   <<1::32, 1>>
+                 ])
+
+        state =
+          wait_for_peer_state(hash, remote_id, fn state ->
+            not state.choke_me and
+              not Peer.LTEP.Session.peer_supports?(state.ltep, "ut_metadata") and
+              Peer.LTEP.Session.peer_extension_id(state.ltep, "ut_holepunch") == 9
+          end)
+
+        assert %Peer.Controller.State{} = state
+        assert Process.alive?(controller_pid(hash, remote_id))
+
+        assert :ok = Task.await(accept_task, @timeout)
+        :gen_tcp.close(client)
+        :gen_tcp.close(listen)
+      end)
+    end
+
     test "rejects handshake with unknown info-hash" do
       hash = :crypto.strong_rand_bytes(20)
       wrong = :crypto.strong_rand_bytes(20)
@@ -1167,12 +1259,10 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
     :gen_tcp.connect(ip, port, [:binary, active: false], @timeout)
   end
 
-  defp bt_handshake(hash, peer_id \\ Peer.id()) do
-    # This synthetic peer implements only the base handshake. Advertising our
-    # LTEP bit would promise an extension handshake that the test peer never
-    # sends, leaving Controller.start_protocol/1 waiting while teardown removes
-    # Torrent.Model.
-    IO.iodata_to_binary([<<19>>, "BitTorrent protocol", <<0::64>>, hash, peer_id])
+  defp bt_handshake(hash, peer_id \\ Peer.id(), reserved \\ <<0::64>>) do
+    # Most synthetic peers in this file exercise only the base protocol. Tests
+    # that need LTEP pass their reserved bytes explicitly.
+    IO.iodata_to_binary([<<19>>, "BitTorrent protocol", reserved, hash, peer_id])
   end
 
   defp await_loopback_accept(%Task{pid: pid}) do
@@ -1455,6 +1545,44 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
   defp wait_for_peer_protocol(hash, peer_id, 0) do
     flunk("peer protocol did not start hash=#{inspect(hash)} peer_id=#{inspect(peer_id)}")
+  end
+
+  defp wait_for_peer_unchoked(hash, peer_id, attempts \\ 100)
+
+  defp wait_for_peer_unchoked(hash, peer_id, attempts) when attempts > 0 do
+    wait_for_peer_state(hash, peer_id, &(&1.choke_me == false), attempts)
+  end
+
+  defp wait_for_peer_unchoked(hash, peer_id, 0) do
+    flunk(
+      "peer did not process base-protocol unchoke hash=#{inspect(hash)} peer=#{inspect(peer_id)}"
+    )
+  end
+
+  defp wait_for_peer_state(hash, peer_id, predicate, attempts \\ 100)
+
+  defp wait_for_peer_state(hash, peer_id, predicate, attempts) when attempts > 0 do
+    state = :sys.get_state(controller_pid(hash, peer_id), 500)
+
+    if predicate.(state) do
+      state
+    else
+      Process.sleep(50)
+      wait_for_peer_state(hash, peer_id, predicate, attempts - 1)
+    end
+  catch
+    :exit, _ ->
+      Process.sleep(50)
+      wait_for_peer_state(hash, peer_id, predicate, attempts - 1)
+  end
+
+  defp wait_for_peer_state(hash, peer_id, _predicate, 0) do
+    flunk("peer state did not converge hash=#{inspect(hash)} peer=#{inspect(peer_id)}")
+  end
+
+  defp controller_pid(hash, peer_id) do
+    key = Peer.make_key(hash, peer_id)
+    GenServer.whereis({:via, Registry, {Registry, {key, Peer.Controller}}})
   end
 
   defp safe_stop(pid) when is_pid(pid) do

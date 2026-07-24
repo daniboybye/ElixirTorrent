@@ -140,7 +140,7 @@ defmodule Peer.LTEP.Handshake do
         # BEP 10: 0 disables an extension at runtime.
         acc
 
-      {name, id}, acc when is_binary(name) and is_integer(id) and id > 0 ->
+      {name, id}, acc when is_binary(name) and is_integer(id) and id in 1..255 ->
         Map.put(acc, name, id)
 
       _, acc ->
@@ -163,7 +163,7 @@ defmodule Peer.LTEP.Handshake do
   defp parse_m(m) when is_map(m) do
     m
     |> Enum.reduce(%{}, fn
-      {name, id}, acc when is_binary(name) and is_integer(id) and id >= 0 ->
+      {name, id}, acc when is_binary(name) and is_integer(id) and id in 0..255 ->
         Map.put(acc, name, id)
 
       _, acc ->

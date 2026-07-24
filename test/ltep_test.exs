@@ -1,9 +1,22 @@
 defmodule Peer.LTEPTest do
   use ExUnit.Case, async: true
 
+  alias Peer.Controller.State
   alias Peer.LTEP.{Handshake, Session}
 
   @ut_metadata Magnet.UtMetadata.Extension
+
+  defmodule DuplicateIdA do
+    @behaviour Peer.LTEP.Extension
+    def name, do: "test_a"
+    def local_id, do: 42
+  end
+
+  defmodule DuplicateIdB do
+    @behaviour Peer.LTEP.Extension
+    def name, do: "test_b"
+    def local_id, do: 42
+  end
 
   describe "extension_protocol?/1 (BEP 10 reserved bit 20)" do
     test "true when byte index 5 has 0x10 (libtorrent layout)" do
@@ -68,7 +81,7 @@ defmodule Peer.LTEPTest do
       assert {:ok, hs} =
                Handshake.decode(
                  Bento.encode!(%{
-                   "m" => %{"ut_metadata" => 1, "bad" => "x"},
+                   "m" => %{"ut_metadata" => 1, "bad" => "x", "too_large" => 256},
                    "p" => -1,
                    "reqq" => 0,
                    "yourip" => <<1, 2>>
@@ -172,6 +185,12 @@ defmodule Peer.LTEPTest do
       refute Session.peer_supports?(session, "ut_metadata")
       assert Session.peer_extension_id(session, "ut_metadata") == nil
     end
+
+    test "duplicate local extension ids fail before building a handshake" do
+      assert_raise ArgumentError, ~r/LTEP extension local ids must be unique/, fn ->
+        Session.new([DuplicateIdA, DuplicateIdB])
+      end
+    end
   end
 
   describe "Peer.LTEP.merge_handshake/2" do
@@ -179,6 +198,38 @@ defmodule Peer.LTEPTest do
       session = Session.new([@ut_metadata])
 
       assert ^session = Peer.LTEP.merge_handshake(session, "not bencode")
+    end
+  end
+
+  describe "live peer-path re-handshake and unknown ids" do
+    test "a second id-0 message adds and disables extensions mid-session" do
+      session =
+        Session.new([@ut_metadata, Peer.UtHolepunch.Extension])
+        |> Session.apply_peer_handshake(%Handshake{m: %{"ut_metadata" => 7}})
+
+      state = peer_state(session)
+
+      rehandshake =
+        Bento.encode!(%{
+          "m" => %{
+            "ut_metadata" => 0,
+            "ut_holepunch" => 9
+          }
+        })
+
+      updated = State.handle_extended(state, 0, rehandshake)
+
+      refute Session.peer_supports?(updated.ltep, "ut_metadata")
+      assert Session.peer_extension_id(updated.ltep, "ut_holepunch") == 9
+    end
+
+    test "an unrecognized extension id is ignored without changing peer state" do
+      state =
+        Session.new([@ut_metadata])
+        |> Session.apply_peer_handshake(%Handshake{m: %{"ut_metadata" => 7}})
+        |> peer_state()
+
+      assert ^state = State.handle_extended(state, 254, <<0, 1, 2, 3>>)
     end
   end
 
@@ -254,6 +305,18 @@ defmodule Peer.LTEPTest do
         Peer.id()
       ]
     )
+  end
+
+  defp peer_state(ltep) do
+    %State{
+      hash: :crypto.strong_rand_bytes(20),
+      id: :crypto.strong_rand_bytes(20),
+      fast_extension: nil,
+      status: nil,
+      pieces_count: 1,
+      socket: nil,
+      ltep: ltep
+    }
   end
 
   describe "extended_message_wire/2 (BEP 10 outbound framing)" do
