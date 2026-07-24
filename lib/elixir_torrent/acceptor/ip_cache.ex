@@ -7,7 +7,8 @@ defmodule Acceptor.IpCache do
   `getifaddrs` ~81×/sec on a busy node. The underlying interface list
   changes on DHCP/interface-flap timescales (minutes at fastest), so a coarse
   periodic refresh is orders of magnitude cheaper without any behavioural
-  change.
+  change. LSD also reuses this snapshot's multicast-capable interface
+  addresses and indexes instead of making a second OS interface query.
 
   Cache miss (e.g. this GenServer not yet started in tests) falls back to a
   direct compute inside `Acceptor.all_global_ips/0`, so callers always get a

@@ -96,6 +96,16 @@ defmodule Acceptor do
   end
 
   @type ip_family :: :inet | :inet6
+  @type multicast_interfaces :: %{
+          inet: [:inet.ip4_address()],
+          inet6: [non_neg_integer()]
+        }
+  @type ip_snapshot :: %{
+          inet: :inet.ip4_address() | nil,
+          inet6: :inet.ip6_address() | nil,
+          inet6_all: [:inet.ip6_address()],
+          multicast_interfaces: multicast_interfaces()
+        }
 
   # Cached snapshot of getifaddrs-derived addresses. Written by IpCache every
   # 30s; readers hit :persistent_term (~constant time), with a direct compute
@@ -113,11 +123,7 @@ defmodule Acceptor do
   end
 
   @doc false
-  @spec all_global_ips() :: %{
-          inet: :inet.ip4_address() | nil,
-          inet6: :inet.ip6_address() | nil,
-          inet6_all: [:inet.ip6_address()]
-        }
+  @spec all_global_ips() :: ip_snapshot()
   def all_global_ips() do
     case :persistent_term.get(@ip_cache_key, nil) do
       nil -> compute_all_global_ips()
@@ -126,11 +132,7 @@ defmodule Acceptor do
   end
 
   @doc false
-  @spec compute_all_global_ips() :: %{
-          inet: :inet.ip4_address() | nil,
-          inet6: :inet.ip6_address() | nil,
-          inet6_all: [:inet.ip6_address()]
-        }
+  @spec compute_all_global_ips() :: ip_snapshot()
   def compute_all_global_ips() do
     case :inet.getifaddrs() do
       {:ok, ifs} ->
@@ -147,14 +149,68 @@ defmodule Acceptor do
         %{
           inet: Enum.find(ips, &global_ipv4?/1),
           inet6: List.first(v6_all),
-          inet6_all: v6_all
+          inet6_all: v6_all,
+          multicast_interfaces: multicast_interfaces_from(ifs)
         }
 
       {:error, reason} ->
         Logger.warning("getifaddrs failed: #{inspect(reason)}")
-        %{inet: nil, inet6: nil, inet6_all: []}
+        %{inet: nil, inet6: nil, inet6_all: [], multicast_interfaces: %{inet: [], inet6: []}}
     end
   end
+
+  @doc false
+  @spec multicast_interfaces() :: multicast_interfaces()
+  def multicast_interfaces(), do: all_global_ips().multicast_interfaces
+
+  @doc false
+  @spec multicast_interfaces_from(
+          [{charlist(), keyword()}],
+          (charlist() -> {:ok, non_neg_integer()} | {:error, term()})
+        ) :: multicast_interfaces()
+  def multicast_interfaces_from(ifs, index_fun \\ &:net.if_name2index/1) do
+    {v4, v6} =
+      Enum.reduce(ifs, {[], []}, fn {ifname, props}, {v4_acc, v6_acc} ->
+        flags = Keyword.get(props, :flags, [])
+        addresses = Keyword.get_values(props, :addr)
+
+        if :up in flags and :running in flags and :multicast in flags and
+             :loopback not in flags and :pointtopoint not in flags do
+          interface_v4 = Enum.filter(addresses, &multicast_ipv4?/1)
+
+          interface_v6 =
+            if Enum.any?(addresses, &multicast_ipv6?/1) do
+              case index_fun.(ifname) do
+                {:ok, index} -> [index]
+                {:error, _reason} -> []
+              end
+            else
+              []
+            end
+
+          {interface_v4 ++ v4_acc, interface_v6 ++ v6_acc}
+        else
+          {v4_acc, v6_acc}
+        end
+      end)
+
+    %{inet: Enum.uniq(v4), inet6: Enum.uniq(v6)}
+  end
+
+  @spec multicast_ipv4?(term()) :: boolean()
+  defp multicast_ipv4?({a, _b, _c, _d}) when a in 1..126, do: true
+  defp multicast_ipv4?({a, _b, _c, _d}) when a in 128..223, do: true
+  defp multicast_ipv4?(_), do: false
+
+  @spec multicast_ipv6?(term()) :: boolean()
+  defp multicast_ipv6?({0, 0, 0, 0, 0, 0, 0, 0}), do: false
+  defp multicast_ipv6?({0, 0, 0, 0, 0, 0, 0, 1}), do: false
+
+  defp multicast_ipv6?({s1, _s2, _s3, _s4, _s5, _s6, _s7, _s8})
+       when is_integer(s1) and s1 not in 0xFF00..0xFFFF,
+       do: true
+
+  defp multicast_ipv6?(_), do: false
 
   @doc false
   @spec ipv6_binary(:inet.ip6_address()) :: <<_::128>>

@@ -21,6 +21,36 @@ defmodule PeerDiscoveryLSDTest do
     assert packet =~ "cookie: abc123\r\n"
   end
 
+  test "IPv6 announce is built for every interface with the BEP 14 group" do
+    interfaces = %{inet: [{192, 168, 1, 10}, {10, 0, 0, 8}], inet6: [4, 9]}
+
+    datagrams = LSD.announce_datagrams([@hash1], 6881, "v6-cookie", interfaces)
+
+    assert [
+             {:inet6, 4, {0xFF15, 0, 0, 0, 0, 0, 0xEFC0, 0x988F}, first},
+             {:inet6, 9, {0xFF15, 0, 0, 0, 0, 0, 0xEFC0, 0x988F}, second}
+           ] = Enum.filter(datagrams, &(elem(&1, 0) == :inet6))
+
+    for payload <- [first, second] do
+      packet = IO.iodata_to_binary(payload)
+      assert packet =~ "Host: [ff15::efc0:988f]:6771\r\n"
+
+      assert {:ok, %{hashes: [@hash1], port: 6881, cookie: "v6-cookie"}} =
+               LSD.parse_message(packet)
+    end
+
+    assert LSD.membership_option(:inet6, 4) ==
+             {:add_membership, {{0xFF15, 0, 0, 0, 0, 0, 0xEFC0, 0x988F}, 4}}
+
+    assert LSD.membership_option(:inet6, 9) ==
+             {:add_membership, {{0xFF15, 0, 0, 0, 0, 0, 0xEFC0, 0x988F}, 9}}
+
+    assert [
+             {:inet, {192, 168, 1, 10}, {239, 192, 152, 143}, _first_payload},
+             {:inet, {10, 0, 0, 8}, {239, 192, 152, 143}, _second_payload}
+           ] = Enum.filter(datagrams, &(elem(&1, 0) == :inet))
+  end
+
   test "parse_message decodes port + infohashes + cookie back out" do
     packet = IO.iodata_to_binary(LSD.build_message([@hash1, @hash2], 6881, "abc123"))
 
@@ -28,6 +58,33 @@ defmodule PeerDiscoveryLSDTest do
     assert decoded.port == 6881
     assert decoded.cookie == "abc123"
     assert decoded.hashes == [@hash1, @hash2]
+  end
+
+  test "received IPv6 BT-SEARCH is parsed and our own cookie is deduped" do
+    source = {0x2001, 0xDB8, 0, 1, 0, 0, 0, 7}
+    packet = IO.iodata_to_binary(LSD.build_message([@hash1], 51413, "remote", :inet6))
+
+    assert LSD.decode_packet(packet, source, "ours") == [{@hash1, source, 51413}]
+    assert LSD.decode_packet(packet, source, "remote") == []
+  end
+
+  test "25 active hashes are spread into at most one announce per minute" do
+    hashes = for value <- 1..25, do: :crypto.hash(:sha, <<value>>)
+
+    schedule = LSD.announce_schedule(hashes)
+
+    assert [{0, first}, {60_000, second}] = schedule
+    assert length(first) == 20
+    assert length(second) == 5
+    assert Enum.flat_map(schedule, &elem(&1, 1)) == hashes
+
+    offsets = Enum.map(schedule, &elem(&1, 0))
+
+    assert Enum.chunk_every(offsets, 2, 1, :discard)
+           |> Enum.all?(fn [a, b] -> b - a >= 60_000 end)
+
+    assert LSD.next_cycle_delay(List.last(offsets)) == 240_000
+    assert List.last(offsets) + LSD.next_cycle_delay(List.last(offsets)) == 300_000
   end
 
   test "parse_message rejects non-BT-SEARCH payloads" do

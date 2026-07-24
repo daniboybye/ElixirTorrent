@@ -133,7 +133,7 @@ defmodule HTTPTrackerIPv6Test do
   defp with_primary_ipv6(ip, fun) do
     key = Acceptor.ip_cache_key()
     previous = :persistent_term.get(key, :missing)
-    cache = %{inet: nil, inet6: ip, inet6_all: [ip]}
+    cache = %{inet: nil, inet6: ip, inet6_all: [ip], multicast_interfaces: %{inet: [], inet6: []}}
     cache_pid = Process.whereis(Acceptor.IpCache)
 
     if cache_pid, do: :sys.suspend(cache_pid)
