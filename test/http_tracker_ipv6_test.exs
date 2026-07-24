@@ -1,34 +1,56 @@
 defmodule HTTPTrackerIPv6Test do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Tracker.UDP
 
   @hash :crypto.strong_rand_bytes(20)
+  @loopback_v6 {0, 0, 0, 0, 0, 0, 0, 1}
+
+  setup do
+    {:ok, _} = Application.ensure_all_started(:elixir_torrent)
+    :ok
+  end
 
   describe "BEP 7 HTTP announce query" do
-    test "build_http_announce_query includes ip and ipv6 when global addresses exist" do
+    test "uses the connection source instead of discouraged ip parameters" do
       query =
         Tracker.build_http_announce_query(@hash, 0, 0, 16_384, Torrent.started())
 
       assert Map.has_key?(query, "info_hash")
       assert Map.has_key?(query, "port")
+      refute Map.has_key?(query, "ip")
+      refute Map.has_key?(query, "ipv6")
+    end
 
-      case Acceptor.primary_ips() do
-        %{inet: {a, b, c, d}} ->
-          assert query["ip"] == <<a, b, c, d>>
+    test "binds Hackney's IPv6 socket to the selected announce address" do
+      source_ip = {0x2001, 0xDB8, 0, 0, 0, 0, 0, 7}
+      opts = Tracker.http_hackney_opts_for_test(:inet6, source_ip)
 
-        %{inet: nil} ->
-          refute Map.has_key?(query, "ip")
-      end
+      assert opts[:connect_options] == [:inet6, {:ip, source_ip}]
+    end
 
-      case Acceptor.primary_ips() do
-        %{inet6: {s1, s2, s3, s4, s5, s6, s7, s8}} ->
-          assert query["ipv6"] ==
-                   <<s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16>>
+    test "IPv6 announce reaches the tracker from the selected source" do
+      parent = self()
+      {port, server_pid} = start_ipv6_http_tracker(parent)
 
-        %{inet6: nil} ->
-          refute Map.has_key?(query, "ipv6")
-      end
+      result =
+        with_primary_ipv6(@loopback_v6, fn ->
+          Tracker.request!(
+            "http://[::1]:#{port}/announce",
+            @hash,
+            [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()],
+            http_timeout_ms: 5_000
+          )
+        end)
+
+      assert %Tracker.Response{} = result
+      assert_receive {:http_announce_source, @loopback_v6, target}, 5_000
+
+      query = target |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      refute Map.has_key?(query, "ip")
+      refute Map.has_key?(query, "ipv6")
+
+      refute Process.alive?(server_pid)
     end
   end
 
@@ -52,6 +74,80 @@ defmodule HTTPTrackerIPv6Test do
       peers = DHT.Compact.decode_ipv6_peers(bin)
       assert length(peers) == 1
       assert hd(peers).port == 6881
+    end
+  end
+
+  defp start_ipv6_http_tracker(parent) do
+    pid =
+      spawn_link(fn ->
+        {:ok, listen} =
+          :gen_tcp.listen(0, [
+            :binary,
+            :inet6,
+            active: false,
+            reuseaddr: true,
+            ipv6_v6only: true,
+            ip: @loopback_v6
+          ])
+
+        {:ok, port} = :inet.port(listen)
+        send(parent, {:http_tracker_ready, port, self()})
+
+        {:ok, socket} = :gen_tcp.accept(listen, 5_000)
+        {:ok, {source_ip, _source_port}} = :inet.peername(socket)
+        {:ok, request} = recv_http_headers(socket, "")
+        [request_line | _] = String.split(request, "\r\n")
+        ["GET", target, _version] = String.split(request_line, " ")
+        send(parent, {:http_announce_source, source_ip, target})
+
+        body = Bento.encode!(%{"interval" => 1_200, "peers" => <<>>})
+
+        :ok =
+          :gen_tcp.send(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-length: #{byte_size(body)}\r\nconnection: close\r\n\r\n#{body}"
+          )
+
+        :gen_tcp.close(socket)
+        :gen_tcp.close(listen)
+      end)
+
+    receive do
+      {:http_tracker_ready, port, ^pid} -> {port, pid}
+    after
+      5_000 -> flunk("IPv6 HTTP tracker failed to start")
+    end
+  end
+
+  defp recv_http_headers(socket, acc) do
+    if String.contains?(acc, "\r\n\r\n") do
+      {:ok, acc}
+    else
+      case :gen_tcp.recv(socket, 0, 5_000) do
+        {:ok, chunk} -> recv_http_headers(socket, acc <> chunk)
+        error -> error
+      end
+    end
+  end
+
+  defp with_primary_ipv6(ip, fun) do
+    key = Acceptor.ip_cache_key()
+    previous = :persistent_term.get(key, :missing)
+    cache = %{inet: nil, inet6: ip, inet6_all: [ip]}
+    cache_pid = Process.whereis(Acceptor.IpCache)
+
+    if cache_pid, do: :sys.suspend(cache_pid)
+    :persistent_term.put(key, cache)
+
+    try do
+      fun.()
+    after
+      case previous do
+        :missing -> :persistent_term.erase(key)
+        value -> :persistent_term.put(key, value)
+      end
+
+      if cache_pid && Process.alive?(cache_pid), do: :sys.resume(cache_pid)
     end
   end
 end

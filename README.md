@@ -173,7 +173,7 @@ Status meanings:
 | [BEP 4](https://www.bittorrent.org/beps/bep_0004.html) | Known number allocations | **Full** | Message IDs and reserved bits as used |
 | [BEP 5](https://www.bittorrent.org/beps/bep_0005.html) | DHT | **Substantially Full** | KRPC over UDP with error 204 for unknown methods; k-buckets with two-strike health and ping-before-evict; iterative peer lookup and iterative-to-self bootstrap; token validation; NAT-friendly `implied_port`; BT PORT; persisted BEP 32 dual-stack routing. Remaining strict gap: a first-seen inbound-only query source is still promoted before response reachability is proven |
 | [BEP 6](https://www.bittorrent.org/beps/bep_0006.html) | Fast extension | **Full** | Fast-negotiated handshake availability, `allowed_fast`, verified-piece suggestions, and exactly-one `piece`/`reject` handling; choke rejects queued non-allowed requests after the choke |
-| [BEP 7](https://www.bittorrent.org/beps/bep_0007.html) | IPv6 tracker extension | **Partial** | Parses `peers6`; HTTP/UDP announce over one IPv4 and one IPv6 source address each — not full multi-homed announce per listen address |
+| [BEP 7](https://www.bittorrent.org/beps/bep_0007.html) | IPv6 tracker extension | **Partial** | Parses `peers6`; source-bound HTTP/UDP announce from one primary IPv4 and one primary global IPv6 address — full per-listen-address multi-homing remains |
 | [BEP 9](https://www.bittorrent.org/beps/bep_0009.html) | Extension for Peers to Send Metadata Files | **Full** | Bencoded `ut_metadata` request/data/reject, 16 KiB pieces, multi-peer fetch, SHA-1 verification (magnet bootstrap); completed torrents serve metadata to magnet leechers |
 | [BEP 10](https://www.bittorrent.org/beps/bep_0010.html) | Extension Protocol | **Full** | Reusable LTEP layer (`Peer.LTEP`): reserved bit, extended message 20, handshake encode/decode/merge, per-peer `m` id mapping, extension registry; `ut_metadata` wired for magnet bootstrap and seed serving |
 | [BEP 11](https://www.bittorrent.org/beps/bep_0011.html) | Peer exchange (ut_pex) | **Partial** | Private-torrent isolation; IPv4/IPv6 flags and bounded codec; per-connection initial snapshots + 60 s deltas; source-owned drops; recent-peer supplement; rate/filter/retention bounds; BEP 40 ordering; magnet-fetch ingest. Live libtorrent/qBittorrent v4+v6 and private-traffic interop remains unverified |
@@ -221,7 +221,7 @@ Work tracked for future releases:
 
 | Priority | Item | Why it matters |
 | --- | --- | --- |
-| Medium | **BEP 7 — full multi-homed announce** | Announce per local listen address (v4/v6), filter link-local/loopback, correct source-IP bind for HTTP and UDP |
+| Medium | **BEP 7 — full multi-homed announce** | Announce separately from every eligible local listen address, beyond the current one primary address per family |
 | Medium | **BEP 52 phase 6 — pure-v2 interop** | Verify the Phase 5 `.torrent` path against live libtorrent/qBittorrent peers, then add pure-v2 magnet and webseed support |
 
 Full internal backlog and design rationale live in [`.claude/PLAN.md`](.claude/PLAN.md) and [`.claude/ARCHITECTURE.md`](.claude/ARCHITECTURE.md) (kept in sync with this table).

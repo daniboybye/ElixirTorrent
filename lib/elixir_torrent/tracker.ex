@@ -75,13 +75,15 @@ defmodule Tracker do
 
     case resolve_hosts(host) do
       {:ok, hosts} ->
-        v6_announcable? = Acceptor.announcable_ipv6() != []
+        source_ips = Acceptor.primary_ips()
 
         responses =
           hosts
-          |> Enum.filter(fn {_ip, family} -> family != :inet6 or v6_announcable? end)
+          |> Enum.filter(fn {_ip, family} -> Map.get(source_ips, family) != nil end)
           |> Enum.map(fn {ip, family} ->
-            case Acceptor.open_udp(family) do
+            source_ip = Map.fetch!(source_ips, family)
+
+            case Acceptor.open_udp(family, source_ip) do
               {:ok, socket} ->
                 try do
                   with_connection_id(
@@ -300,7 +302,11 @@ defmodule Tracker do
     url = announce <> "?" <> query
 
     %{inet: ip4, inet6: ip6, inet6_all: v6_all} = Acceptor.all_global_ips()
-    v6_announces = Acceptor.announcable_ipv6()
+    tracker_families = http_tracker_families(announce)
+    ipv4_announce = if MapSet.member?(tracker_families, :inet), do: ip4
+
+    v6_announces =
+      if MapSet.member?(tracker_families, :inet6), do: Acceptor.announcable_ipv6(), else: []
 
     if ip4 || ip6 do
       Logger.info(
@@ -310,21 +316,28 @@ defmodule Tracker do
 
     responses =
       []
-      |> maybe_http_announce(url, :inet, ip4, opts)
+      |> maybe_http_announce(url, :inet, ipv4_announce, opts)
       |> then(fn acc ->
         Enum.reduce(v6_announces, acc, fn ip6_addr, a ->
-          v6_url =
-            build_http_announce_query(hash, uploaded, downloaded, left, event,
-              ipv6: Acceptor.ipv6_binary(ip6_addr)
-            )
-            |> URI.encode_query()
-            |> then(&(announce <> "?" <> &1))
-
-          [http_announce(v6_url, :inet6, ip6_addr, opts) | a]
+          [http_announce(url, :inet6, ip6_addr, opts) | a]
         end)
       end)
 
     merge_http_announces(responses)
+  end
+
+  @spec http_tracker_families(binary()) :: MapSet.t(:inet | :inet6)
+  defp http_tracker_families(announce) do
+    case URI.parse(announce).host do
+      host when is_binary(host) ->
+        case resolve_hosts(host) do
+          {:ok, hosts} -> hosts |> Enum.map(&elem(&1, 1)) |> MapSet.new()
+          {:error, _reason} -> MapSet.new([:inet, :inet6])
+        end
+
+      nil ->
+        MapSet.new([:inet, :inet6])
+    end
   end
 
   @doc false
@@ -335,9 +348,7 @@ defmodule Tracker do
           non_neg_integer(),
           0..3
         ) :: map()
-  def build_http_announce_query(hash, uploaded, downloaded, left, event, opts \\ []) do
-    ipv6_override = Keyword.get(opts, :ipv6)
-
+  def build_http_announce_query(hash, uploaded, downloaded, left, event) do
     %{
       "info_hash" => hash,
       "peer_id" => Peer.id(),
@@ -350,8 +361,6 @@ defmodule Tracker do
       "key" => Acceptor.key()
     }
     |> maybe_put_announce_param("event", Torrent.event_to_string(event))
-    |> maybe_put_announce_param("ip", Acceptor.ipv4_binary())
-    |> maybe_put_announce_param("ipv6", ipv6_override || Acceptor.ipv6_binary())
   end
 
   @spec maybe_put_announce_param(map(), String.t(), binary() | nil) :: map()
@@ -513,9 +522,9 @@ defmodule Tracker do
     end
   end
 
-  # Bind outbound HTTP to the chosen local address on IPv4. Hackney/HTTPoison raise
-  # CaseClauseError on bare :badarg when given an IPv6 tuple in connect_options, so IPv6
-  # announces use the :inet6 socket family and the OS default route instead (BEP 7).
+  # BEP 7 requires the tracker connection's source to be the address being
+  # announced. The family option must accompany an IPv6 bind tuple; without it
+  # Hackney's TCP connect path treats the tuple as an IPv4 bind and raises badarg.
   #
   # `pool` — hackney keeps a keep-alive TCP connection per (host, port,
   # connect_options) tuple in the pool, so successive announces to the same
@@ -525,8 +534,12 @@ defmodule Tracker do
   defp http_hackney_opts(:inet, ip),
     do: [pool: ElixirTorrentApplication.tracker_pool(), connect_options: [{:ip, ip}]]
 
-  defp http_hackney_opts(:inet6, _ip),
-    do: [pool: ElixirTorrentApplication.tracker_pool(), connect_options: [:inet6]]
+  defp http_hackney_opts(:inet6, ip),
+    do: [pool: ElixirTorrentApplication.tracker_pool(), connect_options: [:inet6, {:ip, ip}]]
+
+  @doc false
+  @spec http_hackney_opts_for_test(:inet | :inet6, :inet.ip_address()) :: keyword()
+  def http_hackney_opts_for_test(family, ip), do: http_hackney_opts(family, ip)
 
   @spec badarg_clause?(term()) :: boolean()
   defp badarg_clause?(%CaseClauseError{term: :badarg}), do: true

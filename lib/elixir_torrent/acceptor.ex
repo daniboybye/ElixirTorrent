@@ -70,8 +70,13 @@ defmodule Acceptor do
   # source port instead of the announced port field (BEP 15), so peers end up
   # dialing whatever short-lived socket sits there next.
   @spec open_udp(:inet | :inet6) :: {:ok, port()} | :error
-  def open_udp(family) do
-    case :gen_udp.open(0, socket_options(family)) do
+  def open_udp(family), do: open_udp(family, nil)
+
+  @spec open_udp(:inet | :inet6, :inet.ip_address() | nil) :: {:ok, port()} | :error
+  def open_udp(family, bind_ip) do
+    bind_opts = if bind_ip, do: [ip: bind_ip], else: []
+
+    case :gen_udp.open(0, socket_options(family) ++ bind_opts) do
       {:ok, socket} -> {:ok, socket}
       {:error, _} -> :error
     end

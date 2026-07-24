@@ -7,6 +7,7 @@ defmodule TrackerUDPLoopbackTest do
   @hash :crypto.strong_rand_bytes(20)
   @connection_id <<0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE>>
   @fast_fail [max_udp_attempts: 0, http_timeout_ms: 5_000]
+  @loopback_v6 {0, 0, 0, 0, 0, 0, 0, 1}
 
   setup do
     {:ok, _} = Application.ensure_all_started(:elixir_torrent)
@@ -86,6 +87,36 @@ defmodule TrackerUDPLoopbackTest do
 
       assert <<_::64>> = Tracker.udp_connect(socket, {127, 0, 0, 1}, port, max_udp_attempts: 1)
     end
+
+    test "IPv6 announce socket is bound to the selected source address" do
+      assert {:ok, probe_socket} = Acceptor.open_udp(:inet6, @loopback_v6)
+      assert {:ok, {@loopback_v6, _port}} = :inet.sockname(probe_socket)
+      :gen_udp.close(probe_socket)
+
+      {port, server_pid} =
+        start_bep15_server(
+          family: :inet6,
+          observer: self(),
+          announce_peers: <<>>
+        )
+
+      on_exit(fn ->
+        if Process.alive?(server_pid), do: Process.exit(server_pid, :kill)
+      end)
+
+      result =
+        with_primary_ipv6(@loopback_v6, fn ->
+          Tracker.request!(
+            "udp://[::1]:#{port}/announce",
+            @hash,
+            [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()],
+            @fast_fail
+          )
+        end)
+
+      assert %Tracker.Response{} = result
+      assert_receive {:bep15_source, 1, @loopback_v6}, 5_000
+    end
   end
 
   describe "encode_udp_announce_for_test/5" do
@@ -105,10 +136,12 @@ defmodule TrackerUDPLoopbackTest do
 
   defp start_bep15_server(opts) do
     parent = self()
+    family = Keyword.get(opts, :family, :inet)
+    bind_ip = if family == :inet6, do: @loopback_v6, else: {127, 0, 0, 1}
 
     spawn_link(fn ->
       {:ok, socket} =
-        :gen_udp.open(0, [:binary, active: true, reuseaddr: true, ip: {127, 0, 0, 1}])
+        :gen_udp.open(0, [:binary, family, active: true, reuseaddr: true, ip: bind_ip])
 
       {:ok, port} = :inet.port(socket)
       send(parent, {:bep15_ready, port, self()})
@@ -125,6 +158,11 @@ defmodule TrackerUDPLoopbackTest do
   defp bep15_loop(socket, state) do
     receive do
       {:udp, ^socket, ip, port, data} ->
+        if observer = state[:observer] do
+          <<_connection_id::binary-size(8), action::32, _rest::binary>> = data
+          send(observer, {:bep15_source, action, ip})
+        end
+
         response = handle_bep15(data, state)
         if response, do: :gen_udp.send(socket, ip, port, response)
 
@@ -180,6 +218,27 @@ defmodule TrackerUDPLoopbackTest do
     case data do
       <<^protocol_id::binary-size(8), 0::32, _::binary-size(4)>> -> true
       _ -> false
+    end
+  end
+
+  defp with_primary_ipv6(ip, fun) do
+    key = Acceptor.ip_cache_key()
+    previous = :persistent_term.get(key, :missing)
+    cache = %{inet: nil, inet6: ip, inet6_all: [ip]}
+    cache_pid = Process.whereis(Acceptor.IpCache)
+
+    if cache_pid, do: :sys.suspend(cache_pid)
+    :persistent_term.put(key, cache)
+
+    try do
+      fun.()
+    after
+      case previous do
+        :missing -> :persistent_term.erase(key)
+        value -> :persistent_term.put(key, value)
+      end
+
+      if cache_pid && Process.alive?(cache_pid), do: :sys.resume(cache_pid)
     end
   end
 end
