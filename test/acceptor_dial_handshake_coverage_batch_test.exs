@@ -111,19 +111,21 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
       with_torrent_stack(hash, fn _hash ->
         {:ok, listen, port, ip} = listen_on_loopback()
+        test_pid = self()
 
         accept_task =
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
+            send(test_pid, :truncated_handshake_accepted)
             assert :ok = Handshakes.recv(accepted)
           end)
 
         {:ok, client} = connect_loopback(ip, port)
         assert :ok = :gen_tcp.send(client, <<19>>)
-        Process.sleep(80)
+        assert_receive :truncated_handshake_accepted, @timeout
         :gen_tcp.close(client)
-        :gen_tcp.close(listen)
         assert :ok = Task.await(accept_task, @timeout)
+        :gen_tcp.close(listen)
         assert Torrent.Swarm.count(hash) == 0
       end)
     end
