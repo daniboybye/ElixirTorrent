@@ -281,6 +281,22 @@ defmodule Peer.Controller do
   def send_pex(key, payload) when is_binary(payload),
     do: GenServer.cast(via(key), {:send_pex, [payload]})
 
+  @doc false
+  @spec pex_entry(Peer.key()) :: {:ok, Peer.UtPex.Entry.t()} | :error
+  def pex_entry(key) do
+    GenServer.call(via(key), :pex_entry, 500)
+  catch
+    :exit, _ -> :error
+  end
+
+  @doc false
+  @spec set_connection_origin(Peer.key(), :inbound | :outbound) :: :ok
+  def set_connection_origin(key, origin) when origin in [:inbound, :outbound] do
+    GenServer.cast(via(key), {:set_connection_origin, [origin]})
+  catch
+    :exit, _ -> :ok
+  end
+
   def init([hash, id, socket, reserved]) do
     # The peer supervisor is one_for_all: a Sender exit tears this process down
     # with an exit signal, which skips terminate/2 unless exits are trapped —
@@ -524,6 +540,8 @@ defmodule Peer.Controller do
 
   def handle_call(:peer_v2_support?, _, state),
     do: {:reply, state.peer_v2_support?, state}
+
+  def handle_call(:pex_entry, _, state), do: {:reply, State.pex_entry(state), state}
 
   def handle_call({:request_hashes, req, timeout, caller}, _, state) do
     case State.start_hash_request(state, req, caller, timeout) do

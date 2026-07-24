@@ -59,7 +59,7 @@ defmodule Peer.LTEP.Session do
       |> Map.merge(Keyword.get(opts, :extra_fields, %{}))
 
     base =
-      %Handshake{m: session.local_m, v: client_version, reqq: @local_reqq}
+      %Handshake{m: session.local_m, v: client_version, reqq: @local_reqq, e: 1}
       |> Handshake.to_map()
       |> Map.merge(address_fields())
       |> Map.merge(extra_fields)

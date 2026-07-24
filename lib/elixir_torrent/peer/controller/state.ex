@@ -19,6 +19,9 @@ defmodule Peer.Controller.State do
     :ltep,
     peer_v2_support?: false,
     holepunch: %{pex_endpoints: MapSet.new(), rate: nil},
+    # The 50-contact BEP 11 cap does not apply to the first inbound snapshot.
+    # This is connection state; an added-only delta is not inherently "initial".
+    pex_inbound: %{initial?: true},
     hash_requests: %{},
     requests: MapSet.new(),
     # Inbound block requests accepted for asynchronous disk reads but not yet
@@ -57,7 +60,9 @@ defmodule Peer.Controller.State do
     interested: false,
     choke: true,
     interested_of_me: false,
-    choke_me: true
+    choke_me: true,
+    # :outbound when we dialed the peer (BEP 11 added.f outgoing bit); default :inbound.
+    connection_origin: :inbound
   ]
 
   @typep bitfield :: Torrent.bitfield() | :all | :none | nil
@@ -78,6 +83,7 @@ defmodule Peer.Controller.State do
             pex_endpoints: MapSet.t(endpoint()),
             rate: {integer(), non_neg_integer()} | nil
           },
+          pex_inbound: %{initial?: boolean()},
           hash_requests: %{Peer.HashTransfer.ref() => map()},
           requests: MapSet.t(subpiece()),
           upload_requests: MapSet.t(subpiece()),
@@ -93,7 +99,8 @@ defmodule Peer.Controller.State do
           interested: boolean(),
           choke: boolean(),
           interested_of_me: boolean(),
-          choke_me: boolean()
+          choke_me: boolean(),
+          connection_origin: :inbound | :outbound
         }
 
   # Per-peer request pipelining (BEP 10 reqq). Throughput per peer is bounded by
@@ -286,10 +293,15 @@ defmodule Peer.Controller.State do
         respond_ut_metadata(state, payload)
 
       ut_pex?(state, extended_id) and Peer.UtPex.allowed?(state.hash) ->
-        case Peer.UtPex.ingest(state.hash, payload) do
-          {:ok, added, dropped} -> update_holepunch_pex(state, added, dropped)
-          :error -> state
-        end
+        initial? = state.pex_inbound.initial?
+
+        state =
+          case Peer.UtPex.ingest(state.hash, payload, initial?: initial?) do
+            {:ok, added, dropped} -> update_holepunch_pex(state, added, dropped)
+            :error -> state
+          end
+
+        put_in(state.pex_inbound.initial?, false)
 
       ut_holepunch?(state, extended_id) ->
         Peer.UtHolepunch.handle_inbound(state, payload)
@@ -327,6 +339,21 @@ defmodule Peer.Controller.State do
       |> MapSet.difference(dropped_endpoints)
 
     put_in(state.holepunch.pex_endpoints, pex_endpoints)
+  end
+
+  @doc false
+  @spec pex_entry(t()) :: {:ok, Peer.UtPex.Entry.t()} | :error
+  def pex_entry(%__MODULE__{} = state) do
+    case Peer.Transport.safe_peername(state.socket) do
+      {:ok, {ip, port}} -> {:ok, Peer.UtPex.entry_from_connection(state, ip, port)}
+      _ -> :error
+    end
+  end
+
+  @doc false
+  @spec set_connection_origin(t(), :inbound | :outbound) :: t()
+  def set_connection_origin(%__MODULE__{} = state, origin) when origin in [:inbound, :outbound] do
+    %{state | connection_origin: origin}
   end
 
   @spec send_pex(t(), binary()) :: t()

@@ -15,7 +15,9 @@ defmodule Peer.LTEP.Handshake do
             ipv4: nil,
             ipv6: nil,
             reqq: nil,
-            metadata_size: nil
+            metadata_size: nil,
+            # libtorrent LTEP `e` — 1 means the peer supports protocol encryption (MSE/PE).
+            e: nil
 
   @type t :: %__MODULE__{
           m: %{String.t() => non_neg_integer()},
@@ -25,7 +27,8 @@ defmodule Peer.LTEP.Handshake do
           ipv4: binary() | nil,
           ipv6: binary() | nil,
           reqq: pos_integer() | nil,
-          metadata_size: pos_integer() | nil
+          metadata_size: pos_integer() | nil,
+          e: 1 | nil
         }
 
   @doc """
@@ -61,7 +64,8 @@ defmodule Peer.LTEP.Handshake do
       ipv4: parse_ipv4(Map.get(dict, "ipv4")),
       ipv6: parse_ipv6(Map.get(dict, "ipv6")),
       reqq: parse_positive_int(Map.get(dict, "reqq")),
-      metadata_size: parse_positive_int(Map.get(dict, "metadata_size"))
+      metadata_size: parse_positive_int(Map.get(dict, "metadata_size")),
+      e: parse_encryption_flag(Map.get(dict, "e"))
     }
   end
 
@@ -77,6 +81,7 @@ defmodule Peer.LTEP.Handshake do
     |> maybe_put("ipv6", hs.ipv6, ipv6?(hs.ipv6))
     |> maybe_put("reqq", hs.reqq, is_integer(hs.reqq))
     |> maybe_put("metadata_size", hs.metadata_size, is_integer(hs.metadata_size))
+    |> maybe_put("e", hs.e, hs.e == 1)
   end
 
   @doc """
@@ -99,6 +104,7 @@ defmodule Peer.LTEP.Handshake do
     |> merge_scalar(:ipv6, incoming.ipv6)
     |> merge_scalar(:reqq, incoming.reqq)
     |> merge_scalar(:metadata_size, incoming.metadata_size)
+    |> merge_scalar(:e, incoming.e)
   end
 
   @doc """
@@ -178,6 +184,10 @@ defmodule Peer.LTEP.Handshake do
   @spec parse_positive_int(term()) :: pos_integer() | nil
   defp parse_positive_int(n) when is_integer(n) and n > 0, do: n
   defp parse_positive_int(_), do: nil
+
+  @spec parse_encryption_flag(term()) :: 1 | nil
+  defp parse_encryption_flag(1), do: 1
+  defp parse_encryption_flag(_), do: nil
 
   @spec parse_ip(term()) :: binary() | nil
   defp parse_ip(bin) when is_binary(bin) and byte_size(bin) in [4, 16], do: bin

@@ -461,16 +461,19 @@ defmodule Acceptor.Connection.Handshakes do
          :ok <- log_handshake_sent(peer, transport),
          {^hash, peer_id, reserved} <- recv_msg(socket),
          :ok <- log_handshake_recv(peer, transport),
-         false <- BlackList.member?(peer_id),
-         :ok <- add_peer(hash, peer_id, reserved, socket, peer) do
+         :ok <- blacklist_ok(peer_id),
+         :ok <- add_peer(hash, peer_id, reserved, socket, peer, :outbound) do
       log_dial(peer, :ok, started, transport)
       :ok
     else
-      true -> {:error, :already_connected}
       {:error, reason} -> {:error, reason}
-      false -> {:error, :rejected}
       _ -> {:error, :handshake_failed}
     end
+  end
+
+  @spec blacklist_ok(Peer.id()) :: :ok | {:error, :already_connected}
+  defp blacklist_ok(peer_id) do
+    if BlackList.member?(peer_id), do: {:error, :already_connected}, else: :ok
   end
 
   defp log_dial(%Peer{ip: ip, port: port}, outcome, started_ms, transport) do
@@ -809,17 +812,19 @@ defmodule Acceptor.Connection.Handshakes do
   defp retryable_start_protocol?({:shutdown, _}), do: true
   defp retryable_start_protocol?(_), do: false
 
-  defp add_peer(hash, peer_id, reserved, socket, %Peer{} = peer) do
-    add_peer(hash, peer_id, reserved, socket, peer_endpoint(peer, socket))
+  defp add_peer(hash, peer_id, reserved, socket, endpoint_or_peer, origin \\ :inbound)
+
+  defp add_peer(hash, peer_id, reserved, socket, %Peer{} = peer, origin) do
+    add_peer(hash, peer_id, reserved, socket, peer_endpoint(peer, socket), origin)
   end
 
-  defp add_peer(hash, peer_id, reserved, socket, endpoint) do
+  defp add_peer(hash, peer_id, reserved, socket, endpoint, origin) do
     case Torrent.add_peer(hash, peer_id, reserved, socket) do
       {:ok, pid} ->
-        handoff_socket(hash, pid, socket, endpoint)
+        handoff_socket(hash, pid, socket, endpoint, origin)
 
       {:ok, pid, _} ->
-        handoff_socket(hash, pid, socket, endpoint)
+        handoff_socket(hash, pid, socket, endpoint, origin)
 
       {:error, :max_peers} ->
         safe_close(socket)
@@ -831,13 +836,20 @@ defmodule Acceptor.Connection.Handshakes do
     end
   end
 
-  @spec handoff_socket(Torrent.hash(), pid(), Peer.Transport.socket(), term()) ::
+  @spec handoff_socket(
+          Torrent.hash(),
+          pid(),
+          Peer.Transport.socket(),
+          term(),
+          :inbound | :outbound
+        ) ::
           :ok | {:error, term()}
-  defp handoff_socket(hash, peer_supervisor, socket, endpoint) do
+  defp handoff_socket(hash, peer_supervisor, socket, endpoint, origin) do
     with sender when is_pid(sender) <- Peer.sender_pid(peer_supervisor),
          key when is_tuple(key) <- Peer.get_key(peer_supervisor),
          :ok <- register_endpoint(hash, endpoint, peer_supervisor),
          :ok <- transfer_controlling_process(socket, sender),
+         :ok <- maybe_set_connection_origin(key, origin),
          :ok <- start_peer_protocol(key),
          :ok <- safe_activate(key) do
       Logger.info(
@@ -855,6 +867,12 @@ defmodule Acceptor.Connection.Handshakes do
         {:error, :socket_handoff_failed}
     end
   end
+
+  @spec maybe_set_connection_origin(Peer.key(), :inbound | :outbound) :: :ok
+  defp maybe_set_connection_origin(key, :outbound),
+    do: Peer.Controller.set_connection_origin(key, :outbound)
+
+  defp maybe_set_connection_origin(_key, :inbound), do: :ok
 
   @spec safe_activate(Peer.key()) :: :ok | {:error, term()}
   defp safe_activate(key) do

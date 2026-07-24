@@ -389,14 +389,37 @@ defmodule PeerDiscoveryAnnounceTest do
   end
 
   test "private torrents ignore PEX broadcast ticks without advancing snapshots" do
-    endpoint = {{203, 0, 113, 40}, 6881}
-    snapshot = MapSet.new([endpoint])
+    endpoint = {{10, 0, 0, 50}, 6881}
+    snapshot = %{endpoint => Peer.UtPex.Entry.new(endpoint)}
     state = base_state(pex_snapshot: snapshot)
 
     after_state = Announce.dispatch_task_message(state, :pex_broadcast)
 
     assert after_state.pex_snapshot == snapshot
     refute_receive :pex_broadcast, 20
+  end
+
+  test "PEX snapshot advances only by encoded entries so capped spillover survives" do
+    state = base_state(private?: false, pex_snapshot: %{})
+    start_swarm_with_connected(state.hash, 0)
+
+    current =
+      for i <- 1..55, into: %{} do
+        endpoint = {{198, 18, 0, i}, 15_000 + i}
+        {endpoint, Peer.UtPex.Entry.new(endpoint)}
+      end
+
+    first = Announce.apply_pex_snapshot(state, current)
+    assert map_size(first.pex_snapshot) == 50
+
+    second = Announce.apply_pex_snapshot(first, current)
+    assert map_size(second.pex_snapshot) == 55
+
+    empty_first = Announce.apply_pex_snapshot(second, %{})
+    assert map_size(empty_first.pex_snapshot) == 5
+
+    empty_second = Announce.apply_pex_snapshot(empty_first, %{})
+    assert empty_second.pex_snapshot == %{}
   end
 
   describe "seed peers (BEP 9 x.pe hand-off)" do
@@ -469,7 +492,7 @@ defmodule PeerDiscoveryAnnounceTest do
 
     current = Torrent.Swarm.count(hash)
 
-    for _ <- 1..max(n - current, 0) do
+    for _ <- List.duplicate(:dummy, max(n - current, 0)) do
       spec = %{
         id: :dummy_peer,
         start: {Task, :start_link, [fn -> Process.sleep(:infinity) end]},

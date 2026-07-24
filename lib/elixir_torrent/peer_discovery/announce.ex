@@ -23,7 +23,7 @@ defmodule PeerDiscovery.Announce do
             # Highest tier index started in the current under-target fan-out wave; used to
             # pick the next wave start after all batches complete with no peers.
             fanout_high_tier: nil,
-            pex_snapshot: MapSet.new(),
+            pex_snapshot: %{},
             last_tracker_announce_ms: nil,
             last_dht_lookup_ms: nil,
             tracker_interval_sec: nil,
@@ -235,6 +235,13 @@ defmodule PeerDiscovery.Announce do
   end
 
   @doc false
+  @spec apply_pex_snapshot(%__MODULE__{}, %{Peer.UtPex.endpoint() => Peer.UtPex.Entry.t()}) ::
+          %__MODULE__{}
+  def apply_pex_snapshot(%__MODULE__{} = state, current) when is_map(current) do
+    apply_pex_snapshot_delta(state, current)
+  end
+
+  @doc false
   @spec pop_request(%__MODULE__{}, reference()) :: {term(), %__MODULE__{}}
   def pop_request(%__MODULE__{requests: requests} = state, ref) do
     {meta, requests} = Map.pop(requests, ref)
@@ -267,7 +274,7 @@ defmodule PeerDiscovery.Announce do
       dht_module: Keyword.get(opts, :dht_module, DHT),
       tiers: tiers,
       private?: Torrent.private?(torrent),
-      pex_snapshot: MapSet.new(),
+      pex_snapshot: %{},
       seed_peers: seed_peers
     }
 
@@ -1246,19 +1253,49 @@ defmodule PeerDiscovery.Announce do
   defp maybe_broadcast_pex(%__MODULE__{hash: hash} = state) do
     current =
       try do
-        MapSet.new(Peer.Endpoints.list(hash))
+        Peer.UtPex.snapshot_map(hash)
       catch
         :exit, _ -> state.pex_snapshot
       end
 
-    added = MapSet.difference(current, state.pex_snapshot) |> MapSet.to_list()
-    dropped = MapSet.difference(state.pex_snapshot, current) |> MapSet.to_list()
+    apply_pex_snapshot_delta(state, current)
+  end
 
-    if added != [] or dropped != [] do
-      _ignored = Peer.UtPex.broadcast(hash, added, dropped)
-    end
+  @spec apply_pex_snapshot_delta(%__MODULE__{}, map()) :: %__MODULE__{}
+  defp apply_pex_snapshot_delta(%__MODULE__{hash: hash} = state, current) do
+    prev = state.pex_snapshot
 
-    %{state | pex_snapshot: current}
+    added =
+      current
+      |> Map.keys()
+      |> Enum.reject(&Map.has_key?(prev, &1))
+      |> Enum.map(&Map.fetch!(current, &1))
+
+    dropped =
+      prev
+      |> Map.keys()
+      |> Enum.reject(&Map.has_key?(current, &1))
+      |> Enum.map(&Map.fetch!(prev, &1))
+
+    next_snapshot =
+      if added == [] and dropped == [] do
+        current
+      else
+        case Peer.UtPex.broadcast(hash, added, dropped, initial?: false) do
+          {:ok, report} ->
+            encoded_added =
+              Map.new(report.added_entries, &{Peer.UtPex.Entry.endpoint(&1), &1})
+
+            prev
+            |> Map.drop(report.dropped_endpoints)
+            |> Map.merge(encoded_added)
+
+          :ok ->
+            prev
+        end
+      end
+
+    %{state | pex_snapshot: next_snapshot}
   end
 
   # BEP 12: on success, move the working tracker to the front of its tier.
