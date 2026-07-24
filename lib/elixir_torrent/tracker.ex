@@ -840,12 +840,25 @@ defmodule Tracker do
     packet = encode_udp_announce(connection_id, transaction_id, hash, announce_stats, family)
     max_attempts = Keyword.get(opts, :max_udp_attempts, @udp_max_backoff_attempt)
 
-    case do_udp_request(socket, ip, port, packet, transaction_id,
-           expected: :announce,
-           family: family,
-           attempt: 0,
-           max_udp_attempts: max_attempts
-         ) do
+    request_opts =
+      [
+        expected: :announce,
+        family: family,
+        attempt: 0,
+        max_udp_attempts: max_attempts
+      ]
+      |> maybe_put_announce_retry_packet(
+        socket,
+        ip,
+        port,
+        transaction_id,
+        hash,
+        announce_stats,
+        family,
+        opts
+      )
+
+    case do_udp_request(socket, ip, port, packet, transaction_id, request_opts) do
       %Response{peers: peers} = response ->
         v6 = Enum.count(peers, &ipv6_peer?/1)
 
@@ -863,6 +876,37 @@ defmodule Tracker do
 
       other ->
         %Error{reason: other}
+    end
+  end
+
+  # Only the full announce ladder can outlive BEP 15's one-minute connection-id
+  # validity window. Before each of its retries, ask the cache again: it returns
+  # the same id while valid and performs a fresh connect after expiry.
+  defp maybe_put_announce_retry_packet(
+         request_opts,
+         socket,
+         ip,
+         port,
+         transaction_id,
+         hash,
+         announce_stats,
+         family,
+         opts
+       ) do
+    if Keyword.fetch!(request_opts, :max_udp_attempts) == @udp_max_backoff_attempt do
+      retry_packet = fn ->
+        case fetch_connection_id(socket, ip, port, opts) do
+          {:ok, id} ->
+            {:ok, encode_udp_announce(id, transaction_id, hash, announce_stats, family)}
+
+          %Error{} = error ->
+            error
+        end
+      end
+
+      Keyword.put(request_opts, :retry_packet, retry_packet)
+    else
+      request_opts
     end
   end
 
@@ -909,20 +953,45 @@ defmodule Tracker do
         result
 
       {:error, :timeout} ->
-        do_udp_request(
-          socket,
-          ip,
-          port,
-          packet,
-          transaction_id,
-          Keyword.merge(opts, attempt: attempt + 1, max_udp_attempts: max_attempts)
-        )
+        retry_udp_request(socket, ip, port, packet, transaction_id, opts, attempt, max_attempts)
 
       {:error, reason} when is_binary(reason) ->
         %Error{reason: reason}
 
       {:error, reason} ->
         %Error{reason: reason}
+    end
+  end
+
+  defp retry_udp_request(
+         socket,
+         ip,
+         port,
+         packet,
+         transaction_id,
+         opts,
+         attempt,
+         max_attempts
+       ) do
+    next_attempt = attempt + 1
+    next_opts = Keyword.merge(opts, attempt: next_attempt, max_udp_attempts: max_attempts)
+
+    if next_attempt > max_attempts do
+      %Error{reason: :timeout}
+    else
+      case Keyword.get(opts, :retry_packet) do
+        retry_packet when is_function(retry_packet, 0) ->
+          case retry_packet.() do
+            {:ok, refreshed_packet} ->
+              do_udp_request(socket, ip, port, refreshed_packet, transaction_id, next_opts)
+
+            %Error{} = error ->
+              error
+          end
+
+        nil ->
+          do_udp_request(socket, ip, port, packet, transaction_id, next_opts)
+      end
     end
   end
 

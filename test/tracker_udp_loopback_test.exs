@@ -88,6 +88,58 @@ defmodule TrackerUDPLoopbackTest do
       assert <<_::64>> = Tracker.udp_connect(socket, {127, 0, 0, 1}, port, max_udp_attempts: 1)
     end
 
+    test "long announce retry reconnects after the connection-id cache expires" do
+      {port, server_pid} = start_connection_id_retry_server(:expired, self())
+
+      on_exit(fn ->
+        if Process.alive?(server_pid), do: Process.exit(server_pid, :kill)
+      end)
+
+      Application.put_env(:elixir_torrent, :udp_backoff_ms, fn _attempt -> 20 end)
+      on_exit(fn -> Application.delete_env(:elixir_torrent, :udp_backoff_ms) end)
+
+      assert %Tracker.Response{} =
+               Tracker.request!(
+                 "udp://127.0.0.1:#{port}/announce",
+                 @hash,
+                 uploaded: 0,
+                 downloaded: 0,
+                 left: 16_384,
+                 event: Torrent.started()
+               )
+
+      assert_receive {:retry_server, :connect, <<1::64>>}
+      assert_receive {:retry_server, :announce, <<1::64>>, 1}
+      assert_receive {:retry_server, :connect, <<2::64>>}
+      assert_receive {:retry_server, :announce, <<2::64>>, 2}
+    end
+
+    test "long announce retry reuses a connection id while it remains valid" do
+      {port, server_pid} = start_connection_id_retry_server(:valid, self())
+
+      on_exit(fn ->
+        if Process.alive?(server_pid), do: Process.exit(server_pid, :kill)
+      end)
+
+      Application.put_env(:elixir_torrent, :udp_backoff_ms, fn _attempt -> 20 end)
+      on_exit(fn -> Application.delete_env(:elixir_torrent, :udp_backoff_ms) end)
+
+      assert %Tracker.Response{} =
+               Tracker.request!(
+                 "udp://127.0.0.1:#{port}/announce",
+                 @hash,
+                 uploaded: 0,
+                 downloaded: 0,
+                 left: 16_384,
+                 event: Torrent.started()
+               )
+
+      assert_receive {:retry_server, :connect, <<1::64>>}
+      assert_receive {:retry_server, :announce, <<1::64>>, 1}
+      assert_receive {:retry_server, :announce, <<1::64>>, 2}
+      refute_receive {:retry_server, :connect, <<2::64>>}, 50
+    end
+
     test "IPv6 announce socket is bound to the selected source address" do
       assert {:ok, probe_socket} = Acceptor.open_udp(:inet6, @loopback_v6)
       assert {:ok, {@loopback_v6, _port}} = :inet.sockname(probe_socket)
@@ -131,6 +183,98 @@ defmodule TrackerUDPLoopbackTest do
       assert byte_size(packet) == 98
       # BEP 15 IPv6 clients send ip_field = 0 (4 bytes at offset 84..87).
       <<_::binary-size(84), 0, 0, 0, 0, _rest::binary>> = packet
+    end
+  end
+
+  defp start_connection_id_retry_server(cache_state, observer) do
+    parent = self()
+
+    pid =
+      spawn_link(fn ->
+        {:ok, socket} =
+          :gen_udp.open(0, [
+            :binary,
+            :inet,
+            active: true,
+            reuseaddr: true,
+            ip: {127, 0, 0, 1}
+          ])
+
+        {:ok, port} = :inet.port(socket)
+        send(parent, {:retry_server_ready, port})
+        connection_id_retry_loop(socket, port, cache_state, observer, 0, 0)
+      end)
+
+    receive do
+      {:retry_server_ready, port} -> {port, pid}
+    after
+      5_000 -> flunk("BEP15 retry server failed to start")
+    end
+  end
+
+  defp connection_id_retry_loop(
+         socket,
+         tracker_port,
+         cache_state,
+         observer,
+         connect_count,
+         announce_count
+       ) do
+    protocol_id = @protocol_id
+
+    receive do
+      {:udp, ^socket, ip, client_port,
+       <<^protocol_id::binary-size(8), 0::32, tid::binary-size(4)>>} ->
+        next_connect_count = connect_count + 1
+        connection_id = <<next_connect_count::64>>
+        send(observer, {:retry_server, :connect, connection_id})
+
+        :ok =
+          :gen_udp.send(
+            socket,
+            ip,
+            client_port,
+            <<0::32, tid::binary, connection_id::binary>>
+          )
+
+        connection_id_retry_loop(
+          socket,
+          tracker_port,
+          cache_state,
+          observer,
+          next_connect_count,
+          announce_count
+        )
+
+      {:udp, ^socket, ip, client_port,
+       <<connection_id::binary-size(8), 1::32, tid::binary-size(4), _rest::binary>>} ->
+        next_announce_count = announce_count + 1
+        send(observer, {:retry_server, :announce, connection_id, next_announce_count})
+
+        if next_announce_count == 1 and cache_state == :expired do
+          key = {{127, 0, 0, 1}, tracker_port, client_port}
+          send(PeerDiscovery.ConnectionIds, {:timeout, key})
+          :sys.get_state(PeerDiscovery.ConnectionIds)
+        end
+
+        if next_announce_count > 1 do
+          :ok =
+            :gen_udp.send(
+              socket,
+              ip,
+              client_port,
+              <<1::32, tid::binary, 1200::32, 5::32, 10::32>>
+            )
+        end
+
+        connection_id_retry_loop(
+          socket,
+          tracker_port,
+          cache_state,
+          observer,
+          connect_count,
+          next_announce_count
+        )
     end
   end
 
