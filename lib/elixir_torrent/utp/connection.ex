@@ -57,9 +57,7 @@ defmodule UTP.Connection do
     pending_send: <<>>,
     recv_waiters: [],
     timer_ref: nil,
-    last_send_ms: 0,
-    last_recv_ms: 0,
-    idle_probe_count: 0,
+    activity: %{last_send_ms: 0, last_recv_ms: 0, idle_probe_count: 0},
     fin_sent: false,
     closed: false,
     accept_notified: false
@@ -155,8 +153,11 @@ defmodule UTP.Connection do
       send_conn_id: send_conn_id,
       seq_nr: seq_nr,
       led: LEDBAT.new(),
-      last_send_ms: now_ms(),
-      last_recv_ms: now_ms()
+      activity: %{
+        last_send_ms: now_ms(),
+        last_recv_ms: now_ms(),
+        idle_probe_count: 0
+      }
     }
 
     # start/3 (not start_link) — a send failure must not crash UTP.Dispatcher.
@@ -310,11 +311,16 @@ defmodule UTP.Connection do
       reply_micro = max(now_us - header.timestamp, 0)
 
       state =
-        state
-        |> Map.put(:reply_micro, reply_micro)
-        |> Map.put(:last_recv_ms, now_ms())
-        |> Map.put(:idle_probe_count, 0)
-        |> Map.put(:peer_wnd, header.wnd_size)
+        %{
+          state
+          | reply_micro: reply_micro,
+            activity: %{
+              state.activity
+              | last_recv_ms: now_ms(),
+                idle_probe_count: 0
+            },
+            peer_wnd: header.wnd_size
+        }
 
       state =
         if state.phase == :connected do
@@ -715,8 +721,11 @@ defmodule UTP.Connection do
           | unacked: unacked,
             cur_window: cur_window,
             seq_nr: seq_nr,
-            last_send_ms: now_ms(),
-            idle_probe_count: 0
+            activity: %{
+              state.activity
+              | last_send_ms: now_ms(),
+                idle_probe_count: 0
+            }
         }
 
       {:error, reason} ->
@@ -809,30 +818,35 @@ defmodule UTP.Connection do
 
   defp check_idle_timeout(state, now) do
     stalled? = state.peer_wnd == 0 or (state.fin_sent and is_nil(state.eof_seq))
-    idle_for = now - max(state.last_send_ms, state.last_recv_ms)
+    idle_for = now - max(state.activity.last_send_ms, state.activity.last_recv_ms)
 
     probe_timeout =
-      if state.idle_probe_count == 0 do
+      if state.activity.idle_probe_count == 0 do
         @idle_timeout_ms
       else
-        min(state.timeout_ms * Bitwise.bsl(1, state.idle_probe_count - 1), 60_000)
+        min(
+          state.timeout_ms * Bitwise.bsl(1, state.activity.idle_probe_count - 1),
+          60_000
+        )
       end
 
     if (state.phase == :connected and stalled?) && map_size(state.unacked) == 0 &&
          idle_for >= probe_timeout do
-      if state.idle_probe_count >= @max_idle_probes do
+      if state.activity.idle_probe_count >= @max_idle_probes do
         Logger.warning(
-          "[utp] idle_timeout peer=#{inspect({state.peer_ip, state.peer_port})} probes=#{state.idle_probe_count}"
+          "[utp] idle_timeout peer=#{inspect({state.peer_ip, state.peer_port})} probes=#{state.activity.idle_probe_count}"
         )
 
         shutdown(state, :idle_timeout)
       else
-        probe_count = state.idle_probe_count
+        probe_count = state.activity.idle_probe_count
 
         state
         |> put_led(LEDBAT.on_timeout(state.led))
         |> send_state_ack()
-        |> Map.put(:idle_probe_count, probe_count + 1)
+        |> then(fn state ->
+          %{state | activity: %{state.activity | idle_probe_count: probe_count + 1}}
+        end)
       end
     else
       state

@@ -300,7 +300,7 @@ defmodule UTPCorrectnessTest do
       assert {:ok, {_ip, _port, probe_wire}} = :gen_udp.recv(peer_udp, 0, 1_000)
       assert {:ok, probe, <<>>, []} = Packet.decode(probe_wire)
       assert probe.type == Packet.st_state()
-      assert :sys.get_state(pid).idle_probe_count == expected_count
+      assert :sys.get_state(pid).activity.idle_probe_count == expected_count
     end
 
     ref = Process.monitor(pid)
@@ -340,7 +340,7 @@ defmodule UTPCorrectnessTest do
 
       send(pid, {:utp_packet, zero_window, <<>>, []})
       assert {:ok, {_ip, _port, _response_ack}} = :gen_udp.recv(peer_udp, 0, 1_000)
-      assert %{closed: false, idle_probe_count: 0} = :sys.get_state(pid)
+      assert %{closed: false, activity: %{idle_probe_count: 0}} = :sys.get_state(pid)
     end
 
     assert Process.alive?(pid)
@@ -438,7 +438,12 @@ defmodule UTPCorrectnessTest do
     :sys.replace_state(pid, fn state ->
       if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
       old = System.monotonic_time(:millisecond) - 120_000
-      %{state | last_send_ms: old, last_recv_ms: old, timer_ref: nil}
+
+      %{
+        state
+        | activity: %{state.activity | last_send_ms: old, last_recv_ms: old},
+          timer_ref: nil
+      }
     end)
   end
 end
