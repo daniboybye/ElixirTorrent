@@ -106,15 +106,14 @@ defmodule TrackerUDPLoopbackTest do
   defp start_bep15_server(opts) do
     parent = self()
 
-    pid =
-      spawn_link(fn ->
-        {:ok, socket} =
-          :gen_udp.open(0, [:binary, active: true, reuseaddr: true, ip: {127, 0, 0, 1}])
+    spawn_link(fn ->
+      {:ok, socket} =
+        :gen_udp.open(0, [:binary, active: true, reuseaddr: true, ip: {127, 0, 0, 1}])
 
-        {:ok, port} = :inet.port(socket)
-        send(parent, {:bep15_ready, port, self()})
-        bep15_loop(socket, Map.new(opts))
-      end)
+      {:ok, port} = :inet.port(socket)
+      send(parent, {:bep15_ready, port, self()})
+      bep15_loop(socket, Map.new(opts))
+    end)
 
     receive do
       {:bep15_ready, port, server_pid} -> {port, server_pid}

@@ -102,7 +102,7 @@ defmodule DownloadPumpDeadlockTest do
     with_model(torrent, fn _ ->
       {:ok, pid} = start_piece_worker(hash, 0)
       peer_id = Peer.id()
-      _peer_pid = ensure_peer_registered(hash, peer_id)
+      peer_pid = ensure_peer_registered(hash, peer_id)
 
       on_exit(fn ->
         try do
@@ -120,7 +120,7 @@ defmodule DownloadPumpDeadlockTest do
                end)
 
       assert_receive {:requested, 0, 0, 16_384}, 500
-      cleanup_workers(pid, _peer_pid)
+      cleanup_workers(pid, peer_pid)
     end)
   end
 
@@ -306,7 +306,7 @@ defmodule DownloadPumpDeadlockTest do
     end
   end
 
-  defp cleanup_workers(piece_pid, peer_pid \\ nil) do
+  defp cleanup_workers(piece_pid, peer_pid) do
     try do
       if Process.alive?(piece_pid), do: GenServer.stop(piece_pid, :normal, 1_000)
     catch

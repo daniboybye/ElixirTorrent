@@ -1,7 +1,7 @@
 defmodule DHTRoutingTableTest do
   use ExUnit.Case, async: true
 
-  alias DHT.{Compact, RoutingTable}
+  alias DHT.RoutingTable
 
   @local_id <<0::160>>
   @now 1_000_000
@@ -11,7 +11,7 @@ defmodule DHTRoutingTableTest do
     %{id: id, ip: ip, port: port}
   end
 
-  defp entry(id_int, opts \\ []) do
+  defp entry(id_int, opts) do
     status = Keyword.get(opts, :status, :good)
     last_seen = Keyword.get(opts, :last_seen_ms, @now)
 

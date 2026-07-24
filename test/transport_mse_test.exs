@@ -48,7 +48,6 @@ defmodule Peer.TransportMSETest do
       end
 
     a = Transport.wrap(client, a_ciphers)
-    b = Transport.wrap(server, b_ciphers)
 
     # Ciphertext on the wire is not the plaintext.
     msg = "a peer wire message payload"

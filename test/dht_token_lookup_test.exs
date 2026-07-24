@@ -47,7 +47,7 @@ end
 defmodule DHTLookupTest do
   use ExUnit.Case, async: true
 
-  alias DHT.{Compact, Lookup, RoutingTable}
+  alias DHT.{Lookup, RoutingTable}
 
   @local <<0::160>>
   @target <<100::160>>

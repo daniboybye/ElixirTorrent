@@ -16,6 +16,7 @@ defmodule PeerStartProtocolTest do
     peer_via = {:via, Registry, {Registry, {key, Peer}}}
     controller_via = {:via, Registry, {Registry, {key, Peer.Controller}}}
 
-    assert peer_via != controller_via
+    assert peer_via == {:via, Registry, {Registry, {key, Peer}}}
+    assert controller_via == {:via, Registry, {Registry, {key, Peer.Controller}}}
   end
 end

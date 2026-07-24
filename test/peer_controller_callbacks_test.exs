@@ -201,7 +201,7 @@ defmodule PeerControllerCallbacksTest do
     fun.(torrent)
   end
 
-  defp start_controller(hash, id \\ <<4::160>>) do
+  defp start_controller(hash, id) do
     key = Peer.make_key(hash, id)
 
     pid =

@@ -65,7 +65,7 @@ defmodule PeerRequestPipelineTest do
 
       with_model(torrent, fn _ ->
         {:ok, piece_pid} = start_piece_worker(hash, 0)
-        _peer_pid = ensure_peer_registered(hash, @peer_a)
+        peer_pid = ensure_peer_registered(hash, @peer_a)
         Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
 
         on_exit(fn -> stop_piece(piece_pid) end)
@@ -84,7 +84,7 @@ defmodule PeerRequestPipelineTest do
 
         assert after_unchoke.pending_requests == 0
         assert MapSet.size(after_unchoke.requests) == 0
-        cleanup_workers(piece_pid, _peer_pid)
+        cleanup_workers(piece_pid, peer_pid)
       end)
     end
 
@@ -94,7 +94,7 @@ defmodule PeerRequestPipelineTest do
 
       with_model(torrent, fn _ ->
         {:ok, piece_pid} = start_piece_worker(hash, 0)
-        _peer_pid = ensure_peer_registered(hash, @peer_a)
+        peer_pid = ensure_peer_registered(hash, @peer_a)
         Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
         on_exit(fn -> stop_piece(piece_pid) end)
 
@@ -117,7 +117,7 @@ defmodule PeerRequestPipelineTest do
         assert after_request.pending_requests == 0
         assert MapSet.size(after_request.requests) == 1
         flush_request_casts()
-        cleanup_workers(piece_pid, _peer_pid)
+        cleanup_workers(piece_pid, peer_pid)
       end)
     end
 
@@ -127,7 +127,7 @@ defmodule PeerRequestPipelineTest do
 
       with_model(torrent, fn _ ->
         {:ok, piece_pid} = start_piece_worker(hash, 1)
-        _peer_pid = ensure_peer_registered(hash, @peer_a)
+        peer_pid = ensure_peer_registered(hash, @peer_a)
         Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
         on_exit(fn -> stop_piece(piece_pid) end)
 
@@ -146,7 +146,7 @@ defmodule PeerRequestPipelineTest do
         assert after_unchoke.pending_requests == 0
         assert MapSet.size(after_unchoke.requests) == 0
         assert after_unchoke.status == 1
-        cleanup_workers(piece_pid, _peer_pid)
+        cleanup_workers(piece_pid, peer_pid)
       end)
     end
 
@@ -158,7 +158,7 @@ defmodule PeerRequestPipelineTest do
 
       with_model(torrent, fn _ ->
         {:ok, piece_pid} = start_piece_worker(hash, 0)
-        _peer_pid = ensure_peer_registered(hash, @peer_a)
+        peer_pid = ensure_peer_registered(hash, @peer_a)
         Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
         on_exit(fn -> stop_piece(piece_pid) end)
 
@@ -174,7 +174,7 @@ defmodule PeerRequestPipelineTest do
         assert after_unchoke.pending_requests == reqq
         assert MapSet.size(after_unchoke.requests) == 0
         flush_request_casts()
-        cleanup_workers(piece_pid, _peer_pid)
+        cleanup_workers(piece_pid, peer_pid)
       end)
     end
 
@@ -204,7 +204,7 @@ defmodule PeerRequestPipelineTest do
 
       with_model(torrent, fn _ ->
         {:ok, piece_pid} = start_piece_worker(hash, 0)
-        _peer_pid = ensure_peer_registered(hash, @peer_a)
+        peer_pid = ensure_peer_registered(hash, @peer_a)
         Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
         on_exit(fn -> stop_piece(piece_pid) end)
 
@@ -240,7 +240,7 @@ defmodule PeerRequestPipelineTest do
         after_unchoke = PeerState.handle_unchoke(state)
         assert after_unchoke.pending_requests == 0
         assert MapSet.size(after_unchoke.requests) == 0
-        cleanup_workers(piece_pid, _peer_pid)
+        cleanup_workers(piece_pid, peer_pid)
       end)
     end
 
@@ -251,7 +251,7 @@ defmodule PeerRequestPipelineTest do
 
       with_model(torrent, fn _ ->
         {:ok, piece_pid} = start_piece_worker(hash, 1)
-        _peer_pid = ensure_peer_registered(hash, @peer_a)
+        peer_pid = ensure_peer_registered(hash, @peer_a)
         Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
         on_exit(fn -> stop_piece(piece_pid) end)
 
@@ -274,7 +274,7 @@ defmodule PeerRequestPipelineTest do
 
         assert after_many.pending_requests == 0
         assert MapSet.size(after_many.requests) == 0
-        cleanup_workers(piece_pid, _peer_pid)
+        cleanup_workers(piece_pid, peer_pid)
       end)
     end
   end
@@ -477,7 +477,7 @@ defmodule PeerRequestPipelineTest do
     end
   end
 
-  defp cleanup_workers(piece_pid, peer_pid \\ nil) do
+  defp cleanup_workers(piece_pid, peer_pid) do
     stop_piece(piece_pid)
     if peer_pid, do: stop_piece(peer_pid)
   end

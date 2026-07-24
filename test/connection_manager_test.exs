@@ -433,7 +433,6 @@ defmodule Peer.ConnectionManagerTest do
   end
 
   describe "snub eviction below swarm cap" do
-    @low_connected_threshold 12
     @snub_evict_batch 2
     @snub_grace_ms 60_000
     @idle_unchoked_snub_ms 30_000
