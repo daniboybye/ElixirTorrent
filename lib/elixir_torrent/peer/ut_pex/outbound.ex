@@ -9,9 +9,9 @@ defmodule Peer.UtPex.Outbound do
   """
   @spec prepare_current(
           Torrent.hash(),
-          %{Entry.endpoint() => Entry.t()},
+          %{Peer.UtPex.endpoint() => Entry.t()},
           keyword()
-        ) :: {%{Entry.endpoint() => Entry.t()}, [Entry.endpoint()]}
+        ) :: {%{Peer.UtPex.endpoint() => Entry.t()}, [Peer.UtPex.endpoint()]}
   def prepare_current(hash, live_current, opts \\ []) when is_map(live_current) do
     self_ep = Keyword.get(opts, :self_ep)
     clients = client_refs(Keyword.get(opts, :state))
@@ -52,7 +52,7 @@ defmodule Peer.UtPex.Outbound do
   end
 
   @doc false
-  @spec order_endpoints([Entry.endpoint()], clients()) :: [Entry.endpoint()]
+  @spec order_endpoints([Peer.UtPex.endpoint()], clients()) :: [Peer.UtPex.endpoint()]
   def order_endpoints(endpoints, clients) do
     v4 = Enum.filter(endpoints, &(tuple_size(elem(&1, 0)) == 4))
     v6 = Enum.filter(endpoints, &(tuple_size(elem(&1, 0)) == 8))
@@ -71,8 +71,10 @@ defmodule Peer.UtPex.Outbound do
 
   defp order_family(entries, _client), do: Enum.sort_by(entries, &Entry.endpoint/1)
 
-  @spec order_endpoint_family([Entry.endpoint()], Peer.UtPex.BEP40.client() | nil) ::
-          [Entry.endpoint()]
+  @spec order_endpoint_family(
+          [Peer.UtPex.endpoint()],
+          Peer.UtPex.BEP40.client() | nil
+        ) :: [Peer.UtPex.endpoint()]
   defp order_endpoint_family(endpoints, client) when is_tuple(client),
     do: BEP40.sort_peers(client, endpoints)
 
