@@ -646,7 +646,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
         target = %Peer{ip: {8, 8, 4, 4}, port: 7777}
         assert :ok = Peer.Holepunch.maybe_request(hash, target, :timeout)
-        assert_receive {:sent, {:socket_send_raw, wire}}, @timeout
+        assert_receive {:sent, ^relay_key, {:socket_send_raw, wire}}, @timeout
         <<_len::32, 20, _ext, payload::binary>> = wire
 
         assert {:ok, %{type: :rendezvous, ip: {8, 8, 4, 4}, port: 7777}} =
@@ -654,13 +654,112 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
       end)
     end
 
-    test "clear_pending removes dedup table entry" do
+    test "relay selection prefers a peer whose PEX state contains the target" do
       hash = :crypto.strong_rand_bytes(20)
-      ip = {9, 9, 9, 9}
-      port = 1234
-      assert :ok = Peer.Holepunch.clear_pending(hash, ip, port)
-      assert :ok = Peer.Holepunch.initiate_connect(hash, {ip, port})
-      Process.sleep(50)
+      prev = NAT.Stun.mapping()
+      NAT.Stun.put_mapping(:endpoint_independent)
+      on_exit(fn -> NAT.Stun.put_mapping(prev) end)
+
+      target = %Peer{ip: {8, 8, 8, 8}, port: 6881}
+      on_exit(fn -> Peer.Holepunch.clear_pending(hash, target.ip, target.port) end)
+
+      with_swarm(hash, fn _hash ->
+        key_a = start_relay_peer(hash, <<10::160>>)
+        key_b = start_relay_peer(hash, <<11::160>>)
+        assert_receive {:relay_ready, ^key_a}, @timeout
+        assert_receive {:relay_ready, ^key_b}, @timeout
+        {:ok, _} = SentCollector.start_link(key_a, self())
+        {:ok, _} = SentCollector.start_link(key_b, self())
+
+        ordered_keys =
+          hash
+          |> Torrent.Swarm.peer_supervisors()
+          |> Enum.map(&Peer.get_key/1)
+          |> Enum.filter(&(&1 in [key_a, key_b]))
+
+        [fallback_key, preferred_key] = ordered_keys
+        remember_pex_target(preferred_key, {target.ip, target.port})
+
+        assert :ok = Peer.Holepunch.maybe_request(hash, target, :timeout)
+        assert_receive {:sent, ^preferred_key, {:socket_send_raw, _wire}}, @timeout
+        refute_received {:sent, ^fallback_key, {:socket_send_raw, _wire}}
+      end)
+    end
+
+    test "relay error preserves cooldown ladder and the four-attempt session cap" do
+      hash = :crypto.strong_rand_bytes(20)
+      prev = NAT.Stun.mapping()
+      NAT.Stun.put_mapping(:endpoint_independent)
+      on_exit(fn -> NAT.Stun.put_mapping(prev) end)
+
+      target = %Peer{ip: {9, 9, 9, 9}, port: 4321}
+      on_exit(fn -> Peer.Holepunch.clear_pending(hash, target.ip, target.port) end)
+
+      with_swarm(hash, fn _hash ->
+        relay_key = start_relay_peer(hash)
+        assert_receive {:relay_ready, ^relay_key}, @timeout
+        {:ok, _} = SentCollector.start_link(relay_key, self())
+
+        assert :ok = Peer.Holepunch.maybe_request(hash, target, :timeout)
+        assert_receive {:sent, ^relay_key, {:socket_send_raw, _wire}}, @timeout
+
+        error =
+          UtHolepunch.encode(:error, target.ip, target.port,
+            err_code: UtHolepunch.err_not_connected()
+          )
+
+        assert %Peer.Controller.State{} =
+                 UtHolepunch.handle_inbound(holepunch_state(hash), error)
+
+        assert %{count: 1, cooldown_seconds: 30, retry_in_seconds: retry_in} =
+                 Peer.Holepunch.attempt_info(hash, target.ip, target.port)
+
+        assert retry_in > 0
+        assert :ok = Peer.Holepunch.maybe_request(hash, target, :timeout)
+        refute_receive {:sent, ^relay_key, {:socket_send_raw, _wire}}, 50
+
+        for {expected_count, expected_cooldown} <- [{2, 120}, {3, 480}, {4, 1920}] do
+          backdate_holepunch_attempt(hash, target.ip, target.port, expected_cooldown)
+          assert :ok = Peer.Holepunch.maybe_request(hash, target, :timeout)
+          assert_receive {:sent, ^relay_key, {:socket_send_raw, _wire}}, @timeout
+
+          assert %{count: ^expected_count, cooldown_seconds: ^expected_cooldown} =
+                   Peer.Holepunch.attempt_info(hash, target.ip, target.port)
+        end
+
+        backdate_holepunch_attempt(hash, target.ip, target.port, 10_000)
+        assert :ok = Peer.Holepunch.maybe_request(hash, target, :timeout)
+        refute_receive {:sent, ^relay_key, {:socket_send_raw, _wire}}, 50
+      end)
+    end
+
+    test "parallel rendezvous requests atomically consume one attempt" do
+      hash = :crypto.strong_rand_bytes(20)
+      prev = NAT.Stun.mapping()
+      NAT.Stun.put_mapping(:endpoint_independent)
+      on_exit(fn -> NAT.Stun.put_mapping(prev) end)
+
+      target = %Peer{ip: {9, 9, 9, 10}, port: 6881}
+      on_exit(fn -> Peer.Holepunch.clear_pending(hash, target.ip, target.port) end)
+
+      with_swarm(hash, fn _hash ->
+        relay_key = start_relay_peer(hash)
+        assert_receive {:relay_ready, ^relay_key}, @timeout
+        {:ok, _} = SentCollector.start_link(relay_key, self())
+
+        1..10
+        |> Task.async_stream(
+          fn _ -> Peer.Holepunch.maybe_request(hash, target, :timeout) end,
+          ordered: false,
+          timeout: @timeout
+        )
+        |> Enum.each(fn result -> assert {:ok, :ok} = result end)
+
+        assert drain_sent_wires() == 1
+
+        assert %{count: 1, cooldown_seconds: 30} =
+                 Peer.Holepunch.attempt_info(hash, target.ip, target.port)
+      end)
     end
   end
 
@@ -675,15 +774,72 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
       assert %Peer.Controller.State{} = UtHolepunch.handle_inbound(state, payload)
     end
 
-    test "error message clears pending attempt" do
+    test "a current outbound cooldown does not suppress the relayed uTP connect" do
       hash = :crypto.strong_rand_bytes(20)
-      ip = {10, 0, 0, 1}
-      port = 4321
-      payload = UtHolepunch.encode(:error, ip, port, err_code: UtHolepunch.err_not_connected())
-      state = holepunch_state(hash)
+      ip = {8, 8, 4, 6}
+      port = 19_000 + rem(System.unique_integer([:positive]), 500)
+      key = {hash, ip, port}
+      stub = spawn(fn -> Process.sleep(:infinity) end)
+      :ok = Peer.Endpoints.register(hash, ip, port, stub)
 
-      assert %Peer.Controller.State{} = UtHolepunch.handle_inbound(state, payload)
-      assert :ok = Peer.Holepunch.clear_pending(hash, ip, port)
+      :ets.insert(
+        :elixir_torrent_holepunch_pending,
+        {key, System.monotonic_time(:second), 1}
+      )
+
+      on_exit(fn ->
+        Process.exit(stub, :kill)
+        Peer.Holepunch.clear_pending(hash, ip, port)
+      end)
+
+      assert {:ok, task} = Peer.Holepunch.initiate_connect(hash, {ip, port})
+      ref = Process.monitor(task)
+      assert_receive {:DOWN, ^ref, :process, ^task, reason}, @timeout
+      assert reason in [:normal, :noproc]
+      assert %{count: 1} = Peer.Holepunch.attempt_info(hash, ip, port)
+    end
+
+    test "connect message for an already-connected target is silently ignored" do
+      hash = :crypto.strong_rand_bytes(20)
+      ip = {8, 8, 4, 5}
+      port = 18_500 + rem(System.unique_integer([:positive]), 500)
+      stub = spawn(fn -> Process.sleep(:infinity) end)
+      :ok = Peer.Endpoints.register(hash, ip, port, stub)
+      on_exit(fn -> Process.exit(stub, :kill) end)
+
+      state = holepunch_state(hash)
+      payload = UtHolepunch.encode(:connect, ip, port)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert %Peer.Controller.State{} = UtHolepunch.handle_inbound(state, payload)
+        end)
+
+      refute log =~ "[holepunch] connect_recv"
+      refute log =~ "[holepunch] punch_"
+    end
+
+    test "messages from a peer that did not advertise ut_holepunch are silently ignored" do
+      hash = :crypto.strong_rand_bytes(20)
+      key = Peer.make_key(hash, <<12::160>>)
+      {:ok, _} = SentCollector.start_link(key, self())
+
+      state = %Peer.Controller.State{
+        hash: hash,
+        id: elem(key, 0),
+        fast_extension: nil,
+        status: nil,
+        pieces_count: 1,
+        socket: nil,
+        ltep: ltep_without_holepunch_support()
+      }
+
+      rendezvous = UtHolepunch.encode(:rendezvous, {11, 0, 0, 1}, 6881)
+      connect = UtHolepunch.encode(:connect, {11, 0, 0, 2}, 6882)
+
+      assert ^state = UtHolepunch.handle_inbound(state, rendezvous)
+      assert ^state = UtHolepunch.handle_inbound(state, connect)
+      refute_receive {:sent, ^key, {:socket_send_raw, _wire}}, 50
     end
 
     test "rendezvous to self returns NoSelf error wire to initiator" do
@@ -713,7 +869,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
       payload = UtHolepunch.encode(:rendezvous, initiator_ip, port)
       assert %Peer.Controller.State{} = UtHolepunch.handle_inbound(state, payload)
-      assert_receive {:sent, {:socket_send_raw, wire}}, @timeout
+      assert_receive {:sent, ^key, {:socket_send_raw, wire}}, @timeout
 
       assert {:ok, %{type: :error, err_code: 4}} =
                UtHolepunch.decode(extract_extended_payload(wire))
@@ -744,7 +900,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
       target_ip = {11, 0, 0, 50}
       payload = UtHolepunch.encode(:rendezvous, target_ip, 6000)
       assert %Peer.Controller.State{} = UtHolepunch.handle_inbound(state, payload)
-      assert_receive {:sent, {:socket_send_raw, wire}}, @timeout
+      assert_receive {:sent, ^key, {:socket_send_raw, wire}}, @timeout
 
       assert {:ok, %{type: :error, err_code: 2}} =
                UtHolepunch.decode(extract_extended_payload(wire))
@@ -766,7 +922,8 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
         ltep: ltep_with_holepunch()
       }
 
-      assert ^state = UtHolepunch.handle_inbound(state, <<0, 0, 1>>)
+      assert %Peer.Controller.State{holepunch: %{rate: {_started_at, 1}}} =
+               UtHolepunch.handle_inbound(state, <<0, 0, 1>>)
     end
 
     test "rendezvous relays connect to initiator and registered target" do
@@ -802,16 +959,102 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
         payload = UtHolepunch.encode(:rendezvous, target_ip, target_port)
         assert %Peer.Controller.State{} = UtHolepunch.handle_inbound(state, payload)
 
-        wires =
-          collect_sent_wires(2)
+        assert {:ok, initiator_endpoint} = Peer.Transport.safe_peername(socket)
 
-        for wire <- wires do
-          assert {:ok, %{type: :connect}} = UtHolepunch.decode(extract_extended_payload(wire))
-        end
+        messages =
+          collect_sent_wires(2)
+          |> Map.new()
+
+        assert {:ok, %{type: :connect, ip: ^target_ip, port: ^target_port}} =
+                 messages
+                 |> Map.fetch!(relay_key)
+                 |> extract_extended_payload()
+                 |> UtHolepunch.decode()
+
+        {initiator_ip, initiator_port} = initiator_endpoint
+
+        assert {:ok, %{type: :connect, ip: ^initiator_ip, port: ^initiator_port}} =
+                 messages
+                 |> Map.fetch!(target_key)
+                 |> extract_extended_payload()
+                 |> UtHolepunch.decode()
 
         :gen_tcp.close(socket)
         :gen_tcp.close(listen)
       end)
+    end
+
+    test "IPv6 rendezvous relays the opposite endpoint to each peer" do
+      hash = :crypto.strong_rand_bytes(20)
+      target_ip = {0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888}
+      target_port = 7881
+      relay_id = <<13::160>>
+      relay_key = Peer.make_key(hash, relay_id)
+      target_id = <<14::160>>
+      target_key = Peer.make_key(hash, target_id)
+      loopback6 = {0, 0, 0, 0, 0, 0, 0, 1}
+
+      with_swarm(hash, fn _hash ->
+        assert {:ok, _} = start_target_peer(hash, target_id, target_ip, target_port)
+        {:ok, _} = SentCollector.start_link(relay_key, self())
+        {:ok, _} = SentCollector.start_link(target_key, self())
+
+        {:ok, listen} =
+          :gen_tcp.listen(0, [:inet6, :binary, active: false, reuseaddr: true, ip: loopback6])
+
+        {:ok, port} = :inet.port(listen)
+
+        {:ok, socket} =
+          :gen_tcp.connect(loopback6, port, [:inet6, :binary, active: false], @timeout)
+
+        state = %Peer.Controller.State{
+          hash: hash,
+          id: relay_id,
+          fast_extension: nil,
+          status: nil,
+          pieces_count: 1,
+          socket: socket,
+          ltep: ltep_with_holepunch()
+        }
+
+        payload = UtHolepunch.encode(:rendezvous, target_ip, target_port)
+        assert %Peer.Controller.State{} = UtHolepunch.handle_inbound(state, payload)
+        messages = collect_sent_wires(2) |> Map.new()
+
+        assert {:ok, %{type: :connect, ip: ^target_ip, port: ^target_port}} =
+                 messages
+                 |> Map.fetch!(relay_key)
+                 |> extract_extended_payload()
+                 |> UtHolepunch.decode()
+
+        assert {:ok, {initiator_ip, initiator_port}} = Peer.Transport.safe_peername(socket)
+
+        assert {:ok, %{type: :connect, ip: ^initiator_ip, port: ^initiator_port}} =
+                 messages
+                 |> Map.fetch!(target_key)
+                 |> extract_extended_payload()
+                 |> UtHolepunch.decode()
+
+        :gen_tcp.close(socket)
+        :gen_tcp.close(listen)
+      end)
+    end
+
+    test "inbound holepunch flood is limited per peer" do
+      hash = :crypto.strong_rand_bytes(20)
+      state = holepunch_state(hash)
+      key = Peer.Controller.State.key(state)
+      {:ok, _} = SentCollector.start_link(key, self())
+      payload = UtHolepunch.encode(:rendezvous, {11, 0, 0, 60}, 6881)
+      limit = UtHolepunch.inbound_rate_limit()
+
+      state =
+        Enum.reduce(1..(limit + 5), state, fn _, acc ->
+          UtHolepunch.handle_inbound(acc, payload)
+        end)
+
+      assert %{rate: {_started_at, ^limit}} = state.holepunch
+      assert drain_sent_wires() == limit
     end
 
     test "rendezvous when target lacks ut_holepunch returns no_support error" do
@@ -845,7 +1088,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
         payload = UtHolepunch.encode(:rendezvous, target_ip, target_port)
         assert %Peer.Controller.State{} = UtHolepunch.handle_inbound(state, payload)
-        assert_receive {:sent, {:socket_send_raw, wire}}, @timeout
+        assert_receive {:sent, ^relay_key, {:socket_send_raw, wire}}, @timeout
 
         assert {:ok, %{type: :error, err_code: 3}} =
                  UtHolepunch.decode(extract_extended_payload(wire))
@@ -887,7 +1130,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
         payload = UtHolepunch.encode(:rendezvous, target_ip, target_port)
         assert %Peer.Controller.State{} = UtHolepunch.handle_inbound(state, payload)
-        assert_receive {:sent, {:socket_send_raw, wire}}, @timeout
+        assert_receive {:sent, ^relay_key, {:socket_send_raw, wire}}, @timeout
 
         assert {:ok, %{type: :error, err_code: 1}} =
                  UtHolepunch.decode(extract_extended_payload(wire))
@@ -1028,8 +1271,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
     end
   end
 
-  defp start_relay_peer(hash) do
-    id = <<10::160>>
+  defp start_relay_peer(hash, id \\ <<10::160>>) do
     key = Peer.make_key(hash, id)
 
     spec = %{
@@ -1067,12 +1309,58 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
       Enum.reverse(acc)
     else
       receive do
-        {:sent, {:socket_send_raw, wire}} ->
-          collect_sent_wires(count, [wire | acc])
+        {:sent, key, {:socket_send_raw, wire}} ->
+          collect_sent_wires(count, [{key, wire} | acc])
       after
         @timeout -> flunk("expected #{count} sent wires, got #{length(acc)}")
       end
     end
+  end
+
+  defp drain_sent_wires(count \\ 0) do
+    receive do
+      {:sent, _key, {:socket_send_raw, _wire}} -> drain_sent_wires(count + 1)
+    after
+      0 -> count
+    end
+  end
+
+  defp remember_pex_target(key, endpoint) do
+    payload = Peer.UtPex.encode([endpoint], [])
+    Peer.Controller.handle_extended(key, Peer.UtPex.Extension.local_id(), payload)
+    wait_for_relay_pex_target(key, endpoint)
+  end
+
+  defp wait_for_relay_pex_target(key, endpoint, attempts \\ 50)
+
+  defp wait_for_relay_pex_target(key, endpoint, attempts) when attempts > 0 do
+    case Peer.Controller.holepunch_relay_info(key) do
+      {:ok, _ltep, endpoints} ->
+        if MapSet.member?(endpoints, endpoint) do
+          :ok
+        else
+          Process.sleep(10)
+          wait_for_relay_pex_target(key, endpoint, attempts - 1)
+        end
+
+      :error ->
+        Process.sleep(10)
+        wait_for_relay_pex_target(key, endpoint, attempts - 1)
+    end
+  end
+
+  defp wait_for_relay_pex_target(_key, endpoint, 0) do
+    flunk("relay PEX state did not include #{inspect(endpoint)}")
+  end
+
+  defp backdate_holepunch_attempt(hash, ip, port, seconds) do
+    key = {hash, ip, port}
+    [{^key, _timestamp, count}] = :ets.lookup(:elixir_torrent_holepunch_pending, key)
+
+    :ets.insert(
+      :elixir_torrent_holepunch_pending,
+      {key, System.monotonic_time(:second) - seconds, count}
+    )
   end
 
   defp ltep_with_holepunch do
@@ -1081,6 +1369,11 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
       m: %{"ut_holepunch" => 3},
       metadata_size: nil
     })
+  end
+
+  defp ltep_without_holepunch_support do
+    LTEP.Session.new([Peer.UtHolepunch.Extension])
+    |> LTEP.Session.apply_peer_handshake(%Peer.LTEP.Handshake{m: %{}})
   end
 
   defp holepunch_state(hash) do
@@ -1222,13 +1515,13 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.SentCollector do
 
   @impl true
   def handle_cast(msg, {key, test_pid}) do
-    send(test_pid, {:sent, msg})
+    send(test_pid, {:sent, key, msg})
     {:noreply, {key, test_pid}}
   end
 
   @impl true
   def handle_call({:socket_send_raw, data}, _from, {key, test_pid}) do
-    send(test_pid, {:sent, {:socket_send_raw, data}})
+    send(test_pid, {:sent, key, {:socket_send_raw, data}})
     {:reply, :ok, {key, test_pid}}
   end
 
@@ -1259,8 +1552,10 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.RelayPeer do
       )
 
     ltep =
-      Peer.LTEP.Session.new([Peer.UtHolepunch.Extension])
-      |> Peer.LTEP.Session.apply_peer_handshake(%Peer.LTEP.Handshake{m: %{"ut_holepunch" => 3}})
+      Peer.LTEP.Session.new([Peer.UtHolepunch.Extension, Peer.UtPex.Extension])
+      |> Peer.LTEP.Session.apply_peer_handshake(%Peer.LTEP.Handshake{
+        m: %{"ut_holepunch" => 3, "ut_pex" => 2}
+      })
 
     :sys.replace_state({:via, Registry, {Registry, {key, Peer.Controller}}}, fn state ->
       %{state | ltep: ltep}

@@ -46,32 +46,30 @@ defmodule Peer.Holepunch do
   end
 
   @doc false
-  @spec initiate_connect(Torrent.hash(), {:inet.ip_address(), :inet.port_number()}) :: :ok
+  @spec initiate_connect(Torrent.hash(), {:inet.ip_address(), :inet.port_number()}) ::
+          {:ok, pid()} | {:error, term()}
   def initiate_connect(hash, {ip, port}) do
-    if should_attempt?(hash, ip, port) do
-      mark_attempted(hash, ip, port)
+    peer = %Peer{ip: ip, port: port}
 
-      peer = %Peer{ip: ip, port: port}
+    # A connect is the successful response to an already-counted outbound
+    # rendezvous (or an inbound request relayed for another peer). Re-applying
+    # the rendezvous cooldown here would suppress the simultaneous uTP open.
+    Task.start(fn ->
+      case Acceptor.Connection.Handshakes.dial_utp_and_handshake(peer, hash) do
+        :ok ->
+          Logger.info(
+            "[holepunch] punch_ok hash=#{Torrent.hex_encoded_hash(hash)} endpoint=#{inspect({ip, port})}"
+          )
 
-      Task.start(fn ->
-        case Acceptor.Connection.Handshakes.dial_utp_and_handshake(peer, hash) do
-          :ok ->
-            Logger.info(
-              "[holepunch] punch_ok hash=#{Torrent.hex_encoded_hash(hash)} endpoint=#{inspect({ip, port})}"
-            )
-
-          {:error, reason} ->
-            # Diagnosis done: coordinated punches that fail are overwhelmingly
-            # :timeout (the simultaneous-open SYNs miss each other) — inherent to
-            # hole punching, not a client defect. Back to :debug; punch_ok stays :info.
-            Logger.debug(
-              "[holepunch] punch_fail hash=#{Torrent.hex_encoded_hash(hash)} endpoint=#{inspect({ip, port})} reason=#{inspect(reason)}"
-            )
-        end
-      end)
-    end
-
-    :ok
+        {:error, reason} ->
+          # Diagnosis done: coordinated punches that fail are overwhelmingly
+          # :timeout (the simultaneous-open SYNs miss each other) — inherent to
+          # hole punching, not a client defect. Back to :debug; punch_ok stays :info.
+          Logger.debug(
+            "[holepunch] punch_fail hash=#{Torrent.hex_encoded_hash(hash)} endpoint=#{inspect({ip, port})} reason=#{inspect(reason)}"
+          )
+      end
+    end)
   end
 
   @doc false
@@ -82,6 +80,34 @@ defmodule Peer.Holepunch do
     :ok
   end
 
+  @doc false
+  @spec attempt_info(Torrent.hash(), :inet.ip_address(), :inet.port_number()) ::
+          %{
+            count: pos_integer(),
+            cooldown_seconds: pos_integer(),
+            retry_in_seconds: non_neg_integer()
+          }
+          | nil
+  def attempt_info(hash, ip, port) do
+    ensure_table()
+    key = dedup_key(hash, ip, port)
+    now = System.monotonic_time(:second)
+
+    case :ets.lookup(@table, key) do
+      [{^key, ts, count}] ->
+        cooldown = cooldown_seconds(count)
+
+        %{
+          count: count,
+          cooldown_seconds: cooldown,
+          retry_in_seconds: max(cooldown - (now - ts), 0)
+        }
+
+      _ ->
+        nil
+    end
+  end
+
   @spec send_rendezvous(Torrent.hash(), Peer.key(), :inet.ip_address(), :inet.port_number()) ::
           :ok
   defp send_rendezvous(hash, relay_key, target_ip, target_port) do
@@ -89,9 +115,8 @@ defmodule Peer.Holepunch do
          true <- Session.peer_supports?(ltep, UtHolepunch.extension_name()),
          payload when is_binary(payload) <- encode_rendezvous(target_ip, target_port),
          id when is_integer(id) and id > 0 <-
-           Session.peer_extension_id(ltep, UtHolepunch.extension_name()) do
-      mark_attempted(hash, target_ip, target_port)
-
+           Session.peer_extension_id(ltep, UtHolepunch.extension_name()),
+         true <- reserve_attempt(hash, target_ip, target_port) do
       case Peer.LTEP.send_extended(relay_key, id, payload) do
         :ok ->
           # High-volume, low-yield outbound attempt: under CGNAT most targets
@@ -118,24 +143,25 @@ defmodule Peer.Holepunch do
   defp pick_relay(hash, target_ip, target_port) do
     target_pid = Peer.Endpoints.get_pid(hash, target_ip, target_port)
 
-    hash
-    |> Torrent.Swarm.peer_supervisors()
-    |> Enum.reject(&(target_pid != nil and &1 == target_pid))
-    |> Enum.find_value(fn pid ->
-      case Peer.get_key(pid) do
-        key when is_tuple(key) ->
-          case Peer.Controller.ltep_session(key) do
-            {:ok, ltep} ->
-              if Session.peer_supports?(ltep, UtHolepunch.extension_name()), do: key
+    candidates =
+      hash
+      |> Torrent.Swarm.peer_supervisors()
+      |> Enum.reject(&(target_pid != nil and &1 == target_pid))
+      |> Enum.flat_map(fn pid ->
+        with key when is_tuple(key) <- Peer.get_key(pid),
+             {:ok, ltep, pex_endpoints} <- Peer.Controller.holepunch_relay_info(key),
+             true <- Session.peer_supports?(ltep, UtHolepunch.extension_name()) do
+          [{key, MapSet.member?(pex_endpoints, {target_ip, target_port})}]
+        else
+          _ -> []
+        end
+      end)
 
-            _ ->
-              nil
-          end
-
-        _ ->
-          nil
-      end
-    end)
+    case Enum.find(candidates, fn {_key, knows_target?} -> knows_target? end) ||
+           List.first(candidates) do
+      {key, _knows_target?} -> key
+      nil -> nil
+    end
   end
 
   # Punching is only worth trying right after a target is discovered: repeated
@@ -156,19 +182,48 @@ defmodule Peer.Holepunch do
   @spec cooldown_seconds(pos_integer()) :: pos_integer()
   defp cooldown_seconds(count), do: @dedup_seconds * Integer.pow(4, max(count - 1, 0))
 
-  @spec mark_attempted(Torrent.hash(), :inet.ip_address(), :inet.port_number()) :: :ok
-  defp mark_attempted(hash, ip, port) do
+  @spec reserve_attempt(Torrent.hash(), :inet.ip_address(), :inet.port_number()) :: boolean()
+  defp reserve_attempt(hash, ip, port) do
     ensure_table()
     key = dedup_key(hash, ip, port)
+    now = System.monotonic_time(:second)
 
-    count =
-      case :ets.lookup(@table, key) do
-        [{^key, _ts, c}] -> c + 1
-        _ -> 1
-      end
+    case :ets.lookup(@table, key) do
+      [] ->
+        if :ets.insert_new(@table, {key, now, 1}) do
+          true
+        else
+          reserve_attempt(hash, ip, port)
+        end
 
-    :ets.insert(@table, {key, System.monotonic_time(:second), count})
-    :ok
+      [{^key, ts, count}] ->
+        cond do
+          count >= @max_attempts ->
+            false
+
+          now - ts < cooldown_seconds(count) ->
+            false
+
+          replace_attempt(key, ts, count, now) ->
+            true
+
+          true ->
+            reserve_attempt(hash, ip, port)
+        end
+    end
+  end
+
+  @spec replace_attempt(term(), integer(), pos_integer(), integer()) :: boolean()
+  defp replace_attempt(key, old_timestamp, old_count, new_timestamp) do
+    match_spec = [
+      {
+        {:"$1", old_timestamp, old_count},
+        [{:"=:=", :"$1", {:const, key}}],
+        [{{:"$1", new_timestamp, old_count + 1}}]
+      }
+    ]
+
+    :ets.select_replace(@table, match_spec) == 1
   end
 
   @spec dedup_key(Torrent.hash(), :inet.ip_address(), :inet.port_number()) ::

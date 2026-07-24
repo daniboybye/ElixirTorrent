@@ -26,10 +26,10 @@ defmodule Peer.UtPex do
   BEP 11 seed-flagged peers (`added.f` bit `@flag_seed`) are offered for dial before
   non-seeds so we prefer seeders when peer slots are scarce (CGNAT outbound dials).
   """
-  @spec ingest(Torrent.hash(), binary()) :: :ok
+  @spec ingest(Torrent.hash(), binary()) :: {:ok, [Peer.t()], [Peer.t()]} | :error
   def ingest(hash, payload) when is_binary(payload) do
     case decode(payload) do
-      {:ok, added, _dropped} ->
+      {:ok, added, dropped} ->
         peers =
           added
           |> prioritize_seed_peers()
@@ -47,10 +47,10 @@ defmodule Peer.UtPex do
           Acceptor.handshakes(peers, hash)
         end
 
-        :ok
+        {:ok, added, dropped}
 
       :error ->
-        :ok
+        :error
     end
   end
 

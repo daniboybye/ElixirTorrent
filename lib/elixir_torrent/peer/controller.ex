@@ -146,6 +146,16 @@ defmodule Peer.Controller do
   end
 
   @doc false
+  @spec holepunch_relay_info(Peer.key()) ::
+          {:ok, Peer.LTEP.Session.t(), MapSet.t({:inet.ip_address(), :inet.port_number()})}
+          | :error
+  def holepunch_relay_info(key) do
+    GenServer.call(via(key), :holepunch_relay_info)
+  catch
+    :exit, _ -> :error
+  end
+
+  @doc false
   @spec metadata_capable(Peer.key()) :: {:ok, map()} | :error
   def metadata_capable(key) do
     GenServer.call(via(key), :metadata_capable)
@@ -470,6 +480,17 @@ defmodule Peer.Controller do
   end
 
   def handle_call(:ltep_session, _, state), do: {:reply, :error, state}
+
+  def handle_call(
+        :holepunch_relay_info,
+        _,
+        %State{ltep: ltep, holepunch: %{pex_endpoints: endpoints}} = state
+      )
+      when not is_nil(ltep) do
+    {:reply, {:ok, ltep, endpoints}, state}
+  end
+
+  def handle_call(:holepunch_relay_info, _, state), do: {:reply, :error, state}
 
   def handle_call(:metadata_capable, _, %State{ltep: ltep} = state) when not is_nil(ltep) do
     ut = Magnet.UtMetadata.extension_name()

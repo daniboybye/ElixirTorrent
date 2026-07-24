@@ -60,4 +60,39 @@ defmodule Peer.UtPexTest do
     assert [%Peer{seed: true}, %Peer{seed: true}, %Peer{seed: false}, %Peer{seed: nil}] =
              UtPex.prioritize_seed_peers(peers)
   end
+
+  test "controller state tracks each relay's current PEX endpoints" do
+    hash = :crypto.strong_rand_bytes(20)
+    endpoint = {{10, 0, 0, 50}, 6881}
+
+    ltep = Peer.LTEP.Session.new([Peer.UtPex.Extension])
+
+    state = %Peer.Controller.State{
+      hash: hash,
+      id: <<1::160>>,
+      fast_extension: nil,
+      status: nil,
+      pieces_count: 1,
+      socket: nil,
+      ltep: ltep
+    }
+
+    added_state =
+      Peer.Controller.State.handle_extended(
+        state,
+        Peer.UtPex.Extension.local_id(),
+        UtPex.encode([endpoint], [])
+      )
+
+    assert MapSet.member?(added_state.holepunch.pex_endpoints, endpoint)
+
+    dropped_state =
+      Peer.Controller.State.handle_extended(
+        added_state,
+        Peer.UtPex.Extension.local_id(),
+        UtPex.encode([], [endpoint])
+      )
+
+    refute MapSet.member?(dropped_state.holepunch.pex_endpoints, endpoint)
+  end
 end

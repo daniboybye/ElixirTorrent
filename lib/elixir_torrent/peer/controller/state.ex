@@ -18,6 +18,7 @@ defmodule Peer.Controller.State do
     :downloaded_at_connect,
     :ltep,
     peer_v2_support?: false,
+    holepunch: %{pex_endpoints: MapSet.new(), rate: nil},
     hash_requests: %{},
     requests: MapSet.new(),
     # Inbound block requests accepted for asynchronous disk reads but not yet
@@ -61,6 +62,7 @@ defmodule Peer.Controller.State do
 
   @typep bitfield :: Torrent.bitfield() | :all | :none | nil
   @typep subpiece :: {Torrent.index(), Torrent.begin(), Torrent.length()}
+  @typep endpoint :: {:inet.ip_address(), :inet.port_number()}
   @type rank :: {non_neg_integer(), Peer.id()} | nil
 
   @type t :: %__MODULE__{
@@ -72,6 +74,10 @@ defmodule Peer.Controller.State do
           socket: Peer.Transport.socket(),
           ltep: Peer.LTEP.Session.t() | nil,
           peer_v2_support?: boolean(),
+          holepunch: %{
+            pex_endpoints: MapSet.t(endpoint()),
+            rate: {integer(), non_neg_integer()} | nil
+          },
           hash_requests: %{Peer.HashTransfer.ref() => map()},
           requests: MapSet.t(subpiece()),
           upload_requests: MapSet.t(subpiece()),
@@ -280,8 +286,10 @@ defmodule Peer.Controller.State do
         respond_ut_metadata(state, payload)
 
       ut_pex?(state, extended_id) ->
-        :ok = Peer.UtPex.ingest(state.hash, payload)
-        state
+        case Peer.UtPex.ingest(state.hash, payload) do
+          {:ok, added, dropped} -> update_holepunch_pex(state, added, dropped)
+          :error -> state
+        end
 
       ut_holepunch?(state, extended_id) ->
         Peer.UtHolepunch.handle_inbound(state, payload)
@@ -306,6 +314,19 @@ defmodule Peer.Controller.State do
   defp ut_holepunch?(state, extended_id) do
     Peer.LTEP.Session.local_extension_id(state.ltep, Peer.UtHolepunch.extension_name()) ==
       extended_id
+  end
+
+  @spec update_holepunch_pex(t(), [Peer.t()], [Peer.t()]) :: t()
+  defp update_holepunch_pex(state, added, dropped) do
+    added_endpoints = MapSet.new(added, &{&1.ip, &1.port})
+    dropped_endpoints = MapSet.new(dropped, &{&1.ip, &1.port})
+
+    pex_endpoints =
+      state.holepunch.pex_endpoints
+      |> MapSet.union(added_endpoints)
+      |> MapSet.difference(dropped_endpoints)
+
+    put_in(state.holepunch.pex_endpoints, pex_endpoints)
   end
 
   @spec send_pex(t(), binary()) :: t()

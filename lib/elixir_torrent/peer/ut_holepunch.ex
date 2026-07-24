@@ -25,6 +25,9 @@ defmodule Peer.UtHolepunch do
   @err_no_support 3
   @err_no_self 4
 
+  @inbound_rate_limit 20
+  @inbound_rate_window_ms 10_000
+
   @doc false
   def err_none, do: @err_none
   @doc false
@@ -56,6 +59,10 @@ defmodule Peer.UtHolepunch do
   @doc false
   @spec extension_name() :: String.t()
   def extension_name, do: @extension_name
+
+  @doc false
+  @spec inbound_rate_limit() :: pos_integer()
+  def inbound_rate_limit, do: @inbound_rate_limit
 
   @doc """
   Encodes a BEP 55 holepunch message.
@@ -158,31 +165,73 @@ defmodule Peer.UtHolepunch do
   @doc false
   @spec handle_inbound(Peer.Controller.State.t(), binary()) :: Peer.Controller.State.t()
   def handle_inbound(state, payload) when is_binary(payload) do
+    if peer_supports_holepunch?(state) do
+      case take_inbound_rate_slot(state) do
+        {:ok, state} -> dispatch_inbound(state, payload)
+        {:limited, state} -> state
+      end
+    else
+      # BEP 55: a peer that did not advertise ut_holepunch in its LTEP
+      # handshake is not allowed to use our local extension id.
+      state
+    end
+  end
+
+  @spec dispatch_inbound(Peer.Controller.State.t(), binary()) :: Peer.Controller.State.t()
+  defp dispatch_inbound(state, payload) do
     case decode(payload) do
       {:ok, %{type: :rendezvous, ip: target_ip, port: target_port}} ->
         relay_rendezvous(state, target_ip, target_port)
 
       {:ok, %{type: :connect, ip: ip, port: port}} ->
-        Logger.info(
-          "[holepunch] connect_recv hash=#{Torrent.hex_encoded_hash(state.hash)} endpoint=#{inspect({ip, port})}"
-        )
+        if Peer.Endpoints.registered?(state.hash, ip, port) do
+          state
+        else
+          Logger.info(
+            "[holepunch] connect_recv hash=#{Torrent.hex_encoded_hash(state.hash)} endpoint=#{inspect({ip, port})}"
+          )
 
-        :ok = Peer.Holepunch.initiate_connect(state.hash, {ip, port})
-        state
+          _task = Peer.Holepunch.initiate_connect(state.hash, {ip, port})
+          state
+        end
 
       {:ok, %{type: :error, ip: ip, port: port, err_code: err_code}} ->
         # BEP 55: relay replies with an error (e.g. ENOTCONNECTED/target unknown)
-        # when it can't reach the target. This is the normal outcome for most
-        # rendezvous attempts, not a warning — just clear the pending attempt.
+        # when it can't reach the target. The outbound rendezvous already
+        # consumed an attempt, so preserve its cooldown and session cap.
         Logger.debug(
           "[holepunch] error_recv hash=#{Torrent.hex_encoded_hash(state.hash)} endpoint=#{inspect({ip, port})} code=#{err_code}"
         )
 
-        :ok = Peer.Holepunch.clear_pending(state.hash, ip, port)
         state
 
       :error ->
         state
+    end
+  end
+
+  @spec peer_supports_holepunch?(Peer.Controller.State.t()) :: boolean()
+  defp peer_supports_holepunch?(%Peer.Controller.State{ltep: %Session{} = ltep}) do
+    Session.peer_supports?(ltep, @extension_name)
+  end
+
+  defp peer_supports_holepunch?(_state), do: false
+
+  @spec take_inbound_rate_slot(Peer.Controller.State.t()) ::
+          {:ok, Peer.Controller.State.t()} | {:limited, Peer.Controller.State.t()}
+  defp take_inbound_rate_slot(state) do
+    now = System.monotonic_time(:millisecond)
+
+    case state.holepunch.rate do
+      {started_at, count}
+      when now - started_at < @inbound_rate_window_ms and count >= @inbound_rate_limit ->
+        {:limited, state}
+
+      {started_at, count} when now - started_at < @inbound_rate_window_ms ->
+        {:ok, put_in(state.holepunch.rate, {started_at, count + 1})}
+
+      _ ->
+        {:ok, put_in(state.holepunch.rate, {now, 1})}
     end
   end
 
@@ -231,10 +280,10 @@ defmodule Peer.UtHolepunch do
 
     with true <- Session.peer_supports?(state.ltep, @extension_name),
          {:ok, {init_ip, init_port}} <- peer_endpoint(state.socket),
-         connect_to_initiator when is_binary(connect_to_initiator) <-
-           encode_connect(init_ip, init_port),
-         connect_to_target when is_binary(connect_to_target) <-
-           encode_connect(target_ip, target_port) do
+         target_for_initiator when is_binary(target_for_initiator) <-
+           encode_connect(target_ip, target_port),
+         initiator_for_target when is_binary(initiator_for_target) <-
+           encode_connect(init_ip, init_port) do
       # BEP 55 relay sends connect hints to two peers; either may drop mid-relay
       # (Endpoints still registered briefly while Sender/uTP is shutting down).
       case relay_connect_sends(
@@ -243,10 +292,10 @@ defmodule Peer.UtHolepunch do
              {init_ip, init_port},
              initiator_key,
              state.ltep,
-             connect_to_initiator,
+             target_for_initiator,
              target_key,
              target_ltep,
-             connect_to_target
+             initiator_for_target
            ) do
         :ok ->
           Logger.info(
@@ -284,13 +333,13 @@ defmodule Peer.UtHolepunch do
          _initiator,
          initiator_key,
          initiator_ltep,
-         connect_to_initiator,
+         target_for_initiator,
          target_key,
          target_ltep,
-         connect_to_target
+         initiator_for_target
        ) do
-    with :ok <- send_to_peer(initiator_key, initiator_ltep, connect_to_initiator),
-         :ok <- send_to_peer(target_key, target_ltep, connect_to_target) do
+    with :ok <- send_to_peer(initiator_key, initiator_ltep, target_for_initiator),
+         :ok <- send_to_peer(target_key, target_ltep, initiator_for_target) do
       :ok
     else
       {:error, _} = err -> err
