@@ -38,20 +38,21 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
       with_torrent_stack(hash, fn _hash ->
         {:ok, listen, port, ip} = listen_on_loopback()
+        test_pid = self()
 
         accept_task =
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
+            send(test_pid, {:loopback_accepted, self()})
             assert :ok = Handshakes.recv(accepted)
-            Process.sleep(400)
           end)
 
-        Process.sleep(20)
         {:ok, client} = connect_loopback(ip, port)
+        await_loopback_accept(accept_task)
         assert :ok = :gen_tcp.send(client, bt_handshake(hash, remote_id))
         assert {:ok, reply} = :gen_tcp.recv(client, 68, @timeout)
         assert <<19, "BitTorrent protocol"::binary, _::binary>> = reply
-        Process.sleep(1_500)
+        wait_for_peer_protocol(hash, remote_id)
         :gen_tcp.close(client)
         assert :ok = Task.await(accept_task, @timeout)
         :gen_tcp.close(listen)
@@ -65,19 +66,22 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
       with_torrent_stack(hash, fn _hash ->
         {:ok, listen, port, ip} = listen_on_loopback()
+        test_pid = self()
 
         accept_task =
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
+            send(test_pid, {:loopback_accepted, self()})
             assert :ok = Handshakes.recv(accepted)
           end)
 
         {:ok, client} = connect_loopback(ip, port)
+        await_loopback_accept(accept_task)
         assert :ok = :gen_tcp.send(client, bt_handshake(wrong))
         refute match?({:ok, <<19, _::binary>>}, :gen_tcp.recv(client, 68, 500))
         :gen_tcp.close(client)
-        :gen_tcp.close(listen)
         assert :ok = Task.await(accept_task, @timeout)
+        :gen_tcp.close(listen)
         assert Torrent.Swarm.count(hash) == 0
       end)
     end
@@ -89,19 +93,22 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
       with_torrent_stack(hash, fn _hash ->
         {:ok, listen, port, ip} = listen_on_loopback()
+        test_pid = self()
 
         accept_task =
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
+            send(test_pid, {:loopback_accepted, self()})
             assert :ok = Handshakes.recv(accepted)
           end)
 
         {:ok, client} = connect_loopback(ip, port)
+        await_loopback_accept(accept_task)
         assert :ok = :gen_tcp.send(client, bt_handshake(hash, bad_id))
         refute match?({:ok, <<19, _::binary>>}, :gen_tcp.recv(client, 68, 500))
         :gen_tcp.close(client)
-        :gen_tcp.close(listen)
         assert :ok = Task.await(accept_task, @timeout)
+        :gen_tcp.close(listen)
         assert Torrent.Swarm.count(hash) == 0
       end)
     end
@@ -135,23 +142,26 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
       with_torrent_stack(hash, fn _hash ->
         {:ok, listen, port, ip} = listen_on_loopback()
+        test_pid = self()
 
         accept_task =
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
+            send(test_pid, {:loopback_accepted, self()})
             assert :ok = Handshakes.recv(accepted)
-            Process.sleep(400)
           end)
 
         {:ok, client} = connect_loopback(ip, port)
+        await_loopback_accept(accept_task)
         assert :ok = :gen_tcp.send(client, bt_handshake(hash, Peer.id()))
 
         assert {:ok, <<19, "BitTorrent protocol"::binary, _::binary>>} =
                  :gen_tcp.recv(client, 68, @timeout)
 
+        wait_for_peer_protocol(hash, Peer.id())
         :gen_tcp.close(client)
-        :gen_tcp.close(listen)
         assert :ok = Task.await(accept_task, @timeout)
+        :gen_tcp.close(listen)
       end)
     end
 
@@ -194,18 +204,20 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
       with_torrent_stack(hash, fn _hash ->
         {:ok, listen, port, ip} = listen_on_loopback()
+        test_pid = self()
+        remote_id = <<6::160>>
 
         accept_task =
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
+            send(test_pid, {:loopback_accepted, self()})
             assert :ok = Handshakes.recv(accepted)
-            Process.sleep(1_500)
           end)
 
-        Process.sleep(30)
         {:ok, sock} = connect_loopback(ip, port)
+        await_loopback_accept(accept_task)
         assert {:ok, %{mode: :rc4}} = Peer.MSE.Handshake.initiate(sock, hash, ia, @timeout)
-        Process.sleep(500)
+        wait_for_peer_protocol(hash, remote_id)
         :gen_tcp.close(sock)
 
         assert :ok = Task.await(accept_task, @timeout + 2_000)
@@ -913,7 +925,15 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
   end
 
   defp bt_handshake(hash, peer_id \\ Peer.id()) do
-    IO.iodata_to_binary([<<19>>, "BitTorrent protocol", Peer.reserved(), hash, peer_id])
+    # This synthetic peer implements only the base handshake. Advertising our
+    # LTEP bit would promise an extension handshake that the test peer never
+    # sends, leaving Controller.start_protocol/1 waiting while teardown removes
+    # Torrent.Model.
+    IO.iodata_to_binary([<<19>>, "BitTorrent protocol", <<0::64>>, hash, peer_id])
+  end
+
+  defp await_loopback_accept(%Task{pid: pid}) do
+    assert_receive {:loopback_accepted, ^pid}, @timeout
   end
 
   defp with_torrent_stack(hash, fun) do
@@ -1111,6 +1131,37 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
         flunk("expected swarm count #{expected}, got #{Torrent.Swarm.count(hash)}")
       end
     end
+  end
+
+  defp wait_for_peer_protocol(hash, peer_id, attempts \\ 100)
+
+  defp wait_for_peer_protocol(hash, peer_id, attempts) when attempts > 0 do
+    key = Peer.make_key(hash, peer_id)
+    name = {:via, Registry, {Registry, {key, Peer.Controller}}}
+
+    ready? =
+      case GenServer.whereis(name) do
+        nil ->
+          false
+
+        pid ->
+          try do
+            match?(%{peer_reserved: nil}, :sys.get_state(pid, 500))
+          catch
+            :exit, _ -> false
+          end
+      end
+
+    if ready? do
+      :ok
+    else
+      Process.sleep(50)
+      wait_for_peer_protocol(hash, peer_id, attempts - 1)
+    end
+  end
+
+  defp wait_for_peer_protocol(hash, peer_id, 0) do
+    flunk("peer protocol did not start hash=#{inspect(hash)} peer_id=#{inspect(peer_id)}")
   end
 
   defp safe_stop(pid) when is_pid(pid) do
