@@ -63,8 +63,77 @@ defmodule Peer.SenderInactiveRecvTest do
 
     assert {:ok, <<length::32>>} = Peer.Sender.socket_recv(key, 4, 1_000)
     assert length >= 2
+
     assert {:ok, body} = Peer.Sender.socket_recv(key, length, 1_000)
     assert <<20, 1, _payload::binary>> = body
+
+    on_exit(fn ->
+      if Process.alive?(sender_pid), do: GenServer.stop(sender_pid, :normal, 1_000)
+      Connection.close(utp)
+      :gen_udp.close(udp)
+    end)
+  end
+
+  test "active Sender keeps uTP window charged until its buffered bytes are consumed" do
+    hash = :crypto.strong_rand_bytes(20)
+    id = <<7::160>>
+    key = Peer.make_key(hash, id)
+
+    {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+    ip = {127, 0, 0, 1}
+    port = 19_882
+    recv_id = 10_882
+    peer_seq = 8000
+
+    assert {:ok, utp = {:utp, pid}} = Connection.start_client(udp, ip, port, conn_id: recv_id)
+
+    state_header = %Packet{
+      type: Packet.st_state(),
+      version: 1,
+      extension: 0,
+      conn_id: recv_id,
+      timestamp: 1,
+      timestamp_difference: 0,
+      wnd_size: 65_536,
+      seq_nr: peer_seq,
+      ack_nr: 1
+    }
+
+    send(pid, {:utp_packet, state_header, <<>>, []})
+    assert :ok = Connection.await_connected(utp, 1_000)
+
+    assert {:ok, sender_pid} = Peer.Sender.start_link([hash, id, utp])
+    assert :ok = Peer.Transport.controlling_process(utp, sender_pid)
+    assert :ok = Peer.Sender.activate(key)
+
+    # Deliberately incomplete peer-wire message: Sender has dequeued the uTP
+    # mailbox item, but the bytes remain unread in its application buffer.
+    wire = <<100::32, 20, 1, 0, 0>>
+
+    data_header = %Packet{
+      type: Packet.st_data(),
+      version: 1,
+      extension: 0,
+      conn_id: recv_id,
+      timestamp: 2,
+      timestamp_difference: 0,
+      wnd_size: 65_536,
+      seq_nr: peer_seq,
+      ack_nr: 2
+    }
+
+    send(pid, {:utp_packet, data_header, wire, []})
+
+    assert_eventually(fn ->
+      :sys.get_state(sender_pid).utp_held_bytes == byte_size(wire)
+    end)
+
+    assert :sys.get_state(pid).active_recv_bytes == byte_size(wire)
+
+    assert :ok = Peer.Sender.deactivate(key)
+    assert {:ok, ^wire} = Peer.Sender.socket_recv(key, byte_size(wire), 1_000)
+    assert :sys.get_state(sender_pid).utp_held_bytes == 0
+    assert_eventually(fn -> :sys.get_state(pid).active_recv_bytes == 0 end)
 
     on_exit(fn ->
       if Process.alive?(sender_pid), do: GenServer.stop(sender_pid, :normal, 1_000)
@@ -157,5 +226,17 @@ defmodule Peer.SenderInactiveRecvTest do
   defp ut_metadata_data_wire(piece, total_size, data) do
     payload = Magnet.UtMetadata.encode_data(piece, total_size, data)
     Peer.LTEP.extended_message_wire(1, payload)
+  end
+
+  defp assert_eventually(fun, attempts \\ 100)
+  defp assert_eventually(fun, 0), do: assert(fun.())
+
+  defp assert_eventually(fun, attempts) do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(1)
+      assert_eventually(fun, attempts - 1)
+    end
   end
 end

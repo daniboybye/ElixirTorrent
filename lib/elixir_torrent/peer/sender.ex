@@ -13,7 +13,7 @@ defmodule Peer.Sender do
   @max_hash_header_message_size 1 + Peer.HashWire.header_size()
   @max_hashes_message_size Peer.HashWire.max_hashes_message_size()
 
-  defstruct [:socket, :buffer, :key, active: false]
+  defstruct [:socket, :buffer, :key, active: false, utp_held_bytes: 0]
 
   @type socket :: Peer.Transport.socket()
 
@@ -21,7 +21,8 @@ defmodule Peer.Sender do
           socket: socket(),
           buffer: binary(),
           key: Peer.key(),
-          active: boolean()
+          active: boolean(),
+          utp_held_bytes: non_neg_integer()
         }
 
   def start_link([hash, id, socket]) do
@@ -179,8 +180,11 @@ defmodule Peer.Sender do
   # Used during magnet swarm metadata fetch (Sender inactive) and LTEP startup.
   def handle_call({:socket_recv, len, timeout}, _, %__MODULE__{active: false} = state) do
     case recv_inactive(state, len, timeout) do
-      {:ok, data, new_state} -> {:reply, {:ok, data}, new_state, @timeout}
-      {:error, _} = error -> {:reply, error, state, @timeout}
+      {:ok, data, new_state} ->
+        {:reply, {:ok, data}, release_utp_if_buffer_empty(new_state), @timeout}
+
+      {:error, _} = error ->
+        {:reply, error, state, @timeout}
     end
   end
 
@@ -275,8 +279,9 @@ defmodule Peer.Sender do
         {:utp, raw, data},
         %__MODULE__{socket: {:mse, raw, ciphers}, active: false} = state
       ) do
-    acknowledge_active_utp(raw, data)
-    buffer_inbound(state, Peer.MSE.crypt(ciphers.recv, data))
+    state
+    |> hold_active_utp(data)
+    |> buffer_inbound(Peer.MSE.crypt(ciphers.recv, data))
   end
 
   def handle_info({:tcp, raw, data}, %__MODULE__{socket: {:mse, raw, ciphers}} = state) do
@@ -284,7 +289,7 @@ defmodule Peer.Sender do
   end
 
   def handle_info({:utp, raw, data}, %__MODULE__{socket: {:mse, raw, ciphers}} = state) do
-    acknowledge_active_utp(raw, data)
+    state = hold_active_utp(state, data)
     drain_inbound(%{state | buffer: state.buffer <> Peer.MSE.crypt(ciphers.recv, data)})
   end
 
@@ -293,8 +298,9 @@ defmodule Peer.Sender do
   end
 
   def handle_info({:utp, socket, data}, %{socket: socket, active: false} = state) do
-    acknowledge_active_utp(socket, data)
-    buffer_inbound(state, data)
+    state
+    |> hold_active_utp(data)
+    |> buffer_inbound(data)
   end
 
   def handle_info({:tcp, socket, data}, %{socket: socket} = state) do
@@ -302,7 +308,7 @@ defmodule Peer.Sender do
   end
 
   def handle_info({:utp, socket, data}, %{socket: socket} = state) do
-    acknowledge_active_utp(socket, data)
+    state = hold_active_utp(state, data)
     drain_inbound(%{state | buffer: state.buffer <> data})
   end
 
@@ -364,7 +370,7 @@ defmodule Peer.Sender do
         end
 
       :incomplete ->
-        {:noreply, state, @timeout}
+        {:noreply, release_utp_if_buffer_empty(state), @timeout}
 
       :protocol_error ->
         Acceptor.malicious_peer(Peer.key_to_id(key))
@@ -392,9 +398,19 @@ defmodule Peer.Sender do
     end
   end
 
-  defp acknowledge_active_utp(socket, data) do
-    UTP.Connection.active_recv_consumed(socket, byte_size(data))
+  defp hold_active_utp(state, data),
+    do: %{state | utp_held_bytes: state.utp_held_bytes + byte_size(data)}
+
+  defp release_utp_if_buffer_empty(%{buffer: <<>>, utp_held_bytes: held} = state)
+       when held > 0 do
+    UTP.Connection.active_recv_consumed(utp_socket(state.socket), held)
+    %{state | utp_held_bytes: 0}
   end
+
+  defp release_utp_if_buffer_empty(state), do: state
+
+  defp utp_socket({:mse, inner, _ciphers}), do: utp_socket(inner)
+  defp utp_socket({:utp, _} = socket), do: socket
 
   defp absorb_kernel_buffer_loop(socket, buffer) do
     case :gen_tcp.recv(socket, 65_536, 0) do

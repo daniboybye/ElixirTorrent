@@ -796,11 +796,12 @@ defmodule UTP.Connection do
   # requires a minimum-window probe to restart a connection whose flow-control
   # window reached zero. Without an in-flight packet, the per-packet timeout
   # scan above cannot detect a dead peer, so probe an otherwise silent
-  # zero-window connection and eventually reap it if no packet answers.
+  # zero-window or half-closed connection and eventually reap it if no packet
+  # answers.
   defp check_idle_timeout(%{closed: true} = state, _now), do: state
 
   defp check_idle_timeout(state, now) do
-    zero_window? = state.peer_wnd == 0 or state.led.max_window == 0
+    stalled? = state.peer_wnd == 0 or (state.fin_sent and is_nil(state.eof_seq))
     idle_for = now - max(state.last_send_ms, state.last_recv_ms)
 
     probe_timeout =
@@ -810,7 +811,7 @@ defmodule UTP.Connection do
         min(state.timeout_ms * Bitwise.bsl(1, state.idle_probe_count - 1), 60_000)
       end
 
-    if (state.phase == :connected and zero_window?) && map_size(state.unacked) == 0 &&
+    if (state.phase == :connected and stalled?) && map_size(state.unacked) == 0 &&
          idle_for >= probe_timeout do
       if state.idle_probe_count >= @max_idle_probes do
         Logger.warning(

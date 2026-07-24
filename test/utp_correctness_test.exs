@@ -228,6 +228,53 @@ defmodule UTPCorrectnessTest do
     :gen_udp.close(udp)
   end
 
+  test "a locally closed connection is reaped if the peer ACKs but never sends FIN" do
+    {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+    recv_id = 31_006
+    peer_seq = 6500
+
+    assert {:ok, {:utp, pid} = socket} =
+             UTP.Connection.start_client(udp, {127, 0, 0, 1}, peer_port, conn_id: recv_id)
+
+    assert {:ok, {_ip, _port, _syn}} = :gen_udp.recv(peer_udp, 0, 1_000)
+    send(pid, {:utp_packet, packet(Packet.st_state(), recv_id, peer_seq, 1), <<>>, []})
+    assert :ok = UTP.Connection.await_connected(socket, 1_000)
+    assert {:ok, {_ip, _port, _handshake_ack}} = :gen_udp.recv(peer_udp, 0, 1_000)
+
+    :ok = UTP.Connection.close(socket)
+    assert {:ok, {_ip, _port, fin_wire}} = :gen_udp.recv(peer_udp, 0, 1_000)
+    assert {:ok, fin, <<>>, []} = Packet.decode(fin_wire)
+    assert fin.type == Packet.st_fin()
+
+    send(pid, {
+      :utp_packet,
+      packet(Packet.st_state(), recv_id, peer_seq, fin.seq_nr),
+      <<>>,
+      []
+    })
+
+    assert {:ok, {_ip, _port, _fin_ack_response}} = :gen_udp.recv(peer_udp, 0, 1_000)
+    assert %{fin_sent: true, eof_seq: nil, unacked: %{}} = :sys.get_state(pid)
+
+    for _ <- 1..3 do
+      age_idle_connection(pid)
+      send(pid, :tick)
+      assert {:ok, {_ip, _port, probe_wire}} = :gen_udp.recv(peer_udp, 0, 1_000)
+      assert {:ok, %{type: probe_type}, <<>>, []} = Packet.decode(probe_wire)
+      assert probe_type == Packet.st_state()
+    end
+
+    ref = Process.monitor(pid)
+    age_idle_connection(pid)
+    send(pid, :tick)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_500
+
+    :gen_udp.close(peer_udp)
+    :gen_udp.close(udp)
+  end
+
   test "an unanswered idle zero-window connection is probed and reaped" do
     {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
     {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
