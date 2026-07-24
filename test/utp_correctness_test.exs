@@ -132,11 +132,11 @@ defmodule UTPCorrectnessTest do
       ack_nr: 0,
       last_peer_ack: 8,
       unacked: %{
-        10 => {<<10>>, 0, 1, 1},
-        11 => {<<11>>, 0, 1, 1},
-        12 => {<<12>>, 0, 1, 1},
-        13 => {<<13>>, 0, 1, 1},
-        14 => {<<14>>, 0, 1, 1}
+        10 => {Packet.st_data(), <<10>>, 0, 1, 1},
+        11 => {Packet.st_data(), <<11>>, 0, 1, 1},
+        12 => {Packet.st_data(), <<12>>, 0, 1, 1},
+        13 => {Packet.st_data(), <<13>>, 0, 1, 1},
+        14 => {Packet.st_data(), <<14>>, 0, 1, 1}
       },
       cur_window: 5,
       led: LEDBAT.new()
@@ -146,11 +146,86 @@ defmodule UTPCorrectnessTest do
     bitmask = <<0b00001110, 0, 0, 0>>
     state = run_packet(initial, hdr, [{:selective_ack, bitmask}])
 
-    assert %{10 => {<<10>>, _sent_10, 2, 1}, 11 => {<<11>>, _sent_11, 2, 1}} =
+    assert %{
+             10 => {data_type, <<10>>, _sent_10, 2, 1},
+             11 => {data_type, <<11>>, _sent_11, 2, 1}
+           } =
              state.unacked
+
+    assert data_type == Packet.st_data()
     refute Map.has_key?(state.unacked, 12)
     refute Map.has_key?(state.unacked, 13)
     refute Map.has_key?(state.unacked, 14)
+  end
+
+  test "a timed-out queued FIN retransmits as ST_FIN" do
+    {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+    recv_id = 31_002
+    peer_seq = 5000
+
+    assert {:ok, {:utp, pid} = socket} =
+             UTP.Connection.start_client(udp, {127, 0, 0, 1}, peer_port, conn_id: recv_id)
+
+    assert {:ok, {_ip, _port, _syn}} = :gen_udp.recv(peer_udp, 0, 1_000)
+    send(pid, {:utp_packet, packet(Packet.st_state(), recv_id, peer_seq, 1), <<>>, []})
+    assert :ok = UTP.Connection.await_connected(socket, 1_000)
+    assert {:ok, {_ip, _port, _handshake_ack}} = :gen_udp.recv(peer_udp, 0, 1_000)
+
+    :ok = UTP.Connection.close(socket)
+    assert {:ok, {_ip, _port, first_fin_wire}} = :gen_udp.recv(peer_udp, 0, 1_000)
+    assert {:ok, first_fin, <<>>, []} = Packet.decode(first_fin_wire)
+    assert first_fin.type == Packet.st_fin()
+
+    :sys.replace_state(pid, fn state ->
+      {type, payload, _sent_ms, tx_count, bytes} = Map.fetch!(state.unacked, first_fin.seq_nr)
+
+      unacked =
+        Map.put(
+          state.unacked,
+          first_fin.seq_nr,
+          {type, payload, System.monotonic_time(:millisecond) - 1_000, tx_count, bytes}
+        )
+
+      %{state | unacked: unacked, timeout_ms: 500}
+    end)
+
+    send(pid, :tick)
+    assert {:ok, {_ip, _port, retry_wire}} = :gen_udp.recv(peer_udp, 0, 1_000)
+    assert {:ok, retried, <<>>, []} = Packet.decode(retry_wire)
+    assert retried.type == Packet.st_fin()
+    assert retried.seq_nr == first_fin.seq_nr
+
+    GenServer.stop(pid, :normal)
+    :gen_udp.close(peer_udp)
+    :gen_udp.close(udp)
+  end
+
+  test "an inbound ST_FIN provokes our own ST_FIN response" do
+    {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, peer_udp} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, {_peer_ip, peer_port}} = :inet.sockname(peer_udp)
+    recv_id = 31_003
+    peer_seq = 6000
+
+    assert {:ok, {:utp, pid} = socket} =
+             UTP.Connection.start_client(udp, {127, 0, 0, 1}, peer_port, conn_id: recv_id)
+
+    assert {:ok, {_ip, _port, _syn}} = :gen_udp.recv(peer_udp, 0, 1_000)
+    send(pid, {:utp_packet, packet(Packet.st_state(), recv_id, peer_seq, 1), <<>>, []})
+    assert :ok = UTP.Connection.await_connected(socket, 1_000)
+    assert {:ok, {_ip, _port, _handshake_ack}} = :gen_udp.recv(peer_udp, 0, 1_000)
+
+    send(pid, {:utp_packet, packet(Packet.st_fin(), recv_id, peer_seq, 1), <<>>, []})
+    assert {:ok, {_ip, _port, response_wire}} = :gen_udp.recv(peer_udp, 0, 1_000)
+    assert {:ok, response, <<>>, []} = Packet.decode(response_wire)
+    assert response.type == Packet.st_fin()
+    assert response.ack_nr == peer_seq
+
+    GenServer.stop(pid, :normal)
+    :gen_udp.close(peer_udp)
+    :gen_udp.close(udp)
   end
 
   test "cumulative ack still fires after selective-ack punches holes in unacked" do
@@ -165,11 +240,11 @@ defmodule UTPCorrectnessTest do
       send_conn_id: 0,
       seq_nr: 13,
       unacked: %{
-        8 => {<<0>>, 0, 1, 1},
-        9 => {<<0>>, 0, 1, 1},
-        10 => {<<0>>, 0, 1, 1},
-        11 => {<<0>>, 0, 1, 1},
-        12 => {<<0>>, 0, 1, 1}
+        8 => {Packet.st_data(), <<0>>, 0, 1, 1},
+        9 => {Packet.st_data(), <<0>>, 0, 1, 1},
+        10 => {Packet.st_data(), <<0>>, 0, 1, 1},
+        11 => {Packet.st_data(), <<0>>, 0, 1, 1},
+        12 => {Packet.st_data(), <<0>>, 0, 1, 1}
       },
       cur_window: 5,
       led: LEDBAT.new()

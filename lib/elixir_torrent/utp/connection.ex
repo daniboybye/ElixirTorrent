@@ -197,14 +197,12 @@ defmodule UTP.Connection do
   end
 
   def handle_cast(:close, state) do
-    state =
-      if state.phase == :connected and not state.fin_sent do
-        send_fin(state)
-      else
-        state
-      end
-
-    {:stop, :normal, shutdown(state, :normal)}
+    if state.phase == :connected do
+      state = if state.fin_sent, do: state, else: send_fin(state)
+      {:noreply, state}
+    else
+      {:stop, :normal, shutdown(state, :normal)}
+    end
   end
 
   def handle_cast({:active_recv_consumed, bytes}, state) do
@@ -265,7 +263,13 @@ defmodule UTP.Connection do
 
   @impl true
   def handle_info({:utp_packet, header, payload, extensions}, state) do
-    {:noreply, handle_inbound(state, header, payload, extensions) |> flush_send()}
+    state =
+      state
+      |> handle_inbound(header, payload, extensions)
+      |> flush_send()
+      |> maybe_finish_close()
+
+    {:noreply, state}
   end
 
   def handle_info(:tick, state) do
@@ -561,7 +565,7 @@ defmodule UTP.Connection do
       {nil, _} ->
         state
 
-      {{_payload, sent_ms, tx_count, bytes}, unacked} ->
+      {{_type, _payload, sent_ms, tx_count, bytes}, unacked} ->
         Logger.debug(
           "[utp] acked seq=#{seq} peer=#{inspect({state.peer_ip, state.peer_port})} bytes=#{bytes} pending=#{map_size(unacked)}"
         )
@@ -582,13 +586,13 @@ defmodule UTP.Connection do
 
   defp retransmit_loss(state, seq) do
     case Map.get(state.unacked, seq) do
-      {payload, _sent_ms, _tx_count, _bytes} ->
+      {type, payload, _sent_ms, _tx_count, _bytes} ->
         state = put_led(state, LEDBAT.on_loss(state.led))
         # transmit/5 preserves and increments tx_count when re-sending an
         # already-unacked seq, so we no longer bump it manually here (the old
         # +1 was overwritten by transmit's map put with tx_count=1 → give-up
         # never fired).
-        transmit(state, @st_data, payload, seq, false)
+        transmit(state, type, payload, seq, false)
 
       nil ->
         state
@@ -677,11 +681,11 @@ defmodule UTP.Connection do
             # bump dead and the give-up branch unreachable.
             tx_count =
               case Map.get(state.unacked, seq) do
-                {_, _, prev, _} -> prev + 1
+                {_, _, _, prev, _} -> prev + 1
                 nil -> 1
               end
 
-            Map.put(state.unacked, seq, {payload, now_ms(), tx_count, bytes})
+            Map.put(state.unacked, seq, {type, payload, now_ms(), tx_count, bytes})
           else
             state.unacked
           end
@@ -738,10 +742,11 @@ defmodule UTP.Connection do
     # reduce still trying to retransmit later entries.
     {give_up, timed_out} =
       Enum.reduce(state.unacked, {nil, []}, fn
-        {seq, {_payload, _sent_ms, tx_count, _bytes}}, {nil, list} when tx_count >= 10 ->
+        {seq, {_type, _payload, _sent_ms, tx_count, _bytes}}, {nil, list}
+        when tx_count >= 10 ->
           {seq, list}
 
-        {seq, {_payload, sent_ms, _tx_count, _bytes}}, {gu, list} ->
+        {seq, {_type, _payload, sent_ms, _tx_count, _bytes}}, {gu, list} ->
           if now - sent_ms >= state.timeout_ms do
             {gu, [seq | list]}
           else
@@ -772,8 +777,8 @@ defmodule UTP.Connection do
             nil ->
               acc
 
-            {payload, _sent_ms, _tx_count, _bytes} ->
-              transmit(acc, @st_data, payload, seq, false)
+            {type, payload, _sent_ms, _tx_count, _bytes} ->
+              transmit(acc, type, payload, seq, false)
           end
         end)
     end
@@ -846,6 +851,16 @@ defmodule UTP.Connection do
   defp maybe_close_on_eof(state) do
     if state.eof_seq && map_size(state.recv_oob) == 0 &&
          state.recv_next == Packet.seq_add(state.eof_seq, 1) do
+      if state.fin_sent, do: state, else: send_fin(state)
+    else
+      state
+    end
+  end
+
+  defp maybe_finish_close(state) do
+    if state.fin_sent && state.eof_seq && map_size(state.recv_oob) == 0 &&
+         state.recv_next == Packet.seq_add(state.eof_seq, 1) &&
+         map_size(state.unacked) == 0 do
       shutdown(state, :fin)
     else
       state
