@@ -229,6 +229,40 @@ defmodule PeerDiscoveryAnnounceTest do
     refute Announce.tier_batches_active?(new_state)
     # A "never" retry must disable the dead tracker, not reschedule it.
     assert MapSet.member?(new_state.disabled, announce)
+    refute Map.has_key?(new_state.retry_after_ms, announce)
+  end
+
+  test "BEP 31 retry minutes cool down only the requesting tracker" do
+    ref = make_ref()
+    cooling = "http://127.0.0.1:1/cooling"
+    sibling = "http://127.0.0.1:1/sibling"
+
+    state =
+      base_state(
+        tiers: [[cooling, sibling]],
+        requests: %{ref => {cooling, 0, 0}},
+        tier_batches: %{0 => 1}
+      )
+
+    error =
+      Tracker.decode_http_response_for_test(%{
+        "failure reason" => "Overloaded",
+        "retry in" => 5
+      })
+
+    before_ms = System.monotonic_time(:millisecond)
+    cooled_state = Announce.dispatch_task_message(state, {ref, error})
+    after_ms = System.monotonic_time(:millisecond)
+
+    assert deadline_ms = cooled_state.retry_after_ms[cooling]
+    assert deadline_ms >= before_ms + 5 * 60_000
+    assert deadline_ms <= after_ms + 5 * 60_000
+    refute Map.has_key?(cooled_state.retry_after_ms, sibling)
+
+    scheduled_state =
+      Announce.dispatch_task_message(cooled_state, {:parallel_announce, 0})
+
+    assert [{_task_ref, {^sibling, 0, 1}}] = Map.to_list(scheduled_state.requests)
   end
 
   test "dispatch_task_message stores tracker response peers without raising" do

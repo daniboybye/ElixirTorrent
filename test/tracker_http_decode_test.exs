@@ -41,11 +41,23 @@ defmodule TrackerHTTPDecodeTest do
       assert Enum.any?(peers, fn %Peer{ip: ip} -> tuple_size(ip) == 8 end)
     end
 
-    test "surfaces failure reason and retry_in from tracker body" do
-      assert %Error{reason: "unregistered torrent", retry_in: 3600} =
+    test "converts BEP 31 retry_in minutes to internal seconds" do
+      assert %Error{reason: "unregistered torrent", retry_in: 300} =
                Tracker.decode_http_response_for_test(%{
                  "failure reason" => "unregistered torrent",
-                 "retry in" => 3600
+                 "retry in" => 5
+               })
+
+      assert %Error{retry_in: 300} =
+               Tracker.decode_http_response_for_test(%{
+                 "failure reason" => "overloaded",
+                 "retry in" => "5"
+               })
+
+      assert %Error{retry_in: "never"} =
+               Tracker.decode_http_response_for_test(%{
+                 "failure reason" => "not a tracker",
+                 "retry in" => "never"
                })
     end
 
@@ -197,6 +209,27 @@ defmodule TrackerHTTPDecodeTest do
 
       assert peer.ip == {127, 0, 0, 1}
       assert peer.port == 6881
+    end
+
+    test "request! parses BEP 31 retry data from a non-2xx response" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      body =
+        Bento.encode!(%{
+          "failure reason" => "Overloaded",
+          "retry in" => 5
+        })
+
+      {port, _pid} = start_http_tracker(fn _req -> {503, body} end)
+      stats = [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()]
+
+      assert %Error{reason: "Overloaded", retry_in: 300} =
+               Tracker.request!(
+                 "http://127.0.0.1:#{port}/announce",
+                 hash,
+                 stats,
+                 http_timeout_ms: 5_000
+               )
     end
 
     test "extract_js_redirect_for_test and absolute_redirect_for_test" do

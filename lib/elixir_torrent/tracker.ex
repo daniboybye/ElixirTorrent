@@ -214,8 +214,8 @@ defmodule Tracker do
         {:ok, %HTTPoison.Response{status_code: code, body: body}} when code in 200..299 ->
           decode_http_scrape_body(body, hash)
 
-        {:ok, %HTTPoison.Response{status_code: code}} ->
-          %Error{reason: {:http_status, code}}
+        {:ok, %HTTPoison.Response{status_code: code, body: body}} ->
+          decode_http_error_response(body, code)
 
         {:error, %HTTPoison.Error{reason: reason}} ->
           %Error{reason: reason}
@@ -468,8 +468,8 @@ defmodule Tracker do
               error
           end
 
-        {:ok, %HTTPoison.Response{status_code: code}} ->
-          %Error{reason: {:http_status, code}}
+        {:ok, %HTTPoison.Response{status_code: code, body: body}} ->
+          decode_http_error_response(body, code)
 
         {:error, %HTTPoison.Error{reason: reason}} ->
           %Error{reason: reason}
@@ -548,8 +548,8 @@ defmodule Tracker do
               when code in 200..299 ->
                 decode_tracker_body(body2, next_url, family, ip, headers2, opts, 1)
 
-              {:ok, %HTTPoison.Response{status_code: code}} ->
-                %Error{reason: {:http_status, code}}
+              {:ok, %HTTPoison.Response{status_code: code, body: body2}} ->
+                decode_http_error_response(body2, code)
 
               {:error, %HTTPoison.Error{reason: reason}} ->
                 %Error{reason: reason}
@@ -619,7 +619,10 @@ defmodule Tracker do
   defp decode_http_response(%{"failure reason" => reason} = map) do
     %Error{
       reason: reason,
-      retry_in: Map.get(map, "retry in")
+      # Tracker.Error.retry_in is an internal seconds value. BEP 31's wire
+      # value is minutes, so normalize it at the HTTP decode boundary; UDP and
+      # connection-id errors already populate this field in seconds.
+      retry_in: bep31_retry_interval_seconds(Map.get(map, "retry in"))
     }
   end
 
@@ -636,6 +639,33 @@ defmodule Tracker do
       peers: peers_v4 ++ peers_v6
     }
   end
+
+  @spec decode_http_error_response(binary(), non_neg_integer()) :: Error.t()
+  defp decode_http_error_response(body, status_code) do
+    try do
+      case body |> Bento.decode!() |> decode_http_response() do
+        %Error{} = error -> error
+        _response -> %Error{reason: {:http_status, status_code}}
+      end
+    rescue
+      _ -> %Error{reason: {:http_status, status_code}}
+    end
+  end
+
+  @spec bep31_retry_interval_seconds(term()) :: non_neg_integer() | binary() | nil
+  defp bep31_retry_interval_seconds(value) when value in ["never", :never], do: "never"
+
+  defp bep31_retry_interval_seconds(minutes) when is_integer(minutes) and minutes >= 0,
+    do: minutes * 60
+
+  defp bep31_retry_interval_seconds(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {minutes, ""} when minutes >= 0 -> minutes * 60
+      _ -> nil
+    end
+  end
+
+  defp bep31_retry_interval_seconds(_), do: nil
 
   defp valid_external_ip(ip) when is_binary(ip) and byte_size(ip) in [4, 16], do: ip
   defp valid_external_ip(_ip), do: nil

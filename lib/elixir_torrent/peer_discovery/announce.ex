@@ -29,6 +29,10 @@ defmodule PeerDiscovery.Announce do
             tracker_interval_sec: nil,
             tracker_min_interval_sec: nil,
             disabled: MapSet.new(),
+            # BEP 31 cooldowns are per announce URL. Values are monotonic
+            # millisecond deadlines so one overloaded tracker can sit out
+            # without delaying healthy siblings in the same tier.
+            retry_after_ms: %{},
             # BEP 48 § Scrape convention — cached per-tracker swarm health used to skip
             # dead-swarm trackers at announce time. Keyed by announce URL.
             # %{url => %{seeders: n, leechers: n, completed: n, ts_ms: mono_ms}}
@@ -558,25 +562,6 @@ defmodule PeerDiscovery.Announce do
     end
   end
 
-  def handle_info({ref, %Tracker.Error{reason: "Overloaded", retry_in: <<str::binary>>}}, state) do
-    timeout =
-      case parse_retry_in_seconds(str) do
-        nil -> Tracker.default_failure_interval()
-        n -> n
-      end
-
-    {:noreply, parallel_tracker_error(state, ref, timeout)}
-  end
-
-  def handle_info({ref, %Tracker.Error{reason: "Overloaded", retry_in: n}}, state)
-      when is_integer(n) and n >= 0 do
-    {:noreply, parallel_tracker_error(state, ref, n)}
-  end
-
-  def handle_info({ref, %Tracker.Error{reason: "Overloaded"}}, state) do
-    {:noreply, parallel_tracker_error(state, ref, Tracker.default_failure_interval())}
-  end
-
   def handle_info({ref, %Tracker.Error{retry_in: retry_in} = error}, state)
       when not is_nil(retry_in) do
     timeout = retry_interval_seconds(retry_in, error.reason)
@@ -596,13 +581,26 @@ defmodule PeerDiscovery.Announce do
   defp start_parallel_tier(%__MODULE__{hash: hash} = state, tier_index, tier) do
     now = System.monotonic_time(:millisecond)
 
-    # Skip trackers disabled earlier this session (dead DNS / not-a-tracker).
-    active = Enum.reject(tier, &MapSet.member?(state.disabled, &1))
+    # Skip trackers disabled earlier this session (dead DNS / not-a-tracker)
+    # and trackers whose own BEP 31 cooldown has not elapsed. Cooldown is
+    # deliberately URL-local: ready siblings remain in this parallel batch.
+    active =
+      tier
+      |> Enum.with_index()
+      |> Enum.reject(fn {announce, _tracker_index} ->
+        MapSet.member?(state.disabled, announce)
+      end)
+      |> Enum.filter(fn {announce, _tracker_index} ->
+        tracker_retry_ready?(state, announce, now)
+      end)
 
     # BEP 48 — also skip trackers with a fresh {0,0} scrape (dead swarm for
     # this info_hash). Kept separate from `disabled` so a later scrape or a
     # TTL expiry can re-include them without a restart.
-    {alive, dead} = Enum.split_with(active, &tracker_alive?(state, &1, now))
+    {alive, dead} =
+      Enum.split_with(active, fn {announce, _tracker_index} ->
+        tracker_alive?(state, announce, now)
+      end)
 
     if dead != [] do
       Logger.debug(
@@ -625,7 +623,6 @@ defmodule PeerDiscovery.Announce do
 
       requests =
         alive
-        |> Enum.with_index()
         |> Enum.reduce(state.requests, fn {announce, tracker_index}, acc ->
           tracker_opts = tracker_request_opts_for(state)
 
@@ -919,7 +916,7 @@ defmodule PeerDiscovery.Announce do
   end
 
   @spec parallel_tracker_error(%__MODULE__{}, reference(), non_neg_integer()) :: %__MODULE__{}
-  defp parallel_tracker_error(%__MODULE__{} = state, ref, _timeout) do
+  defp parallel_tracker_error(%__MODULE__{} = state, ref, timeout_seconds) do
     {meta, requests} = Map.pop(state.requests, ref)
 
     case meta do
@@ -936,8 +933,15 @@ defmodule PeerDiscovery.Announce do
         state
         |> Map.put(:requests, requests)
         |> Map.update!(:peers, &Map.delete(&1, announce))
+        |> put_tracker_retry_after(announce, timeout_seconds)
         |> dec_tier_batch(tier_index)
     end
+  end
+
+  @spec put_tracker_retry_after(%__MODULE__{}, String.t(), non_neg_integer()) :: %__MODULE__{}
+  defp put_tracker_retry_after(%__MODULE__{} = state, announce, timeout_seconds) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_seconds * 1_000
+    put_in(state.retry_after_ms[announce], deadline_ms)
   end
 
   # A tier had no live trackers to contact (all disabled or BEP-48 dead scrape).
@@ -1187,7 +1191,16 @@ defmodule PeerDiscovery.Announce do
   defp announcable_trackers_in_tier(%__MODULE__{} = state, tier, now_ms) do
     tier
     |> Enum.reject(&MapSet.member?(state.disabled, &1))
+    |> Enum.filter(&tracker_retry_ready?(state, &1, now_ms))
     |> Enum.filter(&tracker_alive?(state, &1, now_ms))
+  end
+
+  @spec tracker_retry_ready?(%__MODULE__{}, String.t(), integer()) :: boolean()
+  defp tracker_retry_ready?(%__MODULE__{retry_after_ms: retry_after_ms}, announce, now_ms) do
+    case Map.get(retry_after_ms, announce) do
+      nil -> true
+      deadline_ms -> now_ms >= deadline_ms
+    end
   end
 
   # After the last in-flight tracker Task in a fan-out wave completes with no peers,
