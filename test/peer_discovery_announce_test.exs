@@ -388,6 +388,17 @@ defmodule PeerDiscoveryAnnounceTest do
     refute dht_pending?(after_state.requests)
   end
 
+  test "private torrents ignore PEX broadcast ticks without advancing snapshots" do
+    endpoint = {{203, 0, 113, 40}, 6881}
+    snapshot = MapSet.new([endpoint])
+    state = base_state(pex_snapshot: snapshot)
+
+    after_state = Announce.dispatch_task_message(state, :pex_broadcast)
+
+    assert after_state.pex_snapshot == snapshot
+    refute_receive :pex_broadcast, 20
+  end
+
   describe "seed peers (BEP 9 x.pe hand-off)" do
     test "SeedPeers.put/take is atomic and single-consumer" do
       hash = <<7::160>>

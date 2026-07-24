@@ -3,6 +3,19 @@ defmodule Peer.UtPexTest do
 
   alias Peer.UtPex
 
+  defp start_private_model(hash) do
+    torrent = %Torrent{
+      hash: hash,
+      metadata: %{"info" => %{"private" => 1, "name" => "private-pex"}},
+      left: 1,
+      last_index: 0,
+      last_piece_length: 1,
+      private?: true
+    }
+
+    start_supervised!({Torrent.Model, torrent})
+  end
+
   test "encode/decode IPv4 peer delta" do
     added = [{{1, 2, 3, 4}, 6881}, {{5, 6, 7, 8}, 51413}]
     dropped = [{{9, 9, 9, 9}, 6000}]
@@ -94,5 +107,35 @@ defmodule Peer.UtPexTest do
       )
 
     refute MapSet.member?(dropped_state.holepunch.pex_endpoints, endpoint)
+  end
+
+  test "private torrents neither advertise nor route ut_pex" do
+    hash = :crypto.strong_rand_bytes(20)
+    _model = start_private_model(hash)
+    endpoint = {{10, 0, 0, 50}, 6881}
+
+    refute Peer.UtPex.Extension in Peer.LTEP.Extensions.for_peer(hash)
+    assert :error = UtPex.ingest(hash, UtPex.encode([endpoint], []))
+
+    ltep = Peer.LTEP.Session.new([Peer.UtPex.Extension])
+
+    state = %Peer.Controller.State{
+      hash: hash,
+      id: <<2::160>>,
+      fast_extension: nil,
+      status: nil,
+      pieces_count: 1,
+      socket: nil,
+      ltep: ltep
+    }
+
+    routed =
+      Peer.Controller.State.handle_extended(
+        state,
+        Peer.UtPex.Extension.local_id(),
+        UtPex.encode([endpoint], [])
+      )
+
+    assert routed.holepunch.pex_endpoints == MapSet.new()
   end
 end

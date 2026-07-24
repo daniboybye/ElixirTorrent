@@ -285,7 +285,7 @@ defmodule Peer.Controller.State do
       ut_metadata?(state, extended_id) ->
         respond_ut_metadata(state, payload)
 
-      ut_pex?(state, extended_id) ->
+      ut_pex?(state, extended_id) and Peer.UtPex.allowed?(state.hash) ->
         case Peer.UtPex.ingest(state.hash, payload) do
           {:ok, added, dropped} -> update_holepunch_pex(state, added, dropped)
           :error -> state
@@ -335,7 +335,7 @@ defmodule Peer.Controller.State do
   def send_pex(%__MODULE__{} = state, payload) when is_binary(payload) do
     ut_id = Peer.LTEP.Session.peer_extension_id(state.ltep, Peer.UtPex.extension_name())
 
-    if is_integer(ut_id) and ut_id > 0 and
+    if Peer.UtPex.allowed?(state.hash) and is_integer(ut_id) and ut_id > 0 and
          Peer.LTEP.Session.peer_supports?(state.ltep, Peer.UtPex.extension_name()) do
       _ = Peer.LTEP.send_extended(key(state), ut_id, payload)
     end

@@ -20,6 +20,14 @@ defmodule Peer.UtPex do
   @spec extension_name() :: String.t()
   def extension_name, do: @extension_name
 
+  @doc false
+  @spec allowed?(Torrent.hash()) :: boolean()
+  def allowed?(hash) do
+    Torrent.get(hash, :private?) != true
+  catch
+    :exit, _ -> true
+  end
+
   @doc """
   Decodes an inbound ut_pex payload and dials any new connectable peers.
 
@@ -28,7 +36,9 @@ defmodule Peer.UtPex do
   """
   @spec ingest(Torrent.hash(), binary()) :: {:ok, [Peer.t()], [Peer.t()]} | :error
   def ingest(hash, payload) when is_binary(payload) do
-    case decode(payload) do
+    result = if allowed?(hash), do: decode(payload), else: :error
+
+    case result do
       {:ok, added, dropped} ->
         peers =
           added
@@ -65,7 +75,7 @@ defmodule Peer.UtPex do
   """
   @spec broadcast(Torrent.hash(), [endpoint()], [endpoint()]) :: :ok
   def broadcast(hash, added, dropped) do
-    payload = encode(added, dropped)
+    payload = if allowed?(hash), do: encode(added, dropped)
 
     if payload != nil do
       hash

@@ -306,7 +306,7 @@ defmodule PeerDiscovery.Announce do
         :ok
     end
 
-    schedule_pex(self(), @pex_interval_ms)
+    if pex_allowed?(state), do: schedule_pex(self(), @pex_interval_ms)
     send_after(self(), :peer_refresh_tick, @peer_refresh_tick_ms)
 
     if tiers != [] do
@@ -397,7 +397,7 @@ defmodule PeerDiscovery.Announce do
 
   def handle_info(:pex_broadcast, state) do
     state = maybe_broadcast_pex(state)
-    schedule_pex(self(), @pex_interval_ms)
+    if pex_allowed?(state), do: schedule_pex(self(), @pex_interval_ms)
     {:noreply, state}
   end
 
@@ -433,8 +433,7 @@ defmodule PeerDiscovery.Announce do
             dht_module = state.dht_module
 
             state =
-              Enum.reduce(dht_hashes(state), %{state | dht_round_peers: []}, fn dht_hash,
-                                                                                acc ->
+              Enum.reduce(dht_hashes(state), %{state | dht_round_peers: []}, fn dht_hash, acc ->
                 %Task{ref: ref} =
                   Task.Supervisor.async_nolink(Requests, dht_module, :get_peers, [dht_hash])
 
@@ -1242,6 +1241,8 @@ defmodule PeerDiscovery.Announce do
   defp schedule_pex(pid, ms), do: send_after(pid, :pex_broadcast, ms)
 
   @spec maybe_broadcast_pex(%__MODULE__{}) :: %__MODULE__{}
+  defp maybe_broadcast_pex(%__MODULE__{private?: true} = state), do: state
+
   defp maybe_broadcast_pex(%__MODULE__{hash: hash} = state) do
     current =
       try do
@@ -1481,6 +1482,10 @@ defmodule PeerDiscovery.Announce do
   @spec dht_allowed?(%__MODULE__{}) :: boolean()
   defp dht_allowed?(%__MODULE__{private?: true}), do: false
   defp dht_allowed?(_), do: DHT.enabled?()
+
+  @spec pex_allowed?(%__MODULE__{}) :: boolean()
+  defp pex_allowed?(%__MODULE__{private?: true}), do: false
+  defp pex_allowed?(_), do: true
 
   # BEP 48 — a tracker is "alive" for this info_hash unless a recent scrape
   # explicitly told us there are 0 seeders AND 0 leechers. Anything else

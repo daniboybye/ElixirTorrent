@@ -17,7 +17,8 @@ defmodule Peer.LTEP.Extensions do
   """
   @spec for_peer(Torrent.hash()) :: [module()]
   def for_peer(hash) do
-    [Peer.UtHolepunch.Extension, Peer.UtPex.Extension | metadata_extensions(hash)]
+    pex = if Peer.UtPex.allowed?(hash), do: [Peer.UtPex.Extension], else: []
+    [Peer.UtHolepunch.Extension | pex ++ metadata_extensions(hash)]
   end
 
   @spec metadata_extensions(Torrent.hash()) :: [module()]
