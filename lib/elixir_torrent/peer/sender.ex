@@ -145,7 +145,15 @@ defmodule Peer.Sender do
   def handle_call(:activate, _, %__MODULE__{socket: socket, active: false} = state) do
     case Peer.Transport.setopts(socket, active: true) do
       :ok ->
-        state = %{state | active: true, buffer: absorb_kernel_buffer(socket, state.buffer)}
+        {buffer, held} = absorb_kernel_buffer(socket, state.buffer)
+
+        state = %{
+          state
+          | active: true,
+            buffer: buffer,
+            utp_held_bytes: state.utp_held_bytes + held
+        }
+
         send(self(), :drain_buffered)
         {:reply, :ok, state, @timeout}
 
@@ -161,8 +169,16 @@ defmodule Peer.Sender do
   def handle_call(:deactivate, _, %__MODULE__{active: true, socket: socket} = state) do
     case Peer.Transport.setopts(socket, active: false) do
       :ok ->
-        buffer = absorb_kernel_buffer(socket, state.buffer)
-        {:reply, :ok, %{state | active: false, buffer: buffer}, @timeout}
+        {buffer, held} = absorb_kernel_buffer(socket, state.buffer)
+
+        state = %{
+          state
+          | active: false,
+            buffer: buffer,
+            utp_held_bytes: state.utp_held_bytes + held
+        }
+
+        {:reply, :ok, state, @timeout}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state, @timeout}
@@ -379,22 +395,23 @@ defmodule Peer.Sender do
   end
 
   # Peer data can arrive after the last passive recv (LTEP) but before active:true.
-  @spec absorb_kernel_buffer(Peer.Transport.socket(), binary()) :: binary()
+  @spec absorb_kernel_buffer(Peer.Transport.socket(), binary()) ::
+          {binary(), non_neg_integer()}
   defp absorb_kernel_buffer({:mse, inner, ciphers}, buffer) do
     case absorb_kernel_buffer(inner, <<>>) do
-      <<>> -> buffer
-      pending -> buffer <> Peer.MSE.crypt(ciphers.recv, pending)
+      {<<>>, held} -> {buffer, held}
+      {pending, held} -> {buffer <> Peer.MSE.crypt(ciphers.recv, pending), held}
     end
   end
 
   defp absorb_kernel_buffer(socket, buffer) when is_port(socket) do
-    absorb_kernel_buffer_loop(socket, buffer)
+    {absorb_kernel_buffer_loop(socket, buffer), 0}
   end
 
   defp absorb_kernel_buffer({:utp, _} = socket, buffer) do
     case UTP.Connection.take_recv_buffer(socket) do
-      <<>> -> buffer
-      pending -> buffer <> pending
+      <<>> -> {buffer, 0}
+      pending -> {buffer <> pending, byte_size(pending)}
     end
   end
 

@@ -102,13 +102,11 @@ defmodule Peer.SenderInactiveRecvTest do
     send(pid, {:utp_packet, state_header, <<>>, []})
     assert :ok = Connection.await_connected(utp, 1_000)
 
-    assert {:ok, sender_pid} = Peer.Sender.start_link([hash, id, utp])
-    assert :ok = Peer.Transport.controlling_process(utp, sender_pid)
-    assert :ok = Peer.Sender.activate(key)
-
-    # Deliberately incomplete peer-wire message: Sender has dequeued the uTP
-    # mailbox item, but the bytes remain unread in its application buffer.
-    wire = <<100::32, 20, 1, 0, 0>>
+    # Deliberately incomplete peer-wire message. The first half arrives while
+    # Connection is passive and is transferred into Sender on activate; the
+    # second arrives through active delivery.
+    wire = <<100::32, 20, 1, 0, 0, 2, 3, 4, 5>>
+    <<passive_part::binary-size(6), active_part::binary>> = wire
 
     data_header = %Packet{
       type: Packet.st_data(),
@@ -122,7 +120,21 @@ defmodule Peer.SenderInactiveRecvTest do
       ack_nr: 2
     }
 
-    send(pid, {:utp_packet, data_header, wire, []})
+    send(pid, {:utp_packet, data_header, passive_part, []})
+    assert_eventually(fn -> :sys.get_state(pid).recv_buffer == passive_part end)
+
+    assert {:ok, sender_pid} = Peer.Sender.start_link([hash, id, utp])
+    assert :ok = Peer.Transport.controlling_process(utp, sender_pid)
+    assert :ok = Peer.Sender.activate(key)
+
+    assert_eventually(fn ->
+      :sys.get_state(sender_pid).utp_held_bytes == byte_size(passive_part)
+    end)
+
+    assert :sys.get_state(pid).active_recv_bytes == byte_size(passive_part)
+
+    active_header = %{data_header | seq_nr: Packet.seq_add(peer_seq, 1)}
+    send(pid, {:utp_packet, active_header, active_part, []})
 
     assert_eventually(fn ->
       :sys.get_state(sender_pid).utp_held_bytes == byte_size(wire)

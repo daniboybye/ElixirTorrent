@@ -226,7 +226,14 @@ defmodule UTP.Connection do
   def handle_call(:deactivate, _from, state), do: {:reply, :ok, state}
 
   def handle_call(:take_recv_buffer, _from, state) do
-    {buffer, state} = {state.recv_buffer, %{state | recv_buffer: <<>>}}
+    buffer = state.recv_buffer
+
+    state = %{
+      state
+      | recv_buffer: <<>>,
+        active_recv_bytes: state.active_recv_bytes + byte_size(buffer)
+    }
+
     {:reply, buffer, state}
   end
 
