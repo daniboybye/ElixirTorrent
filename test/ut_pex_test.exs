@@ -643,6 +643,34 @@ defmodule Peer.UtPexTest do
       assert DialQueue.get_peer(state.queue, drop) != nil
     end
 
+    test "source-owned initial ingest reaches the bounded queue before retention" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_manager(hash)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+
+      supplier = <<16::160>>
+
+      peers =
+        for i <- 1..100 do
+          {{11, 1, 0, i}, 7100 + i}
+        end
+
+      assert {:ok, payload, report} = UtPex.encode_delta(peers, [], initial?: true)
+      assert report.added_encoded == 100
+
+      assert {:ok, decoded, []} =
+               UtPex.ingest(hash, payload, pex_source: supplier, initial?: true)
+
+      assert length(decoded) == 100
+
+      state = :sys.get_state(pid)
+      assert map_size(state.queue) == DialQueue.max_pex_per_source()
+
+      assert Enum.all?(state.queue, fn {_endpoint, entry} ->
+               MapSet.member?(entry.sources, {:pex, supplier})
+             end)
+    end
+
     test "ingest without pex_source still uses discovery offer path" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_manager(hash)

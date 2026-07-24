@@ -117,11 +117,24 @@ defmodule Peer.UtPex do
         filtered_added = Peer.UtPex.Filter.filter_peers(added, hash)
         filtered_dropped = Peer.UtPex.Filter.filter_peers(dropped, hash)
 
-        peers =
+        connectable =
           filtered_added
           |> prioritize_seed_peers()
           |> Enum.filter(&Acceptor.Connection.Handshakes.connectable_peer?/1)
-          |> Enum.take(@max_inbound_offer)
+
+        # Source-owned candidates enter the bounded ConnectionManager queue as a
+        # complete valid initial snapshot. The queue applies its BEP 40 ordering
+        # and 64-per-source / 256-global retention caps; truncating to the
+        # non-initial wire limit here would discard up to 150 valid initial
+        # contacts before that deterministic selection can run.
+        peers =
+          if is_binary(pex_source) and byte_size(pex_source) == 20 do
+            connectable
+          else
+            # Legacy callers without a remote source dial directly and have no
+            # bounded ownership queue, so retain the defensive immediate cap.
+            Enum.take(connectable, @max_inbound_offer)
+          end
 
         if peers != [] do
           require Logger
