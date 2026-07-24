@@ -400,5 +400,192 @@ defmodule Peer.UtPexTest do
       )
 
     assert routed.holepunch.pex_endpoints == MapSet.new()
+    assert routed.pex_outbound.sent == %{}
+  end
+
+  describe "outbound per-connection (BEP 11 item 4)" do
+    defp ltep_with_peer_pex do
+      Peer.LTEP.Session.new([Peer.UtPex.Extension])
+      |> Peer.LTEP.merge_handshake(
+        Bento.encode!(%{"m" => %{"ut_pex" => Peer.UtPex.Extension.local_id()}})
+      )
+    end
+
+    defp outbound_state(opts) do
+      hash = Keyword.get(opts, :hash, :crypto.strong_rand_bytes(20))
+      socket = Keyword.get(opts, :socket)
+      initial_sent? = Keyword.get(opts, :initial_sent?, false)
+      sent = Keyword.get(opts, :sent, %{})
+
+      ltep = Keyword.get(opts, :ltep, ltep_with_peer_pex())
+
+      %Peer.Controller.State{
+        hash: hash,
+        id: <<9::160>>,
+        fast_extension: nil,
+        status: nil,
+        pieces_count: 1,
+        socket: socket,
+        ltep: ltep,
+        pex_outbound: %{initial_sent?: initial_sent?, initial_pending?: false, sent: sent}
+      }
+    end
+
+    defp apply_snapshot(state, current) do
+      Peer.Controller.State.apply_pex_snapshot(state, current, send_fun: fn _payload -> :ok end)
+    end
+
+    defp listen_socket do
+      {:ok, listen} =
+        :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+      {:ok, {ip, port}} = :inet.sockname(listen)
+      {listen, {ip, port}}
+    end
+
+    test "initial snapshot on first apply without prior announce churn" do
+      current =
+        for i <- 1..3, into: %{} do
+          ep = {{10, 0, 0, i}, 6000 + i}
+          {ep, UtPex.Entry.new(ep)}
+        end
+
+      state = outbound_state(initial_sent?: false)
+      after_state = apply_snapshot(state, current)
+
+      assert after_state.pex_outbound.initial_sent?
+      assert map_size(after_state.pex_outbound.sent) == 3
+    end
+
+    test "excludes the relay's own socket endpoint from outbound snapshots" do
+      {listen, {ip, port}} = listen_socket()
+      {:ok, client} = :gen_tcp.connect(ip, port, [:binary, active: false])
+      {:ok, server} = :gen_tcp.accept(listen)
+
+      on_exit(fn ->
+        if is_port(listen), do: :gen_tcp.close(listen)
+        if is_port(client), do: :gen_tcp.close(client)
+        if is_port(server), do: :gen_tcp.close(server)
+      end)
+
+      {:ok, self_ep} = Peer.Transport.safe_peername(server)
+      other_ep = {{10, 0, 0, 99}, 6999}
+
+      current = %{
+        self_ep => UtPex.Entry.new(self_ep),
+        other_ep => UtPex.Entry.new(other_ep)
+      }
+
+      state = outbound_state(socket: server, initial_sent?: false)
+      after_state = apply_snapshot(state, current)
+
+      refute Map.has_key?(after_state.pex_outbound.sent, self_ep)
+      assert Map.has_key?(after_state.pex_outbound.sent, other_ep)
+    end
+
+    test "each connection keeps independent sent maps" do
+      ep_a = {{10, 0, 0, 1}, 7001}
+      ep_b = {{10, 0, 0, 2}, 7002}
+      ep_c = {{10, 0, 0, 3}, 7003}
+
+      current = %{
+        ep_a => UtPex.Entry.new(ep_a),
+        ep_b => UtPex.Entry.new(ep_b),
+        ep_c => UtPex.Entry.new(ep_c)
+      }
+
+      state1 = outbound_state(initial_sent?: true, sent: %{ep_a => UtPex.Entry.new(ep_a)})
+      state2 = outbound_state(initial_sent?: true, sent: %{})
+
+      after1 = apply_snapshot(state1, current)
+      after2 = apply_snapshot(state2, current)
+
+      assert map_size(after1.pex_outbound.sent) == 3
+      assert map_size(after2.pex_outbound.sent) == 3
+      refute state1.pex_outbound.sent == state2.pex_outbound.sent
+    end
+
+    test "unchanged snapshot tick does not advance sent state" do
+      ep = {{10, 0, 0, 8}, 7008}
+      current = %{ep => UtPex.Entry.new(ep)}
+
+      state =
+        outbound_state(
+          initial_sent?: true,
+          sent: %{ep => UtPex.Entry.new(ep)}
+        )
+
+      after_state = apply_snapshot(state, current)
+      assert after_state.pex_outbound.sent == state.pex_outbound.sent
+    end
+
+    test "non-initial deltas spill past 50 added peers across ticks" do
+      sent =
+        for i <- 1..50, into: %{} do
+          ep = {{10, 1, 0, i}, 8000 + i}
+          {ep, UtPex.Entry.new(ep)}
+        end
+
+      current =
+        Map.merge(
+          sent,
+          for i <- 51..105, into: %{} do
+            ep = {{10, 2, 0, i}, 8100 + i}
+            {ep, UtPex.Entry.new(ep)}
+          end
+        )
+
+      state = outbound_state(initial_sent?: true, sent: sent)
+      after1 = apply_snapshot(state, current)
+      assert map_size(after1.pex_outbound.sent) == 100
+
+      after2 = apply_snapshot(after1, current)
+      assert map_size(after2.pex_outbound.sent) == 105
+
+      after3 = apply_snapshot(after2, current)
+      assert after3.pex_outbound.sent == after2.pex_outbound.sent
+    end
+
+    test "re-handshake with ut_pex sends initial once" do
+      state = outbound_state(initial_sent?: false)
+      payload = Bento.encode!(%{"m" => %{"ut_pex" => Peer.UtPex.Extension.local_id()}})
+
+      merged = Peer.Controller.State.handle_extended(state, 0, payload)
+      assert Peer.Controller.State.pex_initial_needed?(merged)
+
+      pending = Peer.Controller.State.mark_pex_initial_pending(merged)
+      refute Peer.Controller.State.pex_initial_needed?(pending)
+
+      once = apply_snapshot(pending, %{})
+      assert once.pex_outbound.initial_sent?
+
+      twice = Peer.Controller.State.handle_extended(once, 0, payload)
+      assert twice.pex_outbound.initial_sent?
+      assert twice.pex_outbound.sent == once.pex_outbound.sent
+      refute Peer.Controller.State.pex_initial_needed?(twice)
+    end
+
+    test "private torrents stay silent on outbound apply" do
+      hash = :crypto.strong_rand_bytes(20)
+      _model = start_private_model(hash)
+      ep = {{10, 0, 0, 50}, 6881}
+      current = %{ep => UtPex.Entry.new(ep)}
+
+      state = outbound_state(hash: hash, initial_sent?: false)
+      after_state = apply_snapshot(state, current)
+
+      refute after_state.pex_outbound.initial_sent?
+      assert after_state.pex_outbound.sent == %{}
+    end
+
+    test "failed wire send does not advance per-connection sent state" do
+      ep = {{10, 0, 0, 7}, 7007}
+      current = %{ep => UtPex.Entry.new(ep)}
+      state = outbound_state(initial_sent?: true, sent: %{})
+
+      routed = Peer.Controller.State.apply_pex_snapshot(state, current)
+
+      assert routed.pex_outbound.sent == %{}
+    end
   end
 end

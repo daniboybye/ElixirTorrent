@@ -22,6 +22,9 @@ defmodule Peer.Controller.State do
     # The 50-contact BEP 11 cap does not apply to the first inbound snapshot.
     # This is connection state; an added-only delta is not inherently "initial".
     pex_inbound: %{initial?: true},
+    # BEP 11 outbound is per-connection: each remote that negotiates ut_pex gets its
+    # own view of what we already told them (`sent`), not a torrent-global ledger.
+    pex_outbound: %{initial_sent?: false, initial_pending?: false, sent: %{}},
     hash_requests: %{},
     requests: MapSet.new(),
     # Inbound block requests accepted for asynchronous disk reads but not yet
@@ -84,6 +87,11 @@ defmodule Peer.Controller.State do
             rate: {integer(), non_neg_integer()} | nil
           },
           pex_inbound: %{initial?: boolean()},
+          pex_outbound: %{
+            initial_sent?: boolean(),
+            initial_pending?: boolean(),
+            sent: %{endpoint() => Peer.UtPex.Entry.t()}
+          },
           hash_requests: %{Peer.HashTransfer.ref() => map()},
           requests: MapSet.t(subpiece()),
           upload_requests: MapSet.t(subpiece()),
@@ -274,8 +282,11 @@ defmodule Peer.Controller.State do
 
     # BEP 10: advertise listen port and global addresses so peers can dial us (incl. IPv6).
     case Peer.LTEP.handshake_exchange(key(state), session, opts) do
-      {:ok, ltep} -> %__MODULE__{state | ltep: ltep}
-      {:error, _} -> state
+      {:ok, ltep} ->
+        Map.put(state, :ltep, ltep)
+
+      {:error, _} ->
+        state
     end
   end
 
@@ -341,8 +352,122 @@ defmodule Peer.Controller.State do
     put_in(state.holepunch.pex_endpoints, pex_endpoints)
   end
 
+  # After LTEP merge, send one initial added snapshot (200-cap, not 50) if the remote
+  # advertises ut_pex and we have not sent initial on this connection yet.
+  @spec maybe_send_initial_pex_snapshot(t(), map(), keyword()) :: t()
+  defp maybe_send_initial_pex_snapshot(%__MODULE__{} = state, current, opts)
+       when is_map(current) do
+    if pex_outbound_peer?(state) do
+      deliver_pex_delta(state, current, Keyword.put(opts, :initial?, true))
+    else
+      state
+    end
+  end
+
+  @spec deliver_pex_delta(t(), map(), keyword()) :: t()
+  defp deliver_pex_delta(state, current, opts) do
+    current = Peer.UtPex.drop_self(current, own_endpoint(state))
+    initial? = Keyword.get(opts, :initial?, false)
+
+    {added, dropped} =
+      if initial? do
+        {Map.values(current), []}
+      else
+        Peer.UtPex.outbound_delta(state.pex_outbound.sent, current)
+      end
+
+    case Peer.UtPex.encode_delta(added, dropped, initial?: initial?) do
+      {:ok, payload, report} ->
+        case deliver_pex_payload(state, payload, opts) do
+          {:ok, state} ->
+            apply_pex_encode_report(state, report, initial?)
+
+          {:error, state} when initial? ->
+            put_in(state.pex_outbound.initial_pending?, false)
+
+          {:error, state} ->
+            state
+        end
+
+      {:error, :empty} when initial? ->
+        %{
+          state
+          | pex_outbound: %{
+              state.pex_outbound
+              | initial_sent?: true,
+                initial_pending?: false
+            }
+        }
+
+      {:error, :empty} ->
+        state
+    end
+  end
+
+  @spec deliver_pex_payload(t(), binary(), keyword()) :: {:ok, t()} | {:error, t()}
+  defp deliver_pex_payload(state, payload, opts) do
+    case Keyword.get(opts, :send_fun) do
+      fun when is_function(fun, 1) ->
+        case fun.(payload) do
+          :ok -> {:ok, state}
+          _ -> {:error, state}
+        end
+
+      nil ->
+        transmit_pex(state, payload)
+    end
+  end
+
+  @spec apply_pex_encode_report(t(), Peer.UtPex.EncodeReport.t(), boolean()) :: t()
+  defp apply_pex_encode_report(state, report, initial?) do
+    sent = Peer.UtPex.advance_sent_map(state.pex_outbound.sent, report)
+
+    %{
+      state
+      | pex_outbound: %{
+          state.pex_outbound
+          | sent: sent,
+            initial_sent?: state.pex_outbound.initial_sent? or initial?,
+            initial_pending?: false
+        }
+    }
+  end
+
+  @spec pex_outbound_peer?(t()) :: boolean()
+  defp pex_outbound_peer?(%__MODULE__{ltep: nil}), do: false
+
+  defp pex_outbound_peer?(%__MODULE__{} = state) do
+    Peer.UtPex.allowed?(state.hash) and
+      Peer.LTEP.Session.peer_supports?(state.ltep, Peer.UtPex.extension_name())
+  end
+
+  @doc false
+  @spec pex_initial_needed?(t()) :: boolean()
+  def pex_initial_needed?(%__MODULE__{} = state) do
+    pex_outbound_peer?(state) and not state.pex_outbound.initial_sent? and
+      not state.pex_outbound.initial_pending?
+  end
+
+  @doc false
+  @spec mark_pex_initial_pending(t()) :: t()
+  def mark_pex_initial_pending(%__MODULE__{} = state) do
+    put_in(state.pex_outbound.initial_pending?, true)
+  end
+
+  # BEP 11: never tell a peer about their own contact — drop the endpoint we would
+  # advertise for this connection (same source as `pex_entry/1`).
+  @spec own_endpoint(t()) :: Peer.UtPex.endpoint() | nil
+  defp own_endpoint(%__MODULE__{} = state) do
+    case pex_entry(state) do
+      {:ok, entry} -> Peer.UtPex.Entry.endpoint(entry)
+      :error -> nil
+    end
+  end
+
   @doc false
   @spec pex_entry(t()) :: {:ok, Peer.UtPex.Entry.t()} | :error
+  def pex_entry(%__MODULE__{socket: nil}), do: :error
+
   def pex_entry(%__MODULE__{} = state) do
     case Peer.Transport.safe_peername(state.socket) do
       {:ok, {ip, port}} -> {:ok, Peer.UtPex.entry_from_connection(state, ip, port)}
@@ -356,18 +481,56 @@ defmodule Peer.Controller.State do
     %{state | connection_origin: origin}
   end
 
-  @spec send_pex(t(), binary()) :: t()
-  def send_pex(%__MODULE__{ltep: nil} = state, _), do: state
+  @doc """
+  Applies the swarm's current eligible PEX snapshot for this connection.
 
+  BEP 11 expects each peer to learn the set we have not yet advertised to *them*;
+  caps and spillover are tracked in `pex_outbound.sent`, not on the torrent.
+  """
+  @spec apply_pex_snapshot(
+          t(),
+          %{Peer.UtPex.endpoint() => Peer.UtPex.Entry.t()},
+          keyword()
+        ) :: t()
+  def apply_pex_snapshot(%__MODULE__{} = state, current, opts \\ []) when is_map(current) do
+    cond do
+      not Peer.UtPex.allowed?(state.hash) ->
+        state
+
+      not pex_outbound_peer?(state) ->
+        state
+
+      not state.pex_outbound.initial_sent? ->
+        maybe_send_initial_pex_snapshot(state, current, opts)
+
+      true ->
+        deliver_pex_delta(state, current, Keyword.put(opts, :initial?, false))
+    end
+  end
+
+  @spec send_pex(t(), binary()) :: t()
   def send_pex(%__MODULE__{} = state, payload) when is_binary(payload) do
+    case transmit_pex(state, payload) do
+      {:ok, state} -> state
+      {:error, state} -> state
+    end
+  end
+
+  @spec transmit_pex(t(), binary()) :: {:ok, t()} | {:error, t()}
+  defp transmit_pex(%__MODULE__{ltep: nil} = state, _payload), do: {:error, state}
+
+  defp transmit_pex(%__MODULE__{} = state, payload) do
     ut_id = Peer.LTEP.Session.peer_extension_id(state.ltep, Peer.UtPex.extension_name())
 
     if Peer.UtPex.allowed?(state.hash) and is_integer(ut_id) and ut_id > 0 and
          Peer.LTEP.Session.peer_supports?(state.ltep, Peer.UtPex.extension_name()) do
-      _ = Peer.LTEP.send_extended(key(state), ut_id, payload)
+      case Peer.LTEP.send_extended(key(state), ut_id, payload) do
+        :ok -> {:ok, state}
+        _ -> {:error, state}
+      end
+    else
+      {:error, state}
     end
-
-    state
   end
 
   @spec respond_ut_metadata(t(), binary()) :: t()

@@ -1,9 +1,8 @@
 defmodule Peer.UtPex.EncodeReport do
   @moduledoc false
 
-  # Returned by `Peer.UtPex.encode_delta/3` so callers (future per-connection
-  # snapshots, item 4) can advance local state by what actually hit the wire —
-  # not by the pre-truncation candidate list.
+  # Returned by `Peer.UtPex.encode_delta/3` so per-connection outbound state advances
+  # by what actually hit the wire — not by the pre-truncation candidate list.
   defstruct initial?: false,
             added_total: 0,
             dropped_total: 0,

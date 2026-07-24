@@ -65,15 +65,19 @@ defmodule Peer.UtPex do
   @doc """
   Builds `%Entry{}` values for every connected peer eligible for PEX advertisement.
 
-  Item 4 will reuse this for per-connection initial snapshots; global broadcast
-  uses the same metadata source today.
+  Item 4 reuses this for per-connection initial snapshots and announce ticks.
   """
-  @spec snapshot_entries(Torrent.hash()) :: [Entry.t()]
-  def snapshot_entries(hash) do
+  @spec snapshot_entries(Torrent.hash(), keyword()) :: [Entry.t()]
+  def snapshot_entries(hash, opts \\ []) do
+    exclude_key = Keyword.get(opts, :exclude_key)
+
     hash
     |> Torrent.Swarm.peer_supervisors()
     |> Enum.flat_map(fn pid ->
       case Peer.get_key(pid) do
+        ^exclude_key when not is_nil(exclude_key) ->
+          []
+
         key when is_tuple(key) ->
           case Peer.Controller.pex_entry(key) do
             {:ok, entry} -> [entry]
@@ -90,10 +94,10 @@ defmodule Peer.UtPex do
   @doc """
   Snapshot map keyed by endpoint — preserves full `%Entry{}` through announce diffs.
   """
-  @spec snapshot_map(Torrent.hash()) :: %{endpoint() => Entry.t()}
-  def snapshot_map(hash) do
+  @spec snapshot_map(Torrent.hash(), keyword()) :: %{endpoint() => Entry.t()}
+  def snapshot_map(hash, opts \\ []) do
     hash
-    |> snapshot_entries()
+    |> snapshot_entries(opts)
     |> Map.new(&{Entry.endpoint(&1), &1})
   end
 
@@ -141,7 +145,67 @@ defmodule Peer.UtPex do
   end
 
   @doc """
+  Pushes the current eligible snapshot to every connected ut_pex peer.
+
+  Each controller diffs against its own `pex_outbound.sent`, applies BEP 11 caps,
+  and encodes a separate wire payload (no torrent-global pre-encoded delta).
+  """
+  @spec broadcast_snapshot(Torrent.hash(), %{endpoint() => Entry.t()}) :: :ok
+  def broadcast_snapshot(hash, current) when is_map(current) do
+    if allowed?(hash) do
+      try do
+        hash
+        |> Torrent.Swarm.peer_supervisors()
+        |> Enum.each(fn pid ->
+          if key = Peer.get_key(pid), do: Peer.Controller.send_pex_snapshot(key, current)
+        end)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  @doc false
+  @spec drop_self(map(), endpoint() | nil) :: %{endpoint() => Entry.t()}
+  def drop_self(current, nil), do: current
+
+  def drop_self(current, self_ep) when is_map(current), do: Map.delete(current, self_ep)
+
+  @doc false
+  @spec outbound_delta(%{endpoint() => Entry.t()}, %{endpoint() => Entry.t()}) ::
+          {[Entry.t()], [endpoint()]}
+  def outbound_delta(sent, current) when is_map(sent) and is_map(current) do
+    added =
+      current
+      |> Map.keys()
+      |> Enum.reject(&Map.has_key?(sent, &1))
+      |> Enum.map(&Map.fetch!(current, &1))
+
+    dropped =
+      sent
+      |> Map.keys()
+      |> Enum.reject(&Map.has_key?(current, &1))
+
+    {added, dropped}
+  end
+
+  @doc false
+  @spec advance_sent_map(%{endpoint() => Entry.t()}, EncodeReport.t()) :: %{
+          endpoint() => Entry.t()
+        }
+  def advance_sent_map(sent, %EncodeReport{} = report) when is_map(sent) do
+    sent
+    |> Map.drop(report.dropped_endpoints)
+    |> Map.merge(Map.new(report.added_entries, &{Entry.endpoint(&1), &1}))
+  end
+
+  @doc """
   Sends a ut_pex delta to every connected peer that advertises `ut_pex`.
+
+  Deprecated for outbound churn — prefer `broadcast_snapshot/2` so each connection
+  tracks its own sent set. Kept for tests and direct delta injection.
   """
   @spec broadcast(Torrent.hash(), [entry_input()], [entry_input()], keyword()) ::
           {:ok, EncodeReport.t()} | :ok
@@ -152,7 +216,9 @@ defmodule Peer.UtPex do
          {:ok, payload, report} <- encode_delta(added, dropped, opts) do
       hash
       |> Torrent.Swarm.peer_supervisors()
-      |> Enum.each(&Peer.send_pex(&1, payload))
+      |> Enum.each(fn pid ->
+        if key = Peer.get_key(pid), do: Peer.Controller.send_pex(key, payload)
+      end)
 
       {:ok, report}
     else

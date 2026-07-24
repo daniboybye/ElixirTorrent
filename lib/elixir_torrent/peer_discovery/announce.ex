@@ -1263,39 +1263,11 @@ defmodule PeerDiscovery.Announce do
 
   @spec apply_pex_snapshot_delta(%__MODULE__{}, map()) :: %__MODULE__{}
   defp apply_pex_snapshot_delta(%__MODULE__{hash: hash} = state, current) do
-    prev = state.pex_snapshot
-
-    added =
-      current
-      |> Map.keys()
-      |> Enum.reject(&Map.has_key?(prev, &1))
-      |> Enum.map(&Map.fetch!(current, &1))
-
-    dropped =
-      prev
-      |> Map.keys()
-      |> Enum.reject(&Map.has_key?(current, &1))
-      |> Enum.map(&Map.fetch!(prev, &1))
-
-    next_snapshot =
-      if added == [] and dropped == [] do
-        current
-      else
-        case Peer.UtPex.broadcast(hash, added, dropped, initial?: false) do
-          {:ok, report} ->
-            encoded_added =
-              Map.new(report.added_entries, &{Peer.UtPex.Entry.endpoint(&1), &1})
-
-            prev
-            |> Map.drop(report.dropped_endpoints)
-            |> Map.merge(encoded_added)
-
-          :ok ->
-            prev
-        end
-      end
-
-    %{state | pex_snapshot: next_snapshot}
+    # Always fan the snapshot out on the minute tick. A controller may still
+    # have capped spillover even when the torrent-global live set is unchanged;
+    # its per-connection sent map makes an unchanged tick a cheap no-op.
+    _ = Peer.UtPex.broadcast_snapshot(hash, current)
+    %{state | pex_snapshot: current}
   end
 
   # BEP 12: on success, move the working tracker to the front of its tier.

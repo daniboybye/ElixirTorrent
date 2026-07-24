@@ -282,6 +282,11 @@ defmodule Peer.Controller do
     do: GenServer.cast(via(key), {:send_pex, [payload]})
 
   @doc false
+  @spec send_pex_snapshot(Peer.key(), %{Peer.UtPex.endpoint() => Peer.UtPex.Entry.t()}) :: :ok
+  def send_pex_snapshot(key, snapshot) when is_map(snapshot),
+    do: GenServer.cast(via(key), {:apply_pex_snapshot, [snapshot]})
+
+  @doc false
   @spec pex_entry(Peer.key()) :: {:ok, Peer.UtPex.Entry.t()} | :error
   def pex_entry(key) do
     GenServer.call(via(key), :pex_entry, 500)
@@ -389,6 +394,27 @@ defmodule Peer.Controller do
 
   defp maybe_mark_productive_endpoint(_), do: :ok
 
+  def handle_info(:pex_initial_snapshot, %State{} = state) do
+    if state.pex_outbound.initial_pending? and not state.pex_outbound.initial_sent? do
+      key = State.key(state)
+      hash = state.hash
+
+      _ =
+        Task.start(fn ->
+          current =
+            try do
+              Peer.UtPex.snapshot_map(hash, exclude_key: key)
+            catch
+              :exit, _ -> %{}
+            end
+
+          send_pex_snapshot(key, current)
+        end)
+    end
+
+    {:noreply, state}
+  end
+
   # With trap_exit, non-parent linked exits (socket port, spawned helpers)
   # arrive here; propagate abnormal ones so the connection still dies with
   # terminate/2 running.
@@ -453,6 +479,7 @@ defmodule Peer.Controller do
       |> apply_protocol_startup(state.downloaded_at_connect, state.peer_reserved)
       |> Map.put(:downloaded_at_connect, nil)
       |> Map.put(:peer_reserved, nil)
+      |> maybe_schedule_pex_initial()
 
     {:reply, :ok, state}
   end
@@ -677,6 +704,25 @@ defmodule Peer.Controller do
     else
       state
     end
+  end
+
+  @spec maybe_schedule_pex_initial(State.t()) :: State.t()
+  defp maybe_schedule_pex_initial(%State{} = state) do
+    if State.pex_initial_needed?(state) do
+      send(self(), :pex_initial_snapshot)
+      State.mark_pex_initial_pending(state)
+    else
+      state
+    end
+  end
+
+  def handle_cast({:handle_extended, [0, payload]}, %State{} = state) do
+    state =
+      state
+      |> State.handle_extended(0, payload)
+      |> maybe_schedule_pex_initial()
+
+    {:noreply, state}
   end
 
   def handle_cast({message, _}, %State{hash: hash, fast_extension: nil} = state)
