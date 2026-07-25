@@ -228,7 +228,7 @@ defmodule Tracker do
     http_opts = [
       timeout: @scrape_http_timeout_ms,
       recv_timeout: @scrape_http_timeout_ms,
-      hackney: [pool: ElixirTorrentApplication.tracker_pool()]
+      hackney: [pool: false]
     ]
 
     try do
@@ -538,16 +538,15 @@ defmodule Tracker do
   # announced. The family option must accompany an IPv6 bind tuple; without it
   # Hackney's TCP connect path treats the tuple as an IPv4 bind and raises badarg.
   #
-  # `pool` — hackney keeps a keep-alive TCP connection per (host, port,
-  # connect_options) tuple in the pool, so successive announces to the same
-  # tracker (and the 5 min scrape tick) reuse the connection instead of
-  # re-doing TCP + TLS handshakes.
+  # `pool: false` isolates each announce. Hackney 4's named pool can terminate
+  # when a request owner exits while its connection process is starting; one
+  # torrent's normal shutdown must not break HTTP discovery for every torrent.
   @spec http_hackney_opts(:inet | :inet6, :inet.ip_address()) :: keyword()
   defp http_hackney_opts(:inet, ip),
-    do: [pool: ElixirTorrentApplication.tracker_pool(), connect_options: [{:ip, ip}]]
+    do: [pool: false, connect_options: [{:ip, ip}]]
 
   defp http_hackney_opts(:inet6, ip),
-    do: [pool: ElixirTorrentApplication.tracker_pool(), connect_options: [:inet6, {:ip, ip}]]
+    do: [pool: false, connect_options: [:inet6, {:ip, ip}]]
 
   @doc false
   @spec http_hackney_opts_for_test(:inet | :inet6, :inet.ip_address()) :: keyword()

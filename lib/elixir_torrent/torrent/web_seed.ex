@@ -43,7 +43,7 @@ defmodule Torrent.WebSeed do
   alias Torrent.{Bitfield, Downloads, FileHandle, Model, Swarm}
 
   # Bound on concurrent piece fetches — webseeds are a background source,
-  # not a stampede. Each in-flight piece opens its own hackney connection
+  # not a stampede. Each in-flight piece opens one direct hackney connection
   # (Range GET), so this also caps HTTP connection pressure on the seed.
   @max_parallel 2
   @tick_ms 5_000
@@ -326,7 +326,7 @@ defmodule Torrent.WebSeed do
       recv_timeout: @recv_timeout_ms,
       follow_redirect: true,
       max_redirect: 3,
-      hackney: [pool: ElixirTorrentApplication.tracker_pool()]
+      hackney: [pool: false]
     ]
 
     case HTTPoison.get(file_url, [{"Range", range_hdr}, {"Accept", "*/*"}], http_opts) do

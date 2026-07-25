@@ -26,6 +26,7 @@ defmodule HTTPTrackerIPv6Test do
       source_ip = {0x2001, 0xDB8, 0, 0, 0, 0, 0, 7}
       opts = Tracker.http_hackney_opts_for_test(:inet6, source_ip)
 
+      assert opts[:pool] == false
       assert opts[:connect_options] == [:inet6, {:ip, source_ip}]
     end
 

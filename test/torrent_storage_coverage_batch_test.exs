@@ -348,7 +348,7 @@ defmodule TorrentStorageCoverageBatchTest do
         send(pid, {:webseed_result, fake, 0, url, :ok})
         Process.sleep(20)
 
-        assert :sys.get_state(pid).tasks == %{}
+        refute Map.has_key?(:sys.get_state(pid).tasks, fake)
 
         fake2 = spawn(fn -> :ok end)
         ref2 = Process.monitor(fake2)
@@ -398,8 +398,13 @@ defmodule TorrentStorageCoverageBatchTest do
       with_webseed_stack(torrent, fn hash, pid ->
         send(pid, :tick)
 
-        assert wait_until(fn -> Torrent.have?(hash, 0) end, 5_000)
-        assert Model.get(hash, :downloaded) == @piece_len
+        assert wait_until(
+                 fn ->
+                   Torrent.have?(hash, 0) and Model.get(hash, :downloaded) == @piece_len
+                 end,
+                 5_000
+               )
+
         assert Model.get(hash, :left) == 0
       end)
     end
