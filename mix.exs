@@ -46,6 +46,8 @@ defmodule ElixirTorrent.MixProject do
     [
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:stream_data, "~> 1.2", only: :test},
+      {:propcheck, "~> 1.5", only: :test},
       {:bento, "~> 1.0.0"},
       {:recon, "~> 2.5.6"},
       {:logger_file_backend, "~> 0.0.14"},
@@ -62,7 +64,11 @@ defmodule ElixirTorrent.MixProject do
   end
 
   defp aliases do
-    [quality: ["compile --warnings-as-errors", "dialyzer", "credo --strict --all"]]
+    [
+      quality: ["compile --warnings-as-errors", "dialyzer", "credo --strict --all"],
+      "test.stress": ["cmd scripts/test-stress.sh"],
+      "test.races": ["cmd scripts/test-races.sh"]
+    ]
   end
 
   @spec description() :: String.t()
