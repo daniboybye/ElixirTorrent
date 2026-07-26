@@ -2,6 +2,7 @@ defmodule PeerEndpointsTest do
   use ExUnit.Case, async: false
 
   @hash :crypto.strong_rand_bytes(20)
+  @timeout 2_000
 
   setup do
     unless Process.whereis(Peer.Endpoints) do
@@ -11,6 +12,7 @@ defmodule PeerEndpointsTest do
     :ok
   end
 
+  @tag race_group: :endpoints
   test "registered?/3 tracks live peer processes" do
     peer =
       spawn(fn ->
@@ -24,8 +26,9 @@ defmodule PeerEndpointsTest do
     :ok = Peer.Endpoints.register(@hash, {9, 9, 9, 9}, 6881, peer)
     assert Peer.Endpoints.registered?(@hash, {9, 9, 9, 9}, 6881)
 
+    ref = Process.monitor(peer)
     Process.exit(peer, :kill)
-    Process.sleep(20)
+    TestSupport.Sync.await_down(ref, peer, @timeout)
 
     refute Peer.Endpoints.registered?(@hash, {9, 9, 9, 9}, 6881)
   end

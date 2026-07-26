@@ -163,16 +163,27 @@ defmodule Peer.DialStatsTest do
     current = Torrent.Swarm.count(hash)
 
     for _ <- 1..max(n - current, 0) do
-      spec = %{
-        id: :dummy_peer,
-        start: {Task, :start_link, [fn -> Process.sleep(:infinity) end]},
-        restart: :temporary
-      }
-
+      spec = blocked_swarm_child_spec(:dummy_peer)
       {:ok, _} = DynamicSupervisor.start_child(name, spec)
     end
 
     assert Torrent.Swarm.count(hash) == n
+  end
+
+  defp blocked_swarm_child_spec(id) do
+    %{
+      id: id,
+      start:
+        {Task, :start_link,
+         [
+           fn ->
+             receive do
+               :stop -> :ok
+             end
+           end
+         ]},
+      restart: :temporary
+    }
   end
 
   describe "select_peers_to_dial/3 — family throttling" do

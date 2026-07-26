@@ -192,9 +192,8 @@ defmodule DownloadPumpDeadlockTest do
       end)
 
       send(pid, :reconcile_pump)
-      # Tick again immediately to prove the handler is idempotent.
       send(pid, :reconcile_pump)
-      Process.sleep(50)
+      TestSupport.Sync.sync(pid)
       assert Process.alive?(pid)
     end)
   end

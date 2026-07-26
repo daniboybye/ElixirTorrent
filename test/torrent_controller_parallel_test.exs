@@ -48,11 +48,7 @@ defmodule TorrentControllerParallelTest do
       hash = :crypto.strong_rand_bytes(20)
       start_swarm(hash)
 
-      spec = %{
-        id: :dummy_peer,
-        start: {Task, :start_link, [fn -> Process.sleep(:infinity) end]},
-        restart: :temporary
-      }
+      spec = blocked_swarm_child_spec(:dummy_peer)
 
       {:ok, _} = DynamicSupervisor.start_child(swarm_via(hash), spec)
       assert Swarm.count(hash) == 1
@@ -67,7 +63,10 @@ defmodule TorrentControllerParallelTest do
       hash = setup_pump_scenario(unchoked: 1, choked: 1)
       controller_pid = start_controller(hash)
 
-      drive_pump(controller_pid, 2_000)
+      drive_pump(controller_pid, hash, fn h ->
+        active = Downloads.active_indices(h)
+        active != []
+      end)
 
       assert length(Downloads.active_indices(hash)) <= 2
     end
@@ -76,7 +75,7 @@ defmodule TorrentControllerParallelTest do
       hash = setup_pump_scenario(unchoked: 8, choked: 0)
       controller_pid = start_controller(hash)
 
-      drive_pump(controller_pid, 4_000)
+      drive_pump(controller_pid, hash, fn h -> length(Downloads.active_indices(h)) >= 8 end)
 
       assert length(Downloads.active_indices(hash)) >= 8
       assert length(Downloads.active_indices(hash)) <= 12
@@ -183,22 +182,42 @@ defmodule TorrentControllerParallelTest do
     pid
   end
 
-  defp drive_pump(controller_pid, duration_ms) do
+  defp drive_pump(controller_pid, hash, predicate, max_rounds \\ 24) do
     send(controller_pid, {:next_piece, :random})
 
-    deadline = System.monotonic_time(:millisecond) + duration_ms
-
-    _ =
-      Stream.repeatedly(fn ->
+    reached? =
+      Enum.reduce_while(1..max_rounds, false, fn _, _ ->
         send(controller_pid, :reconcile_pump)
         send(controller_pid, {:next_piece, :rare})
-        Process.sleep(250)
-      end)
-      |> Enum.take_while(fn _ ->
-        System.monotonic_time(:millisecond) < deadline
+        TestSupport.Sync.sync(controller_pid)
+
+        if predicate.(hash) do
+          {:halt, true}
+        else
+          {:cont, false}
+        end
       end)
 
+    assert reached?,
+           "pump did not reach expected download state within #{max_rounds} reconcile rounds"
+
     :ok
+  end
+
+  defp blocked_swarm_child_spec(id) do
+    %{
+      id: id,
+      start:
+        {Task, :start_link,
+         [
+           fn ->
+             receive do
+               :stop -> :ok
+             end
+           end
+         ]},
+      restart: :temporary
+    }
   end
 
   defp add_mock_peers(hash, configs) do

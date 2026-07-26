@@ -43,8 +43,7 @@ defmodule Torrent.SessionCheckpointTest do
     :ok = Model.downloaded_piece(hash, 0)
 
     send(pid, :checkpoint)
-    # handle_info is synchronous once the message is delivered
-    Process.sleep(50)
+    TestSupport.Sync.sync(pid)
 
     assert {:ok, session} = Session.load(hash)
     assert session.downloaded == 16_384
@@ -75,7 +74,7 @@ defmodule Torrent.SessionCheckpointTest do
 
     {:ok, pid} = Model.start_link(torrent)
     send(pid, :checkpoint)
-    Process.sleep(50)
+    TestSupport.Sync.sync(pid)
 
     assert Session.load(hash) == :error
   end

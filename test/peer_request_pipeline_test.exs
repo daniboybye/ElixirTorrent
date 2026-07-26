@@ -8,6 +8,8 @@ defmodule PeerRequestPipelineTest do
   alias Torrent.Downloads.Piece
   alias Torrent.Downloads.Piece.{Request, State}
 
+  @moduletag race_group: :pipeline
+
   @piece_len 16_384
   @peer_a <<11::160>>
   @peer_b <<22::160>>
@@ -117,7 +119,7 @@ defmodule PeerRequestPipelineTest do
 
         assert after_request.pending_requests == 0
         assert MapSet.size(after_request.requests) == 1
-        flush_request_casts()
+        drain_request_casts(1)
         cleanup_workers(piece_pid, peer_pid)
       end)
     end
@@ -174,7 +176,7 @@ defmodule PeerRequestPipelineTest do
 
         assert after_unchoke.pending_requests == reqq
         assert MapSet.size(after_unchoke.requests) == 0
-        flush_request_casts()
+        drain_request_casts(reqq)
         cleanup_workers(piece_pid, peer_pid)
       end)
     end
@@ -308,7 +310,8 @@ defmodule PeerRequestPipelineTest do
           ])
 
         _ = State.timeout(piece_state, @peer_a)
-        assert_eventually(fn -> controller_requests(key) == MapSet.new() end)
+        sync_controller_requests(key)
+        assert controller_requests(key) == MapSet.new()
       end)
     end
 
@@ -339,7 +342,8 @@ defmodule PeerRequestPipelineTest do
           ])
 
         _ = State.reject(piece_state, @peer_a, 0, @piece_len)
-        assert_eventually(fn -> controller_requests(key) == MapSet.new() end)
+        sync_controller_requests(key)
+        assert controller_requests(key) == MapSet.new()
       end)
     end
   end
@@ -381,7 +385,8 @@ defmodule PeerRequestPipelineTest do
         GenServer.stop(piece_pid, {:shutdown, :wrong_subpiece})
 
         assert_receive {:DOWN, ^ref, :process, ^piece_pid, {:shutdown, :wrong_subpiece}}, 500
-        assert_eventually(fn -> controller_requests(key) == MapSet.new() end)
+        sync_controller_requests(key)
+        assert controller_requests(key) == MapSet.new()
         assert Process.alive?(ctrl_pid)
       end)
     end
@@ -445,17 +450,16 @@ defmodule PeerRequestPipelineTest do
     :sys.get_state({:via, Registry, {Registry, {key, Peer.Controller}}}).requests
   end
 
-  defp assert_eventually(fun, attempts \\ 50) do
-    if fun.() do
-      :ok
-    else
-      if attempts > 0 do
-        Process.sleep(10)
-        assert_eventually(fun, attempts - 1)
-      else
-        flunk("condition not met: #{inspect(fun)}")
-      end
+  defp sync_controller_requests(key) do
+    TestSupport.Sync.sync({:via, Registry, {Registry, {key, Peer.Controller}}})
+  end
+
+  defp drain_request_casts(count) when is_integer(count) and count >= 0 do
+    for _ <- 1..count do
+      assert_receive {:"$gen_cast", {:request, _}}, 5_000
     end
+
+    :ok
   end
 
   defp start_piece_worker(hash, index) do
@@ -487,16 +491,6 @@ defmodule PeerRequestPipelineTest do
     if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
   catch
     :exit, _ -> :ok
-  end
-
-  # Piece-worker callbacks cast to self() during pure State tests; drain any
-  # {$gen_cast, {:request, _}} messages left in the mailbox.
-  defp flush_request_casts do
-    receive do
-      _ -> flush_request_casts()
-    after
-      0 -> :ok
-    end
   end
 end
 

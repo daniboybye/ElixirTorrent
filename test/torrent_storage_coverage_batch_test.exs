@@ -2,6 +2,7 @@ defmodule TorrentStorageCoverageBatchTest do
   use ExUnit.Case, async: false
 
   alias Torrent.{Bitfield, Downloads, Metadata, Model, Resume, Session, Swarm, Uploader, WebSeed}
+  alias Torrent.Downloads.Piece
   alias Torrent.Downloads.Piece.{Request, State}
 
   @piece_len 256
@@ -43,7 +44,7 @@ defmodule TorrentStorageCoverageBatchTest do
         assert_receive {:DOWN, ^ref, :process, ^resume, :normal}, 2_000
 
         send(controller, :reconcile_pump)
-        Process.sleep(20)
+        TestSupport.Sync.sync(controller)
         assert Process.alive?(controller)
         assert Model.get(hash, :left) == 2 * @piece_len
       end)
@@ -188,6 +189,7 @@ defmodule TorrentStorageCoverageBatchTest do
   end
 
   describe "Torrent.Uploader with FileHandle" do
+    @tag race_group: :uploader
     test "request reads bytes via FileHandle and accounts upload volume" do
       piece0 = random_piece()
       {torrent, _} = build_tiny_torrent([piece0])
@@ -198,7 +200,7 @@ defmodule TorrentStorageCoverageBatchTest do
         write_piece!(hash, 0, piece0)
         start_uploader_supervisor(hash)
 
-        assert {:ok, _task} =
+        assert {:ok, task_pid} =
                  Uploader.request(hash, @peer_a, 0, 0, 128, fn block ->
                    send(parent, {:block, block})
                  end)
@@ -207,10 +209,13 @@ defmodule TorrentStorageCoverageBatchTest do
         assert byte_size(block) == 128
         assert block == binary_part(piece0, 0, 128)
 
-        wait_until(fn -> Model.get(hash, :uploaded) == 128 end)
+        await_uploader_task(task_pid)
+        sync_model(hash)
+        assert Model.get(hash, :uploaded) == 128
       end)
     end
 
+    @tag race_group: :uploader
     test "cancelled callback does not account bytes that were never sent" do
       piece0 = random_piece()
       {torrent, _} = build_tiny_torrent([piece0])
@@ -312,7 +317,8 @@ defmodule TorrentStorageCoverageBatchTest do
         assert_receive {:DOWN, ^ref, :process, ^task_pid, _}, 2_000
 
         name = {0, 64, 0, @peer_a, hash}
-        assert wait_until(fn -> Registry.lookup(Registry, name) == [] end)
+        TestSupport.Sync.sync(Registry.PIDPartition0)
+        assert Registry.lookup(Registry, name) == []
       end)
     end
   end
@@ -382,7 +388,7 @@ defmodule TorrentStorageCoverageBatchTest do
       with_webseed_stack(torrent, fn hash, pid ->
         assert Process.alive?(pid)
         send(pid, :tick)
-        Process.sleep(20)
+        TestSupport.Sync.sync(pid)
         assert Process.alive?(pid)
         refute Model.downloaded?(hash)
       end)
@@ -402,7 +408,7 @@ defmodule TorrentStorageCoverageBatchTest do
         :sys.replace_state(pid, fn s -> %{s | tasks: tasks} end)
 
         send(pid, {:webseed_result, fake, 0, url, :ok})
-        Process.sleep(20)
+        TestSupport.Sync.sync(pid)
 
         refute Map.has_key?(:sys.get_state(pid).tasks, fake)
 
@@ -414,7 +420,7 @@ defmodule TorrentStorageCoverageBatchTest do
         end)
 
         send(pid, {:webseed_result, fake2, 0, url, {:error, :timeout}})
-        Process.sleep(20)
+        TestSupport.Sync.sync(pid)
 
         penalised = :sys.get_state(pid).url_state
         assert Map.has_key?(penalised, url)
@@ -433,14 +439,11 @@ defmodule TorrentStorageCoverageBatchTest do
         :sys.replace_state(pid, fn s -> %{s | tasks: %{task => {ref, 0, url}}} end)
 
         send(pid, {:DOWN, ref, :process, task, :killed})
+        TestSupport.Sync.sync(pid)
 
-        assert wait_until(
-                 fn ->
-                   state = :sys.get_state(pid)
-                   state.tasks == %{} and Map.has_key?(state.url_state, url)
-                 end,
-                 2_000
-               )
+        state = :sys.get_state(pid)
+        assert state.tasks == %{}
+        assert Map.has_key?(state.url_state, url)
       end)
     end
 
@@ -453,14 +456,9 @@ defmodule TorrentStorageCoverageBatchTest do
 
       with_webseed_stack(torrent, fn hash, pid ->
         send(pid, :tick)
-
-        assert wait_until(
-                 fn ->
-                   Torrent.have?(hash, 0) and Model.get(hash, :downloaded) == @piece_len
-                 end,
-                 5_000
-               )
-
+        await_webseed_tasks(pid)
+        assert Torrent.have?(hash, 0)
+        assert Model.get(hash, :downloaded) == @piece_len
         assert Model.get(hash, :left) == 0
       end)
     end
@@ -497,7 +495,8 @@ defmodule TorrentStorageCoverageBatchTest do
         reply_for_range(first, first_request, piece0, piece1)
         reply_for_range(second, second_request, piece0, piece1)
 
-        assert wait_until(fn -> Model.downloaded?(hash) end, 5_000)
+        await_webseed_tasks(pid)
+        assert Model.downloaded?(hash)
         assert Process.alive?(pid)
       end)
     end
@@ -513,15 +512,12 @@ defmodule TorrentStorageCoverageBatchTest do
         assert_receive {:webseed_http_request, ^server_ref, request_pid, _request}, 2_000
         reply_http(request_pid, 206, corrupt_piece(piece0))
 
-        assert wait_until(
-                 fn ->
-                   state = :sys.get_state(pid)
+        await_webseed_tasks(pid)
 
-                   state.tasks == %{} and MapSet.member?(state.disabled_urls, url) and
-                     not Map.has_key?(state.url_state, url)
-                 end,
-                 2_000
-               )
+        state = :sys.get_state(pid)
+        assert state.tasks == %{}
+        assert MapSet.member?(state.disabled_urls, url)
+        refute Map.has_key?(state.url_state, url)
 
         send(pid, :tick)
         send(pid, :tick)
@@ -542,15 +538,12 @@ defmodule TorrentStorageCoverageBatchTest do
         assert_receive {:webseed_http_request, ^server_ref, first, _request}, 2_000
         reply_http(first, 503, "temporarily unavailable")
 
-        assert wait_until(
-                 fn ->
-                   state = :sys.get_state(pid)
+        await_webseed_tasks(pid)
 
-                   state.tasks == %{} and Map.has_key?(state.url_state, url) and
-                     not MapSet.member?(state.disabled_urls, url)
-                 end,
-                 2_000
-               )
+        state = :sys.get_state(pid)
+        assert state.tasks == %{}
+        assert Map.has_key?(state.url_state, url)
+        refute MapSet.member?(state.disabled_urls, url)
 
         send(pid, :tick)
         refute_receive {:webseed_http_request, ^server_ref, _request_pid, _request}, 200
@@ -565,7 +558,8 @@ defmodule TorrentStorageCoverageBatchTest do
         assert_receive {:webseed_http_request, ^server_ref, second, _request}, 2_000
         reply_http(second, 206, piece0)
 
-        assert wait_until(fn -> Torrent.have?(hash, 0) end, 5_000)
+        await_webseed_tasks(pid)
+        assert Torrent.have?(hash, 0)
         assert Process.alive?(pid)
       end)
     end
@@ -633,7 +627,10 @@ defmodule TorrentStorageCoverageBatchTest do
         start_swarm(hash)
         start_downloads(hash)
         Downloads.piece(hash, 1, fn -> :ok end, fn -> :ok end)
-        assert wait_until(fn -> 1 in Downloads.active_indices(hash) end)
+        piece_pid = Piece.whereis(hash, 1)
+        assert is_pid(piece_pid)
+        TestSupport.Sync.sync(piece_pid)
+        assert 1 in Downloads.active_indices(hash)
 
         {_pid, key} =
           add_swarm_peer(hash, @peer_b,
@@ -680,10 +677,10 @@ defmodule TorrentStorageCoverageBatchTest do
         on_exit(fn -> safe_stop(pid) end)
 
         send(pid, :resume_ready)
-        Process.sleep(20)
+        TestSupport.Sync.sync(pid)
         send(pid, :reconcile_pump)
         send(pid, {:next_piece, :random})
-        Process.sleep(20)
+        TestSupport.Sync.sync(pid)
         assert Process.alive?(pid)
       end)
     end
@@ -706,13 +703,16 @@ defmodule TorrentStorageCoverageBatchTest do
         start_swarm(hash)
         start_downloads(hash)
         Downloads.piece(hash, 0, fn -> :ok end, fn -> :ok end)
-        assert wait_until(fn -> Downloads.piece_active?(hash, 0) end)
+        piece0_pid = Piece.whereis(hash, 0)
+        assert is_pid(piece0_pid)
+        TestSupport.Sync.sync(piece0_pid)
+        assert Downloads.piece_active?(hash, 0)
 
         {:ok, pid} = GenServer.start(Torrent.Controller, hash)
         on_exit(fn -> safe_stop(pid) end)
 
         send(pid, {:next_piece, :random})
-        Process.sleep(50)
+        TestSupport.Sync.sync(pid)
 
         assert Model.get(hash, :peer_status) == :seed
         refute Downloads.piece_active?(hash, 0)
@@ -730,7 +730,7 @@ defmodule TorrentStorageCoverageBatchTest do
 
         send(pid, :unchoke)
         send(pid, :reset_rank)
-        Process.sleep(20)
+        TestSupport.Sync.sync(pid)
         assert Process.alive?(pid)
       end)
     end
@@ -754,8 +754,19 @@ defmodule TorrentStorageCoverageBatchTest do
         {:ok, pid} = GenServer.start(Torrent.Controller, hash)
         on_exit(fn -> safe_stop(pid) end)
 
-        send(pid, :reconcile_pump)
-        assert wait_until(fn -> Downloads.active_indices(hash) != [] end, 2_000)
+        reached? =
+          Enum.reduce_while(1..12, false, fn _, _ ->
+            send(pid, :reconcile_pump)
+            TestSupport.Sync.sync(pid)
+
+            if Downloads.active_indices(hash) != [] do
+              {:halt, true}
+            else
+              {:cont, false}
+            end
+          end)
+
+        assert reached?
       end)
     end
   end
@@ -1315,16 +1326,30 @@ defmodule TorrentStorageCoverageBatchTest do
     end)
   end
 
-  defp wait_until(fun, timeout_ms \\ 1_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
+  defp await_uploader_task(task_pid) do
+    ref = Process.monitor(task_pid)
+    assert_receive {:DOWN, ^ref, :process, ^task_pid, _}, 5_000
+  end
 
-    Stream.repeatedly(fn ->
-      if fun.(), do: :ok, else: Process.sleep(10)
-    end)
-    |> Enum.find_value(fn
-      :ok -> true
-      _ -> if System.monotonic_time(:millisecond) >= deadline, do: :timeout
-    end) == true
+  defp sync_model(hash) do
+    TestSupport.Sync.sync({:via, Registry, {Registry, {hash, Model}}})
+  end
+
+  defp await_webseed_tasks(pid, timeout \\ 5_000) do
+    tasks = :sys.get_state(pid).tasks
+
+    if map_size(tasks) == 0 do
+      :ok
+    else
+      monitors = for {fetch_pid, _} <- tasks, do: {fetch_pid, Process.monitor(fetch_pid)}
+
+      Enum.each(monitors, fn {fetch_pid, ref} ->
+        assert_receive {:DOWN, ^ref, :process, ^fetch_pid, _}, timeout
+      end)
+
+      TestSupport.Sync.sync(pid)
+      await_webseed_tasks(pid, timeout)
+    end
   end
 
   defp safe_stop(pid) when is_pid(pid) do

@@ -99,7 +99,7 @@ defmodule EndgamePinMonopolyTest do
         on_exit(fn -> safe_stop(controller) end)
 
         send(controller, :reconcile_pump)
-        Process.sleep(20)
+        TestSupport.Sync.sync(controller)
 
         # Endgame reconcile must have attempted piece 1, not only the monopoly index 0.
         assert Peer.Controller.download_piece(key) in [0, 1]
@@ -234,14 +234,14 @@ defmodule EndgamePinMonopolyTest do
   defp wait_active_pieces(hash, expected) do
     target = Enum.sort(expected)
 
-    Enum.reduce_while(1..100, false, fn _, _ ->
-      if Enum.sort(Downloads.active_indices(hash)) == target do
-        {:halt, true}
-      else
-        Process.sleep(10)
-        {:cont, false}
-      end
-    end) == true
+    Enum.each(target, fn index ->
+      piece_pid = Downloads.Piece.whereis(hash, index)
+      assert is_pid(piece_pid)
+      TestSupport.Sync.sync(piece_pid)
+    end)
+
+    assert Enum.sort(Downloads.active_indices(hash)) == target
+    true
   end
 
   defp start_swarm(hash) do

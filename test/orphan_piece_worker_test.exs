@@ -42,7 +42,7 @@ defmodule OrphanPieceWorkerTest do
     peer_id = Peer.id()
 
     with_model(torrent, fn _ ->
-      peer = spawn(fn -> Process.sleep(:infinity) end)
+      {peer, _peer_mon, _peer_release} = TestSupport.Sync.spawn_blocked()
       mon_ref = Process.monitor(peer)
 
       state =
@@ -79,7 +79,7 @@ defmodule OrphanPieceWorkerTest do
       end)
 
       Downloads.abort_idle_piece(hash, 2, force: true)
-      Process.sleep(50)
+      TestSupport.Sync.sync(pid)
       assert Process.alive?(pid)
 
       on_exit(fn ->

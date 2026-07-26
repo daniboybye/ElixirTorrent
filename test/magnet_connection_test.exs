@@ -46,6 +46,8 @@ defmodule Acceptor.Connection.HandshakesTest do
 
   alias Acceptor.Connection.Handshakes
 
+  @timeout 5_000
+
   test "recv does not crash when controlling_process gets badarg on closed socket" do
     {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, packet: :raw])
     {:ok, port} = :inet.port(listen)
@@ -54,6 +56,22 @@ defmodule Acceptor.Connection.HandshakesTest do
     :gen_tcp.close(listen)
 
     assert :ok = Handshakes.recv(socket)
-    Process.sleep(50)
+    await_inbound_handshake_tasks()
+  end
+
+  defp await_inbound_handshake_tasks(timeout \\ @timeout) do
+    case Task.Supervisor.children(Acceptor.Connection.Handshakes) do
+      [] ->
+        :ok
+
+      children ->
+        refs = for pid <- children, do: {pid, Process.monitor(pid)}
+
+        Enum.each(refs, fn {pid, ref} ->
+          assert_receive {:DOWN, ^ref, :process, ^pid, _}, timeout
+        end)
+
+        await_inbound_handshake_tasks(timeout)
+    end
   end
 end

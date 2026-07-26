@@ -199,7 +199,11 @@ defmodule Peer.HashTransferTest do
           {:ok, pid} =
             Task.Supervisor.start_child(
               {:via, Registry, {Registry, {hash, Torrent.HashServe}}},
-              fn -> Process.sleep(30_000) end
+              fn ->
+                receive do
+                  :stop -> :ok
+                end
+              end
             )
 
           pid
