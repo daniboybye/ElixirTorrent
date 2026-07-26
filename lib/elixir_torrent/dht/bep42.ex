@@ -84,17 +84,20 @@ defmodule DHT.BEP42 do
     data
     |> :binary.bin_to_list()
     |> Enum.reduce(0xFFFFFFFF, fn byte, crc ->
-      crc = Bitwise.bxor(crc, byte)
-
-      Enum.reduce(0..7, crc, fn _, c ->
-        if Bitwise.band(c, 1) == 1 do
-          Bitwise.bxor(Bitwise.bsr(c, 1), @crc32c_poly)
-        else
-          Bitwise.bsr(c, 1)
-        end
-      end)
+      crc32c_byte(Bitwise.bxor(crc, byte))
     end)
     |> Bitwise.bxor(0xFFFFFFFF)
     |> Bitwise.band(0xFFFFFFFF)
+  end
+
+  @spec crc32c_byte(non_neg_integer()) :: non_neg_integer()
+  defp crc32c_byte(crc) do
+    Enum.reduce(0..7, crc, fn _, c ->
+      if Bitwise.band(c, 1) == 1 do
+        Bitwise.bxor(Bitwise.bsr(c, 1), @crc32c_poly)
+      else
+        Bitwise.bsr(c, 1)
+      end
+    end)
   end
 end

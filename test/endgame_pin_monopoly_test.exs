@@ -179,16 +179,19 @@ defmodule EndgamePinMonopolyTest do
     with_model(torrent, fn t ->
       start_swarm(torrent.hash)
       start_downloads(torrent.hash)
-
-      Enum.each(active_indices, fn index ->
-        Downloads.piece(torrent.hash, index, fn -> :ok end, fn -> :ok end)
-      end)
+      start_endgame_pieces(torrent.hash, active_indices)
 
       assert wait_active_pieces(torrent.hash, active_indices)
 
       assert Model.get(torrent.hash, :mode) == :endgame
 
       fun.(t)
+    end)
+  end
+
+  defp start_endgame_pieces(hash, active_indices) do
+    Enum.each(active_indices, fn index ->
+      Downloads.piece(hash, index, fn -> :ok end, fn -> :ok end)
     end)
   end
 
@@ -260,11 +263,9 @@ defmodule EndgamePinMonopolyTest do
   end
 
   defp safe_stop(pid) when is_pid(pid) do
-    try do
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
-    catch
-      :exit, _ -> :ok
-    end
+    if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+  catch
+    :exit, _ -> :ok
   end
 end
 

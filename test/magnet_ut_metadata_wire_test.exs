@@ -1,14 +1,14 @@
 defmodule Magnet.UtMetadataWireTest do
   use ExUnit.Case, async: true
 
-  alias Peer.LTEP.Handshake
+  alias Peer.LTEP.{Handshake, Session}
 
   test "request_piece sends on peer ut_metadata id and reads reply on local id" do
     peer_hs = %Handshake{m: %{"ut_metadata" => 7}, metadata_size: 100}
-    ltep = Peer.LTEP.Session.new() |> Peer.LTEP.Session.apply_peer_handshake(peer_hs)
+    ltep = Session.new() |> Session.apply_peer_handshake(peer_hs)
 
-    assert Peer.LTEP.Session.peer_extension_id(ltep, "ut_metadata") == 7
-    assert Peer.LTEP.Session.local_extension_id(ltep, "ut_metadata") == 1
+    assert Session.peer_extension_id(ltep, "ut_metadata") == 7
+    assert Session.local_extension_id(ltep, "ut_metadata") == 1
 
     request = Magnet.UtMetadata.encode_request(0)
     data = Magnet.UtMetadata.encode_data(0, 100, :binary.copy(<<9>>, 100))

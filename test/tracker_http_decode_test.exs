@@ -377,28 +377,29 @@ defmodule TrackerHTTPDecodeTest do
   defp serve_http(listen, responder) do
     case :gen_tcp.accept(listen) do
       {:ok, socket} ->
-        spawn(fn ->
-          case :gen_tcp.recv(socket, 0, 5_000) do
-            {:ok, request} ->
-              {code, body} = responder.(request)
-              status = if code == 200, do: "200 OK", else: "#{code} Error"
-
-              response =
-                "HTTP/1.1 #{status}\r\nContent-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n#{body}"
-
-              :gen_tcp.send(socket, response)
-
-            {:error, _} ->
-              :ok
-          end
-
-          :gen_tcp.close(socket)
-        end)
-
+        spawn(fn -> handle_http_client(socket, responder) end)
         serve_http(listen, responder)
 
       {:error, _} ->
         :ok
     end
+  end
+
+  defp handle_http_client(socket, responder) do
+    case :gen_tcp.recv(socket, 0, 5_000) do
+      {:ok, request} ->
+        {code, body} = responder.(request)
+        status = if code == 200, do: "200 OK", else: "#{code} Error"
+
+        response =
+          "HTTP/1.1 #{status}\r\nContent-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n#{body}"
+
+        :gen_tcp.send(socket, response)
+
+      {:error, _} ->
+        :ok
+    end
+
+    :gen_tcp.close(socket)
   end
 end

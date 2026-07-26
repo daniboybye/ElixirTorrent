@@ -535,11 +535,9 @@ defmodule PeerControllerStateTest do
   end
 
   defp stop_quietly(pid) do
-    try do
-      if is_pid(pid) and Process.alive?(pid), do: GenServer.stop(pid, :normal, 500)
-    catch
-      :exit, _ -> :ok
-    end
+    if is_pid(pid) and Process.alive?(pid), do: GenServer.stop(pid, :normal, 500)
+  catch
+    :exit, _ -> :ok
   end
 
   defp stop_worker(pid), do: stop_quietly(pid)

@@ -1,4 +1,8 @@
 defmodule Torrent.Downloads.Piece do
+  @moduledoc """
+  GenServer assembling one piece from BEP 3 block requests and verifying its SHA-1.
+  """
+
   use GenServer
   use Via
 
@@ -119,7 +123,7 @@ defmodule Torrent.Downloads.Piece do
   end
 
   def handle_cast({fun, args}, state) do
-    is_complete(apply(State, fun, [state | args]))
+    finish_if_complete(apply(State, fun, [state | args]))
   end
 
   # Overall stall timeout — no progress on any subpiece for @timeout_get_request.
@@ -187,7 +191,7 @@ defmodule Torrent.Downloads.Piece do
   # :timeout above — free the pump slot before dying. Keep the state alive on
   # the stop tuple so terminate/2 has it as a fallback in case fire_dealt/1
   # here is skipped by a future refactor.
-  defp is_complete(%State{requests: [], waiting: []} = state) do
+  defp finish_if_complete(%State{requests: [], waiting: []} = state) do
     hash_hex = Torrent.hex_encoded_hash(state.hash)
 
     Logger.info(
@@ -205,7 +209,7 @@ defmodule Torrent.Downloads.Piece do
     end
   end
 
-  defp is_complete(state), do: {:noreply, state}
+  defp finish_if_complete(state), do: {:noreply, state}
 
   # Best-effort invocation of the controller's pump-wake closure. It is
   # idempotent from the controller's perspective (posts {:next_piece, :rare};

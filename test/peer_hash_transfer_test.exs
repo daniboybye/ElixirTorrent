@@ -3,7 +3,7 @@ defmodule Peer.HashTransferTest do
 
   alias Peer.{Controller, HashTransfer, HashWire}
   alias Peer.Controller.State
-  alias Torrent.Merkle
+  alias Torrent.{FileHandle, Merkle}
 
   @block Merkle.block_size()
   @timeout 5_000
@@ -327,7 +327,7 @@ defmodule Peer.HashTransferTest do
     }
 
     {:ok, model} = Torrent.Model.start_link(torrent)
-    {:ok, _} = Torrent.FileHandle.Store.start_link(hash)
+    {:ok, _} = FileHandle.Store.start_link(hash)
 
     on_exit(fn ->
       for pid <- [model] do

@@ -1,4 +1,8 @@
 defmodule Torrent.PiecesStatistic do
+  @moduledoc """
+  ETS-backed rarest-first piece availability counts across connected peers.
+  """
+
   @type index :: Torrent.index() | nil
   @type status :: :allowed_fast | :complete | :processing | nil
 
@@ -182,7 +186,7 @@ defmodule Torrent.PiecesStatistic do
   # def to_file!(hash) do
   #   file_name = hash <> ".bin"
   #   File.touch!(file_name)
-  #   :ok = :ets.tab2file(table_ref(hash), file_name) 
+  #   :ok = :ets.tab2file(table_ref(hash), file_name)
   # end
 
   defp inc_counter(ref, index),

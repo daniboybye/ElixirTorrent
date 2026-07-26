@@ -16,21 +16,21 @@ defmodule UTP.Dispatcher do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @spec register(0..65535, :inet.ip_address(), :inet.port_number(), pid()) :: :ok
+  @spec register(0..65_535, :inet.ip_address(), :inet.port_number(), pid()) :: :ok
   def register(conn_id, ip, port, pid) do
     true = :ets.insert(@table, {conn_key(ip, port, conn_id), pid})
     :ok
   end
 
   @doc false
-  @spec register_pair(0..65535, 0..65535, :inet.ip_address(), :inet.port_number(), pid()) ::
+  @spec register_pair(0..65_535, 0..65_535, :inet.ip_address(), :inet.port_number(), pid()) ::
           :ok
   def register_pair(recv_id, send_id, ip, port, pid) do
     :ok = register(recv_id, ip, port, pid)
     :ok = register(send_id, ip, port, pid)
   end
 
-  @spec unregister(0..65535, :inet.ip_address(), :inet.port_number()) :: :ok
+  @spec unregister(0..65_535, :inet.ip_address(), :inet.port_number()) :: :ok
   def unregister(conn_id, ip, port) do
     # OTP app stop races are expected: UTP.Dispatcher (and its named ETS table) can
     # disappear between an existence check and :ets.delete/2 when lingering
@@ -47,7 +47,7 @@ defmodule UTP.Dispatcher do
   end
 
   @doc false
-  @spec unregister_pair(0..65535, 0..65535, :inet.ip_address(), :inet.port_number()) :: :ok
+  @spec unregister_pair(0..65_535, 0..65_535, :inet.ip_address(), :inet.port_number()) :: :ok
   def unregister_pair(recv_id, send_id, ip, port) do
     :ok = unregister(recv_id, ip, port)
     :ok = unregister(send_id, ip, port)
@@ -136,9 +136,8 @@ defmodule UTP.Dispatcher do
   @impl true
   def handle_call({:start_connect, ip, port, opts}, _from, _state) do
     reply =
-      with {:ok, udp_socket} <- udp_socket(ip),
-           {:ok, socket_ref} <- UTP.Connection.start_client(udp_socket, ip, port, opts) do
-        {:ok, socket_ref}
+      with {:ok, udp_socket} <- udp_socket(ip) do
+        UTP.Connection.start_client(udp_socket, ip, port, opts)
       end
 
     {:reply, reply, %{}}
@@ -185,7 +184,7 @@ defmodule UTP.Dispatcher do
   defp handle_syn(ip, port, udp_socket, header, payload, extensions) do
     case UTP.Connection.start_server(udp_socket, ip, port, header.conn_id) do
       {:ok, {:utp, pid}} ->
-        recv_id = rem(header.conn_id + 1, 65536)
+        recv_id = rem(header.conn_id + 1, 65_536)
         send_id = header.conn_id
         :ok = register_pair(recv_id, send_id, ip, port, pid)
         send(pid, {:utp_packet, header, payload, extensions})

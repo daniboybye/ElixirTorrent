@@ -107,8 +107,7 @@ defmodule NAT.PortMapper do
 
         addrs =
           reflexives
-          |> Enum.map(fn {ip, port} -> "#{Acceptor.format_ip(ip)}:#{port}" end)
-          |> Enum.join(",")
+          |> Enum.map_join(",", fn {ip, port} -> "#{Acceptor.format_ip(ip)}:#{port}" end)
 
         Logger.info(
           "[nat] stun mapping=#{mapping} hole_punch_viable=#{mapping == :endpoint_independent} reflexive=#{addrs}"
@@ -130,33 +129,10 @@ defmodule NAT.PortMapper do
       end
 
     upnp =
-      cond do
-        MapSet.member?(dead, :upnp) ->
-          %{tcp: :skipped, udp: :skipped}
-
-        true ->
-          case NAT.UPnP.discover_control_url() do
-            {:ok, {control_url, service_type}} ->
-              external_ip =
-                case NAT.UPnP.get_external_ip(control_url, service_type) do
-                  {:ok, ip} ->
-                    Logger.info("[nat] upnp external_ip=#{ip}")
-                    ip
-
-                  {:error, reason} ->
-                    Logger.info("[nat] upnp external_ip unavailable reason=#{inspect(reason)}")
-                    nil
-                end
-
-              %{
-                tcp: map_upnp(control_url, service_type, port, :tcp, external_ip),
-                udp: map_upnp(control_url, service_type, port, :udp, external_ip)
-              }
-
-            {:error, reason} ->
-              Logger.info("[nat] failed via=upnp reason=#{inspect(reason)}")
-              %{tcp: {:error, reason}, udp: {:error, reason}}
-          end
+      if MapSet.member?(dead, :upnp) do
+        %{tcp: :skipped, udp: :skipped}
+      else
+        discover_upnp_mappings(port)
       end
 
     %{
@@ -165,6 +141,39 @@ defmodule NAT.PortMapper do
       upnp_tcp: upnp.tcp,
       upnp_udp: upnp.udp
     }
+  end
+
+  @spec discover_upnp_mappings(:inet.port_number()) :: %{
+          tcp: term(),
+          udp: term()
+        }
+  defp discover_upnp_mappings(port) do
+    case NAT.UPnP.discover_control_url() do
+      {:ok, {control_url, service_type}} ->
+        external_ip = upnp_external_ip(control_url, service_type)
+
+        %{
+          tcp: map_upnp(control_url, service_type, port, :tcp, external_ip),
+          udp: map_upnp(control_url, service_type, port, :udp, external_ip)
+        }
+
+      {:error, reason} ->
+        Logger.info("[nat] failed via=upnp reason=#{inspect(reason)}")
+        %{tcp: {:error, reason}, udp: {:error, reason}}
+    end
+  end
+
+  @spec upnp_external_ip(String.t(), String.t()) :: String.t() | nil
+  defp upnp_external_ip(control_url, service_type) do
+    case NAT.UPnP.get_external_ip(control_url, service_type) do
+      {:ok, ip} ->
+        Logger.info("[nat] upnp external_ip=#{ip}")
+        ip
+
+      {:error, reason} ->
+        Logger.info("[nat] upnp external_ip unavailable reason=#{inspect(reason)}")
+        nil
+    end
   end
 
   @doc false
@@ -179,25 +188,43 @@ defmodule NAT.PortMapper do
   @doc false
   @spec update_method_state(map(), map()) :: {%{atom() => non_neg_integer()}, MapSet.t()}
   def update_method_state(%{method_failures: mf, dead_methods: dead}, summary) do
-    Enum.reduce([:natpmp, :upnp], {mf, dead}, fn method, {mf_acc, dead_acc} ->
-      cond do
-        MapSet.member?(dead_acc, method) ->
-          {mf_acc, dead_acc}
-
-        method_ok?(summary, method) ->
-          {Map.put(mf_acc, method, 0), dead_acc}
-
-        true ->
-          n = Map.fetch!(mf_acc, method) + 1
-
-          if n >= @method_max_failures do
-            Logger.info("[nat] give_up method=#{method} after=#{n} consecutive failures")
-            {Map.put(mf_acc, method, n), MapSet.put(dead_acc, method)}
-          else
-            {Map.put(mf_acc, method, n), dead_acc}
-          end
-      end
+    Enum.reduce([:natpmp, :upnp], {mf, dead}, fn method, acc ->
+      apply_method_failure_update(method, summary, acc)
     end)
+  end
+
+  @spec apply_method_failure_update(
+          :natpmp | :upnp,
+          map(),
+          {%{atom() => non_neg_integer()}, MapSet.t()}
+        ) :: {%{atom() => non_neg_integer()}, MapSet.t()}
+  defp apply_method_failure_update(method, summary, {mf_acc, dead_acc}) do
+    cond do
+      MapSet.member?(dead_acc, method) ->
+        {mf_acc, dead_acc}
+
+      method_ok?(summary, method) ->
+        {Map.put(mf_acc, method, 0), dead_acc}
+
+      true ->
+        bump_method_failure(mf_acc, dead_acc, method)
+    end
+  end
+
+  @spec bump_method_failure(
+          %{atom() => non_neg_integer()},
+          MapSet.t(),
+          :natpmp | :upnp
+        ) :: {%{atom() => non_neg_integer()}, MapSet.t()}
+  defp bump_method_failure(mf_acc, dead_acc, method) do
+    n = Map.fetch!(mf_acc, method) + 1
+
+    if n >= @method_max_failures do
+      Logger.info("[nat] give_up method=#{method} after=#{n} consecutive failures")
+      {Map.put(mf_acc, method, n), MapSet.put(dead_acc, method)}
+    else
+      {Map.put(mf_acc, method, n), dead_acc}
+    end
   end
 
   @spec method_ok?(map(), :natpmp | :upnp) :: boolean()

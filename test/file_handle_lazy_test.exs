@@ -26,36 +26,44 @@ defmodule FileHandleLazyTest do
 
     this_len = fn index -> if index == last_index, do: last_piece_length, else: @piece_len end
 
-    # piece hashes are always computed from the CLEAN content
-    pieces =
-      for index <- 0..last_index, into: <<>> do
-        :crypto.hash(:sha, binary_part(content, index * @piece_len, this_len.(index)))
-      end
-
+    pieces = build_piece_hashes(content, last_index, this_len)
     hash = :crypto.strong_rand_bytes(20)
     tmp = Path.join(System.tmp_dir!(), "et_fh_#{Base.encode16(hash)}")
     File.mkdir_p!(tmp)
 
     if write_to_disk? do
-      disk =
-        for index <- 0..last_index, into: <<>> do
-          clean = binary_part(content, index * @piece_len, this_len.(index))
-
-          # Corrupt in place: flip one byte so the size is unchanged (Store only
-          # reuses an on-disk file whose size already matches) but the SHA-1 no
-          # longer matches the piece hash.
-          if index in corrupt_indices do
-            <<first, rest::binary>> = clean
-            <<Bitwise.bxor(first, 0xFF), rest::binary>>
-          else
-            clean
-          end
-        end
-
+      disk = build_disk_bytes(content, last_index, this_len, corrupt_indices)
       File.write!(Path.join(tmp, "data.bin"), disk)
     end
 
-    torrent = %Torrent{
+    torrent = build_lazy_test_torrent(hash, tmp, total, last_index, last_piece_length, pieces)
+    start_model_stack(torrent, hash, tmp, content, last_index)
+  end
+
+  defp build_piece_hashes(content, last_index, this_len) do
+    for index <- 0..last_index, into: <<>> do
+      :crypto.hash(:sha, binary_part(content, index * @piece_len, this_len.(index)))
+    end
+  end
+
+  defp build_disk_bytes(content, last_index, this_len, corrupt_indices) do
+    for index <- 0..last_index, into: <<>> do
+      clean = binary_part(content, index * @piece_len, this_len.(index))
+      maybe_corrupt_piece(index, clean, corrupt_indices)
+    end
+  end
+
+  defp maybe_corrupt_piece(index, clean, corrupt_indices) do
+    if index in corrupt_indices do
+      <<first, rest::binary>> = clean
+      <<Bitwise.bxor(first, 0xFF), rest::binary>>
+    else
+      clean
+    end
+  end
+
+  defp build_lazy_test_torrent(hash, tmp, total, last_index, last_piece_length, pieces) do
+    %Torrent{
       hash: hash,
       metadata: %{
         "info" => %{
@@ -70,7 +78,9 @@ defmodule FileHandleLazyTest do
       last_piece_length: last_piece_length,
       download_dir: tmp
     }
+  end
 
+  defp start_model_stack(torrent, hash, tmp, content, last_index) do
     {:ok, model} = Model.start_link(torrent)
     :ok = PiecesStatistic.init(torrent)
     {:ok, fh} = FileHandle.start_link(hash)

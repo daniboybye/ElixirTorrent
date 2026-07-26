@@ -26,7 +26,7 @@ defmodule UTPLoopbackTest do
         end
       end)
 
-    :ok = UTP.Dispatcher.register_pair(conn_id, rem(conn_id + 1, 65536), ip, port, conn)
+    :ok = UTP.Dispatcher.register_pair(conn_id, rem(conn_id + 1, 65_536), ip, port, conn)
 
     header = %Packet{
       type: Packet.st_data(),

@@ -75,9 +75,8 @@ defmodule Torrents do
   def download_magnet(magnet_uri, opts \\ []) when is_binary(magnet_uri) and is_list(opts) do
     with {:ok, %Magnet{} = magnet} <- Magnet.parse(magnet_uri),
          {:ok, ref} <- Magnet.Fetcher.run(magnet),
-         {:ok, path} <- Magnet.Fetcher.await(ref),
-         result <- download(path, Keyword.put(opts, :resume, :skip)) do
-      result
+         {:ok, path} <- Magnet.Fetcher.await(ref) do
+      download(path, Keyword.put(opts, :resume, :skip))
     end
   end
 
@@ -124,9 +123,8 @@ defmodule Torrents do
          download_root <-
            if(delete_data?, do: Torrent.Removal.download_root(hash), else: File.cwd!()),
          :ok <- stop_pid(pid),
-         :ok <- Torrent.Session.delete(hash),
-         :ok <- maybe_delete_data(paths, download_root, delete_data?) do
-      :ok
+         :ok <- Torrent.Session.delete(hash) do
+      maybe_delete_data(paths, download_root, delete_data?)
     end
   end
 
@@ -200,17 +198,23 @@ defmodule Torrents do
 
   @spec find_pid(binary()) :: {:ok, pid()} | {:error, :not_found}
   defp find_pid(hash) do
-    case Enum.find_value(DynamicSupervisor.which_children(__MODULE__), fn
-           {_id, pid, _type, _modules} when is_pid(pid) ->
-             if Torrent.get_hash(pid) == hash, do: pid
-
-           _ ->
-             nil
-         end) do
+    case child_pid_matching_hash(hash) do
       nil -> {:error, :not_found}
       pid -> {:ok, pid}
     end
   end
+
+  defp child_pid_matching_hash(hash) do
+    __MODULE__
+    |> DynamicSupervisor.which_children()
+    |> Enum.find_value(&pid_for_hash(&1, hash))
+  end
+
+  defp pid_for_hash({_id, pid, _type, _modules}, hash) when is_pid(pid) do
+    if Torrent.get_hash(pid) == hash, do: pid
+  end
+
+  defp pid_for_hash(_, _hash), do: nil
 
   @spec stop_pid(pid()) :: :ok | {:error, term()}
   defp stop_pid(pid) do

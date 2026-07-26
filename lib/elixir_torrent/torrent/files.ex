@@ -14,8 +14,8 @@ defmodule Torrent.Files do
   """
 
   alias Torrent.Bitfield
-  alias Torrent.Model
   alias Torrent.Merkle
+  alias Torrent.Model
   alias Torrent.PathLayout
 
   @doc """
@@ -30,6 +30,10 @@ defmodule Torrent.Files do
   def padding?(_), do: false
 
   defmodule Entry do
+    @moduledoc """
+    One user-visible file row with download progress for the WebUI file list.
+    """
+
     @enforce_keys [:index, :path, :name, :length, :downloaded, :progress, :complete?]
     defstruct [:index, :path, :name, :length, :downloaded, :progress, :complete?]
 

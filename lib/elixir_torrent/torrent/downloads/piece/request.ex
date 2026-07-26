@@ -1,4 +1,8 @@
 defmodule Torrent.Downloads.Piece.Request do
+  @moduledoc """
+  In-flight subpiece request to a peer (begin/length + timeout timer).
+  """
+
   @enforce_keys [:peer_id, :subpiece]
   defstruct [:peer_id, :subpiece, timer: nil]
 

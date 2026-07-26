@@ -10,6 +10,7 @@ defmodule DownloadPumpDeadlockTest do
 
   alias Peer.Controller.State
   alias Torrent.Downloads
+  alias Torrent.Downloads.Piece
 
   setup do
     {:ok, _} = Application.ensure_all_started(:elixir_torrent)
@@ -41,7 +42,7 @@ defmodule DownloadPumpDeadlockTest do
         end
       end)
 
-      Torrent.Downloads.Piece.download(pid, fn -> :ok end, fn -> :ok end)
+      Piece.download(pid, fn -> :ok end, fn -> :ok end)
 
       :sys.replace_state(pid, fn state -> %{state | waiting: [], requests: []} end)
 
@@ -67,7 +68,7 @@ defmodule DownloadPumpDeadlockTest do
         end
       end)
 
-      Torrent.Downloads.Piece.download(pid, fn -> :ok end, fn -> :ok end)
+      Piece.download(pid, fn -> :ok end, fn -> :ok end)
 
       capped =
         for n <- 1..3 do
@@ -112,7 +113,7 @@ defmodule DownloadPumpDeadlockTest do
         end
       end)
 
-      Torrent.Downloads.Piece.download(pid, fn -> :ok end, fn -> :ok end)
+      Piece.download(pid, fn -> :ok end, fn -> :ok end)
 
       assert :ok =
                Downloads.request(hash, 0, peer_id, fn idx, begin, len ->
@@ -147,9 +148,9 @@ defmodule DownloadPumpDeadlockTest do
       # doesn't propagate to the test process. Piece.init/1 expects
       # {hash, index} — see State.make/1.
       {:ok, pid} =
-        GenServer.start(Torrent.Downloads.Piece, {hash, index})
+        GenServer.start(Piece, {hash, index})
 
-      Torrent.Downloads.Piece.download(
+      Piece.download(
         pid,
         fn -> send(parent, :downloaded_fired) end,
         fn -> send(parent, :dealt_fired) end

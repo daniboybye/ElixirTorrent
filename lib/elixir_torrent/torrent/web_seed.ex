@@ -186,19 +186,16 @@ defmodule Torrent.WebSeed do
         state
 
       true ->
-        case eligible_url(state) do
-          nil ->
-            state
+        maybe_pick_from_url(state)
+    end
+  end
 
-          url ->
-            case pick_index(state) do
-              nil ->
-                state
-
-              index ->
-                spawn_fetch(state, index, url)
-            end
-        end
+  defp maybe_pick_from_url(state) do
+    with url when not is_nil(url) <- eligible_url(state),
+         index when not is_nil(index) <- pick_index(state) do
+      spawn_fetch(state, index, url)
+    else
+      _ -> state
     end
   end
 

@@ -94,15 +94,13 @@ defmodule Peer.HashWire do
   def decode_hashes(body) when byte_size(body) >= @header_size do
     <<header::binary-size(@header_size), hashes::binary>> = body
 
-    cond do
-      rem(byte_size(hashes), @hash_size) != 0 ->
-        {:error, :invalid_hashes_size}
-
-      true ->
-        case decode_header(header) do
-          {:ok, req} -> {:ok, req, hashes}
-          error -> error
-        end
+    if rem(byte_size(hashes), @hash_size) != 0 do
+      {:error, :invalid_hashes_size}
+    else
+      case decode_header(header) do
+        {:ok, req} -> {:ok, req, hashes}
+        error -> error
+      end
     end
   end
 
@@ -178,9 +176,8 @@ defmodule Peer.HashWire do
   @spec validate_response_header(t(), pos_integer(), non_neg_integer()) ::
           :ok | {:error, atom()}
   def validate_response_header(%__MODULE__{} = req, piece_layer, num_layers) do
-    with :ok <- validate_request(req, piece_layer),
-         :ok <- validate_proof_depth(req, num_layers) do
-      :ok
+    with :ok <- validate_request(req, piece_layer) do
+      validate_proof_depth(req, num_layers)
     end
   end
 

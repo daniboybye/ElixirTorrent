@@ -2,8 +2,9 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
   use ExUnit.Case, async: false
 
   alias Acceptor.Connection.Handshakes
-  alias Peer.{DialStats, LTEP, UtHolepunch}
   alias AcceptorDialHandshakeCoverageBatchTest.SentCollector
+  alias Peer.Controller.State
+  alias Peer.{DialStats, LTEP, UtHolepunch}
 
   @timeout 5_000
 
@@ -1135,7 +1136,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
     test "inbound holepunch flood is limited per peer" do
       hash = :crypto.strong_rand_bytes(20)
       state = holepunch_state(hash)
-      key = Peer.Controller.State.key(state)
+      key = State.key(state)
       {:ok, _} = SentCollector.start_link(key, self())
       payload = UtHolepunch.encode(:rendezvous, {11, 0, 0, 60}, 6881)
       limit = UtHolepunch.inbound_rate_limit()
@@ -1586,11 +1587,9 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
   end
 
   defp safe_stop(pid) when is_pid(pid) do
-    try do
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
-    catch
-      :exit, _ -> :ok
-    end
+    if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+  catch
+    :exit, _ -> :ok
   end
 
   defp flush_exits do
@@ -1664,6 +1663,10 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.RelayPeer do
   @moduledoc false
   use GenServer
 
+  alias Peer.LTEP.{Handshake, Session}
+  alias Peer.UtHolepunch.Extension, as: UtHolepunchExtension
+  alias Peer.UtPex.Extension, as: UtPexExtension
+
   def start_link(_swarm_hash, hash, id, test_pid) do
     GenServer.start_link(__MODULE__, {hash, id, test_pid})
   end
@@ -1680,8 +1683,8 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.RelayPeer do
       )
 
     ltep =
-      Peer.LTEP.Session.new([Peer.UtHolepunch.Extension, Peer.UtPex.Extension])
-      |> Peer.LTEP.Session.apply_peer_handshake(%Peer.LTEP.Handshake{
+      Session.new([UtHolepunchExtension, UtPexExtension])
+      |> Session.apply_peer_handshake(%Handshake{
         m: %{"ut_holepunch" => 3, "ut_pex" => 2}
       })
 
@@ -1697,6 +1700,9 @@ end
 defmodule AcceptorDialHandshakeCoverageBatchTest.TargetPeer do
   @moduledoc false
   use GenServer
+
+  alias Peer.LTEP.{Handshake, Session}
+  alias Peer.UtHolepunch.Extension, as: UtHolepunchExtension
 
   def start_link(_swarm_hash, hash, id, endpoint_ip, endpoint_port, holepunch?) do
     GenServer.start_link(__MODULE__, {hash, id, endpoint_ip, endpoint_port, holepunch?})
@@ -1715,13 +1721,13 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.TargetPeer do
 
     ltep =
       if holepunch? do
-        Peer.LTEP.Session.new([Peer.UtHolepunch.Extension])
-        |> Peer.LTEP.Session.apply_peer_handshake(%Peer.LTEP.Handshake{
+        Session.new([UtHolepunchExtension])
+        |> Session.apply_peer_handshake(%Handshake{
           m: %{"ut_holepunch" => 3}
         })
       else
-        Peer.LTEP.Session.new([])
-        |> Peer.LTEP.Session.apply_peer_handshake(%Peer.LTEP.Handshake{m: %{}})
+        Session.new([])
+        |> Session.apply_peer_handshake(%Handshake{m: %{}})
       end
 
     :sys.replace_state({:via, Registry, {Registry, {key, Peer.Controller}}}, fn state ->

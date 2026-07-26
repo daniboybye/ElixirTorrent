@@ -6,7 +6,9 @@ defmodule Peer.UtPex do
   peer blobs in `added`, `added6`, `dropped`, and `dropped6` (optional `*.f` flags).
   """
 
-  alias Peer.UtPex.{EncodeReport, Entry}
+  alias Acceptor.Connection.Handshakes
+  alias Peer.LTEP.Session
+  alias Peer.UtPex.{EncodeReport, Entry, Filter}
   alias Tracker.UDP
 
   @extension_name "ut_pex"
@@ -73,22 +75,24 @@ defmodule Peer.UtPex do
 
     hash
     |> Torrent.Swarm.peer_supervisors()
-    |> Enum.flat_map(fn pid ->
-      case Peer.get_key(pid) do
-        ^exclude_key when not is_nil(exclude_key) ->
-          []
-
-        key when is_tuple(key) ->
-          case Peer.Controller.pex_entry(key) do
-            {:ok, entry} -> [entry]
-            _ -> []
-          end
-
-        _ ->
-          []
-      end
-    end)
+    |> Enum.flat_map(&pex_entry_from_supervisor(&1, exclude_key))
     |> Enum.uniq_by(&Entry.endpoint/1)
+  end
+
+  defp pex_entry_from_supervisor(pid, exclude_key) do
+    case Peer.get_key(pid) do
+      ^exclude_key when not is_nil(exclude_key) ->
+        []
+
+      key when is_tuple(key) ->
+        case Peer.Controller.pex_entry(key) do
+          {:ok, entry} -> [entry]
+          _ -> []
+        end
+
+      _ ->
+        []
+    end
   end
 
   @doc """
@@ -110,56 +114,62 @@ defmodule Peer.UtPex do
   @spec ingest(Torrent.hash(), binary(), keyword()) :: {:ok, [Peer.t()], [Peer.t()]} | :error
   def ingest(hash, payload, opts \\ []) when is_binary(payload) do
     result = if allowed?(hash), do: decode(payload, opts), else: :error
-    pex_source = Keyword.get(opts, :pex_source)
 
     case result do
       {:ok, added, dropped} ->
-        filtered_added = Peer.UtPex.Filter.filter_peers(added, hash)
-        filtered_dropped = Peer.UtPex.Filter.filter_peers(dropped, hash)
-
-        connectable =
-          filtered_added
-          |> prioritize_seed_peers()
-          |> Enum.filter(&Acceptor.Connection.Handshakes.connectable_peer?/1)
-
-        # Source-owned candidates enter the bounded ConnectionManager queue as a
-        # complete valid initial snapshot. The queue applies its BEP 40 ordering
-        # and 64-per-source / 256-global retention caps; truncating to the
-        # non-initial wire limit here would discard up to 150 valid initial
-        # contacts before that deterministic selection can run.
-        peers =
-          if is_binary(pex_source) and byte_size(pex_source) == 20 do
-            connectable
-          else
-            # Legacy callers without a remote source dial directly and have no
-            # bounded ownership queue, so retain the defensive immediate cap.
-            Enum.take(connectable, @max_inbound_offer)
-          end
-
-        if peers != [] do
-          require Logger
-
-          seed_count = Enum.count(peers, &(&1.seed == true))
-
-          Logger.info(
-            "[ut_pex] ingest hash=#{Torrent.hex_encoded_hash(hash)} added=#{length(peers)} seeds=#{seed_count}"
-          )
-        end
-
-        if is_binary(pex_source) and byte_size(pex_source) == 20 do
-          :ok = Peer.ConnectionManager.apply_pex_delta(hash, pex_source, peers, filtered_dropped)
-        else
-          if peers != [] do
-            Acceptor.handshakes(peers, hash)
-          end
-        end
-
-        {:ok, filtered_added, filtered_dropped}
+        ingest_decoded_peers(hash, added, dropped, opts)
 
       :error ->
         :error
     end
   end
+
+  defp ingest_decoded_peers(hash, added, dropped, opts) do
+    pex_source = Keyword.get(opts, :pex_source)
+    filtered_added = Filter.filter_peers(added, hash)
+    filtered_dropped = Filter.filter_peers(dropped, hash)
+
+    connectable =
+      filtered_added
+      |> prioritize_seed_peers()
+      |> Enum.filter(&Handshakes.connectable_peer?/1)
+
+    peers = ingest_connectable_peers(connectable, pex_source)
+    log_ingest_peers(hash, peers)
+    ingest_apply_peers(hash, peers, filtered_dropped, pex_source)
+    {:ok, filtered_added, filtered_dropped}
+  end
+
+  defp ingest_connectable_peers(connectable, pex_source) do
+    if pex_source?(pex_source) do
+      connectable
+    else
+      Enum.take(connectable, @max_inbound_offer)
+    end
+  end
+
+  defp log_ingest_peers(hash, peers) do
+    if peers != [] do
+      require Logger
+
+      seed_count = Enum.count(peers, &(&1.seed == true))
+
+      Logger.info(
+        "[ut_pex] ingest hash=#{Torrent.hex_encoded_hash(hash)} added=#{length(peers)} seeds=#{seed_count}"
+      )
+    end
+  end
+
+  defp ingest_apply_peers(hash, peers, filtered_dropped, pex_source) do
+    if pex_source?(pex_source) do
+      :ok = Peer.ConnectionManager.apply_pex_delta(hash, pex_source, peers, filtered_dropped)
+    else
+      if peers != [], do: Acceptor.handshakes(peers, hash)
+    end
+  end
+
+  defp pex_source?(pex_source),
+    do: is_binary(pex_source) and byte_size(pex_source) == 20
 
   @doc false
   @spec prioritize_seed_peers([Peer.t()]) :: [Peer.t()]
@@ -237,16 +247,19 @@ defmodule Peer.UtPex do
 
     with true <- allowed?(hash),
          {:ok, payload, report} <- encode_delta(added, dropped, opts) do
-      hash
-      |> Torrent.Swarm.peer_supervisors()
-      |> Enum.each(fn pid ->
-        if key = Peer.get_key(pid), do: Peer.Controller.send_pex(key, payload)
-      end)
-
+      broadcast_pex_to_swarm(hash, payload)
       {:ok, report}
     else
       _ -> :ok
     end
+  end
+
+  defp broadcast_pex_to_swarm(hash, payload) do
+    hash
+    |> Torrent.Swarm.peer_supervisors()
+    |> Enum.each(fn pid ->
+      if key = Peer.get_key(pid), do: Peer.Controller.send_pex(key, payload)
+    end)
   end
 
   @doc """
@@ -303,18 +316,22 @@ defmodule Peer.UtPex do
     if byte_size(payload) > @max_inbound_payload_bytes do
       :error
     else
-      case Bento.decode(payload) do
-        {:ok, dict} when is_map(dict) ->
-          with :ok <- validate_wire_dict(dict, opts),
-               {:ok, added, dropped} <- parse_wire_dict(dict) do
-            {:ok, added, dropped}
-          else
-            :error -> :error
-          end
+      decode_bento_payload(payload, opts)
+    end
+  end
 
-        _ ->
-          :error
-      end
+  defp decode_bento_payload(payload, opts) do
+    case Bento.decode(payload) do
+      {:ok, dict} when is_map(dict) ->
+        with :ok <- validate_wire_dict(dict, opts),
+             {:ok, added, dropped} <- parse_wire_dict(dict) do
+          {:ok, added, dropped}
+        else
+          :error -> :error
+        end
+
+      _ ->
+        :error
     end
   end
 
@@ -342,11 +359,11 @@ defmodule Peer.UtPex do
     Peer.Transport.mse?(socket) or ltep_encryption?(ltep)
   end
 
-  @spec ltep_encryption?(Peer.LTEP.Session.t() | nil) :: boolean()
+  @spec ltep_encryption?(Session.t() | nil) :: boolean()
   defp ltep_encryption?(nil), do: false
 
-  defp ltep_encryption?(%Peer.LTEP.Session{} = ltep) do
-    case Peer.LTEP.Session.peer_handshake(ltep).e do
+  defp ltep_encryption?(%Session{} = ltep) do
+    case Session.peer_handshake(ltep).e do
       1 -> true
       _ -> false
     end
@@ -372,7 +389,7 @@ defmodule Peer.UtPex do
   defp peer_supports_holepunch?(%Peer.Controller.State{ltep: nil}), do: false
 
   defp peer_supports_holepunch?(%Peer.Controller.State{ltep: ltep}) do
-    Peer.LTEP.Session.peer_supports?(ltep, Peer.UtHolepunch.extension_name())
+    Session.peer_supports?(ltep, Peer.UtHolepunch.extension_name())
   end
 
   @spec flag_if(byte(), byte(), boolean()) :: byte()
@@ -417,17 +434,21 @@ defmodule Peer.UtPex do
   @spec validate_compact_fields(map()) :: :ok | :error
   defp validate_compact_fields(dict) do
     Enum.reduce_while(@compact_keys, :ok, fn key, :ok ->
-      case Map.get(dict, key) do
-        nil ->
-          {:cont, :ok}
-
-        bin when is_binary(bin) ->
-          if valid_compact?(bin, family_for_key(key)), do: {:cont, :ok}, else: {:halt, :error}
-
-        _ ->
-          {:halt, :error}
-      end
+      validate_compact_field(dict, key)
     end)
+  end
+
+  defp validate_compact_field(dict, key) do
+    case Map.get(dict, key) do
+      nil ->
+        {:cont, :ok}
+
+      bin when is_binary(bin) ->
+        if valid_compact?(bin, family_for_key(key)), do: {:cont, :ok}, else: {:halt, :error}
+
+      _ ->
+        {:halt, :error}
+    end
   end
 
   @spec validate_flag_fields(map()) :: :ok | :error

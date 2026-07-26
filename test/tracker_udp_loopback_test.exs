@@ -320,41 +320,47 @@ defmodule TrackerUDPLoopbackTest do
   defp handle_bep15(data, state) do
     protocol_id = @protocol_id
 
-    cond do
-      match_connect?(data, protocol_id) ->
-        <<^protocol_id::binary-size(8), 0::32, tid::binary-size(4)>> = data
+    if match_connect?(data, protocol_id) do
+      bep15_connect_response(data, protocol_id, state)
+    else
+      bep15_action_response(data, state)
+    end
+  end
 
-        if state[:drop_first_connect_response] do
-          nil
-        else
-          <<0::32, tid::binary, @connection_id::binary>>
-        end
+  defp bep15_connect_response(data, protocol_id, state) do
+    <<^protocol_id::binary-size(8), 0::32, tid::binary-size(4)>> = data
 
-      true ->
-        <<_connection_id::binary-size(8), action::32, tid::binary-size(4), rest::binary>> = data
+    if state[:drop_first_connect_response] do
+      nil
+    else
+      <<0::32, tid::binary, @connection_id::binary>>
+    end
+  end
 
-        case action do
-          1 ->
-            peers = Map.get(state, :announce_peers, <<>>)
-            <<1::32, tid::binary, 1200::32, 5::32, 10::32, peers::binary>>
+  defp bep15_action_response(data, state) do
+    <<_connection_id::binary-size(8), action::32, tid::binary-size(4), rest::binary>> = data
 
-          2 ->
-            {seeders, completed, leechers} = Map.get(state, :scrape_stats, {0, 0, 0})
-            hash_count = div(byte_size(rest), 20)
+    case action do
+      1 ->
+        peers = Map.get(state, :announce_peers, <<>>)
+        <<1::32, tid::binary, 1200::32, 5::32, 10::32, peers::binary>>
 
-            stats =
-              for _ <- 1..hash_count do
-                <<seeders::32, completed::32, leechers::32>>
-              end
+      2 ->
+        {seeders, completed, leechers} = Map.get(state, :scrape_stats, {0, 0, 0})
+        hash_count = div(byte_size(rest), 20)
 
-            <<2::32, tid::binary, IO.iodata_to_binary(stats)::binary>>
+        stats =
+          for _ <- 1..hash_count do
+            <<seeders::32, completed::32, leechers::32>>
+          end
 
-          3 ->
-            <<3::32, tid::binary, "tracker error">>
+        <<2::32, tid::binary, IO.iodata_to_binary(stats)::binary>>
 
-          _ ->
-            nil
-        end
+      3 ->
+        <<3::32, tid::binary, "tracker error">>
+
+      _ ->
+        nil
     end
   end
 

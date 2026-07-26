@@ -19,8 +19,8 @@ defmodule Magnet.UtMetadata do
           optional(:metadata_size) => pos_integer() | nil
         }
 
-  alias Peer.LTEP.Handshake
   alias Magnet.UtMetadata.Extension
+  alias Peer.LTEP.Handshake
 
   @doc """
   Fixed metadata block size from BEP 9 (16384 bytes).
@@ -140,33 +140,41 @@ defmodule Magnet.UtMetadata do
          {:ok, msg_type, piece} <- parse_common_fields(dict) do
       case msg_type do
         :request ->
-          if rest == "" do
-            {:ok, {:request, [piece: piece]}}
-          else
-            {:error, :trailing_data}
-          end
+          decode_trailing_free_message(:request, piece, rest)
 
         :reject ->
-          if rest == "" do
-            {:ok, {:reject, [piece: piece]}}
-          else
-            {:error, :trailing_data}
-          end
+          decode_trailing_free_message(:reject, piece, rest)
 
         :data ->
-          total_size = Map.get(dict, "total_size")
-
-          cond do
-            not (is_integer(total_size) and total_size > 0) ->
-              {:error, :missing_total_size}
-
-            byte_size(rest) > @block_size ->
-              {:error, :piece_too_large}
-
-            true ->
-              {:ok, {:data, [piece: piece, total_size: total_size, data: rest]}}
-          end
+          decode_data_message(dict, rest, piece)
       end
+    end
+  end
+
+  @spec decode_trailing_free_message(msg_type(), non_neg_integer(), binary()) ::
+          {:ok, {msg_type(), keyword()}} | {:error, term()}
+  defp decode_trailing_free_message(kind, piece, rest) do
+    if rest == "" do
+      {:ok, {kind, [piece: piece]}}
+    else
+      {:error, :trailing_data}
+    end
+  end
+
+  @spec decode_data_message(map(), binary(), non_neg_integer()) ::
+          {:ok, {msg_type(), keyword()}} | {:error, term()}
+  defp decode_data_message(dict, rest, piece) do
+    total_size = Map.get(dict, "total_size")
+
+    cond do
+      not (is_integer(total_size) and total_size > 0) ->
+        {:error, :missing_total_size}
+
+      byte_size(rest) > @block_size ->
+        {:error, :piece_too_large}
+
+      true ->
+        {:ok, {:data, [piece: piece, total_size: total_size, data: rest]}}
     end
   end
 
@@ -227,15 +235,13 @@ defmodule Magnet.UtMetadata do
   @doc false
   @spec split_bencoded_prefix(binary()) :: {:ok, map(), binary()} | {:error, term()}
   def split_bencoded_prefix(payload) do
-    try do
-      case parse_bencode_value(payload) do
-        {%{} = dict, rest} -> {:ok, dict, rest}
-        {_, _} -> {:error, :expected_dictionary}
-      end
-    catch
-      :invalid -> {:error, :invalid_bencode}
-      {:invalid, _} -> {:error, :invalid_bencode}
+    case parse_bencode_value(payload) do
+      {%{} = dict, rest} -> {:ok, dict, rest}
+      {_, _} -> {:error, :expected_dictionary}
     end
+  catch
+    :invalid -> {:error, :invalid_bencode}
+    {:invalid, _} -> {:error, :invalid_bencode}
   end
 
   defp parse_common_fields(%{"msg_type" => 0, "piece" => piece})

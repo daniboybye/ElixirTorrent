@@ -81,54 +81,65 @@ defmodule Peer.UtPex.RecentCache do
 
   @impl true
   def handle_call({:supplement, hash, current, opts}, _, %{table: table} = state) do
-    self_ep = Keyword.get(opts, :self_ep)
     clients = Keyword.get(opts, :clients, %{inet: nil, inet6: nil})
 
     {augmented, drained} =
-      Enum.reduce([:inet, :inet6], {current, []}, fn family, {acc, drained_acc} ->
-        live = live_count(acc, family)
-        need = max(@target_live_per_family - live, 0)
-
-        if need == 0 do
-          {acc, drained_acc}
-        else
-          candidates = fetch_candidates(table, hash, family, acc, self_ep, now_ms(opts))
-
-          picked =
-            candidates
-            |> order_candidates(Map.get(clients, family), family)
-            |> Enum.take(need)
-
-          drained_eps = Enum.map(picked, &Entry.endpoint/1)
-
-          merged =
-            Enum.reduce(picked, acc, fn entry, map ->
-              Map.put(map, Entry.endpoint(entry), entry)
-            end)
-
-          {merged, drained_acc ++ drained_eps}
-        end
+      Enum.reduce([:inet, :inet6], {current, []}, fn family, acc_drained ->
+        supplement_family(table, hash, family, acc_drained, opts, clients)
       end)
 
     if drained != [] and Keyword.get(opts, :drain?, true) do
+      drained_set = MapSet.new(drained)
+
       Enum.each([:inet, :inet6], fn family ->
-        key = {hash, family}
-        drained_set = MapSet.new(drained)
-
-        case :ets.lookup(table, key) do
-          [{^key, list}] ->
-            list =
-              Enum.reject(list, fn {_, e} -> MapSet.member?(drained_set, Entry.endpoint(e)) end)
-
-            if list == [], do: :ets.delete(table, key), else: :ets.insert(table, {key, list})
-
-          _ ->
-            :ok
-        end
+        drain_family_table(table, hash, family, drained_set)
       end)
     end
 
     {:reply, {augmented, drained}, state}
+  end
+
+  defp supplement_family(table, hash, family, {acc, drained_acc}, opts, clients) do
+    live = live_count(acc, family)
+    need = max(@target_live_per_family - live, 0)
+
+    if need == 0 do
+      {acc, drained_acc}
+    else
+      supplement_family_merge(table, hash, family, {acc, drained_acc}, opts, clients, need)
+    end
+  end
+
+  defp supplement_family_merge(table, hash, family, {acc, drained_acc}, opts, clients, need) do
+    self_ep = Keyword.get(opts, :self_ep)
+    candidates = fetch_candidates(table, hash, family, acc, self_ep, now_ms(opts))
+
+    picked =
+      candidates
+      |> order_candidates(Map.get(clients, family), family)
+      |> Enum.take(need)
+
+    merged = merge_pex_entries(acc, picked)
+    {merged, drained_acc ++ Enum.map(picked, &Entry.endpoint/1)}
+  end
+
+  defp merge_pex_entries(acc, picked) do
+    Enum.reduce(picked, acc, fn entry, map ->
+      Map.put(map, Entry.endpoint(entry), entry)
+    end)
+  end
+
+  defp drain_family_table(table, hash, family, drained_set) do
+    key = {hash, family}
+
+    case :ets.lookup(table, key) do
+      [{^key, list}] ->
+        list = Enum.reject(list, fn {_, e} -> MapSet.member?(drained_set, Entry.endpoint(e)) end)
+        if list == [], do: :ets.delete(table, key), else: :ets.insert(table, {key, list})
+
+      _ ->
+        :ok
+    end
   end
 
   @impl true

@@ -93,15 +93,22 @@ defmodule Magnet.ConnectedMetadata do
           normalized_failures =
             failures |> Enum.reverse() |> Enum.map(&normalize_failure/1) |> Enum.uniq()
 
-          if normalized_failures != [] do
-            Logger.info(
-              "[magnet_swarm] metadata_round_exhausted hash=#{hash_hex} peers_tried=#{peer_count} failures=#{inspect(normalized_failures)}"
-            )
-          end
+          log_metadata_round_exhausted(hash_hex, peer_count, normalized_failures)
 
           {:error, {:metadata_unavailable, normalized_failures}}
       end
     end
+  end
+
+  @spec log_metadata_round_exhausted(String.t(), non_neg_integer(), [term()]) :: :ok
+  defp log_metadata_round_exhausted(hash_hex, peer_count, normalized_failures) do
+    if normalized_failures != [] do
+      Logger.info(
+        "[magnet_swarm] metadata_round_exhausted hash=#{hash_hex} peers_tried=#{peer_count} failures=#{inspect(normalized_failures)}"
+      )
+    end
+
+    :ok
   end
 
   @spec fetch_from_peer(Magnet.t(), Peer.key()) ::
@@ -119,20 +126,7 @@ defmodule Magnet.ConnectedMetadata do
       with {:ok, conn} <- Magnet.Connection.open_swarm(key, info),
            result <- Magnet.Connection.fetch_info(conn, magnet.hash),
            :ok <- Magnet.Connection.close(conn) do
-        with {:ok, info_map, info_blob} <- result,
-             {:ok, path} <- write_torrent(magnet, info_blob) do
-          {:ok, path, Magnet.private?(info_map)}
-        else
-          {:error, reason} ->
-            log_peer_failure(endpoint, :fetch_info, reason, key)
-            Magnet.Connection.close_swarm(key)
-            {:error, reason}
-
-          other ->
-            log_peer_failure(endpoint, :fetch_info, other, key)
-            Magnet.Connection.close_swarm(key)
-            {:error, other}
-        end
+        finalize_swarm_fetch(magnet, key, endpoint, result)
       else
         {:error, reason} = error ->
           log_peer_failure(endpoint, :open_swarm, reason, key)
@@ -167,6 +161,25 @@ defmodule Magnet.ConnectedMetadata do
       log_peer_failure(peer_endpoint(key), :exit, reason, key)
       Magnet.Connection.close_swarm(key)
       {:error, normalize_peer_error(reason)}
+  end
+
+  @spec finalize_swarm_fetch(Magnet.t(), Peer.key(), String.t(), term()) ::
+          {:ok, Path.t(), boolean()} | {:error, term()}
+  defp finalize_swarm_fetch(magnet, key, endpoint, result) do
+    with {:ok, info_map, info_blob} <- result,
+         {:ok, path} <- write_torrent(magnet, info_blob) do
+      {:ok, path, Magnet.private?(info_map)}
+    else
+      {:error, reason} ->
+        log_peer_failure(endpoint, :fetch_info, reason, key)
+        Magnet.Connection.close_swarm(key)
+        {:error, reason}
+
+      other ->
+        log_peer_failure(endpoint, :fetch_info, other, key)
+        Magnet.Connection.close_swarm(key)
+        {:error, other}
+    end
   end
 
   @spec safe_metadata_capable(Peer.key()) :: {:ok, map()} | :error | {:error, term()}

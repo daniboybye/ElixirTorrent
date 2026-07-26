@@ -62,7 +62,7 @@ defmodule ElixirTorrent.MixProject do
   end
 
   defp aliases do
-    [quality: ["compile --warnings-as-errors", "dialyzer", "credo --only warning"]]
+    [quality: ["compile --warnings-as-errors", "dialyzer", "credo --strict --all"]]
   end
 
   @spec description() :: String.t()

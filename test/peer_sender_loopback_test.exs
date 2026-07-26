@@ -2,6 +2,7 @@ defmodule PeerSenderLoopbackTest do
   # Loopback TCP + Registry-backed Sender/Controller stubs; not async-safe.
   use ExUnit.Case, async: false
 
+  alias Magnet.UtMetadata.Extension, as: UtMetadataExtension
   alias PeerWireTest.ControllerCapture
 
   @piece_len Torrent.Downloads.piece_max_length()
@@ -159,7 +160,7 @@ defmodule PeerSenderLoopbackTest do
       on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
 
       oversized = 2 + Magnet.UtMetadata.max_message_payload_size() + 1
-      local_id = Magnet.UtMetadata.Extension.local_id()
+      local_id = UtMetadataExtension.local_id()
       assert :ok = :gen_tcp.send(server, <<oversized::32, 20, local_id>>)
 
       ref = Process.monitor(sender_pid)

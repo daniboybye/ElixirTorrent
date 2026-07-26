@@ -228,16 +228,14 @@ defmodule DHT.RoutingTable do
     now = Keyword.get(opts, :now_ms, now_ms())
     table = age_questionable(table, now)
 
-    cond do
-      id == table.local_id or find_entry(table, id) != nil ->
-        nil
+    if id == table.local_id or find_entry(table, id) != nil do
+      nil
+    else
+      id_int = id_to_int(id)
 
-      true ->
-        id_int = id_to_int(id)
-
-        table.buckets
-        |> Enum.find(&(id_int >= &1.min and id_int < &1.max))
-        |> questionable_replacement()
+      table.buckets
+      |> Enum.find(&(id_int >= &1.min and id_int < &1.max))
+      |> questionable_replacement()
     end
   end
 
@@ -257,16 +255,28 @@ defmodule DHT.RoutingTable do
           {[bucket()], :done}
   defp insert_bucket(buckets, local_id, id_int, entry, now) do
     Enum.map_reduce(buckets, :done, fn bucket, _ ->
-      if id_int >= bucket.min and id_int < bucket.max do
-        case put_in_bucket(bucket, local_id, id_int, entry, now) do
-          {:ok, bucket} -> {bucket, :done}
-          {:split, left, right} -> {[left, right], :done}
-        end
-      else
-        {bucket, :done}
-      end
+      insert_into_matching_bucket(bucket, local_id, id_int, entry, now)
     end)
     |> flatten_buckets()
+  end
+
+  @spec insert_into_matching_bucket(
+          bucket(),
+          node_id(),
+          non_neg_integer(),
+          entry(),
+          non_neg_integer()
+        ) ::
+          {bucket() | [bucket()], :done}
+  defp insert_into_matching_bucket(bucket, local_id, id_int, entry, now) do
+    if id_int >= bucket.min and id_int < bucket.max do
+      case put_in_bucket(bucket, local_id, id_int, entry, now) do
+        {:ok, bucket} -> {bucket, :done}
+        {:split, left, right} -> {[left, right], :done}
+      end
+    else
+      {bucket, :done}
+    end
   end
 
   @spec flatten_buckets({term(), :done}) :: {[bucket()], :done}
@@ -399,20 +409,23 @@ defmodule DHT.RoutingTable do
   defp age_questionable(%__MODULE__{buckets: buckets} = table, now) do
     buckets =
       Enum.map(buckets, fn %{nodes: nodes} = bucket ->
-        nodes =
-          Enum.map(nodes, fn entry ->
-            if entry.status == :good and now - entry.last_seen_ms >= @questionable_after_ms do
-              %{entry | status: :questionable}
-            else
-              entry
-            end
-          end)
-
+        nodes = Enum.map(nodes, &age_entry_if_stale(&1, now))
         %{bucket | nodes: nodes}
       end)
 
     %{table | buckets: buckets}
   end
+
+  @spec age_entry_if_stale(entry(), non_neg_integer()) :: entry()
+  defp age_entry_if_stale(%{status: :good} = entry, now) do
+    if now - entry.last_seen_ms >= @questionable_after_ms do
+      %{entry | status: :questionable}
+    else
+      entry
+    end
+  end
+
+  defp age_entry_if_stale(entry, _now), do: entry
 
   @spec update_node(t(), node_id(), (entry() -> entry())) :: t()
   defp update_node(%__MODULE__{buckets: buckets} = table, id, fun) do

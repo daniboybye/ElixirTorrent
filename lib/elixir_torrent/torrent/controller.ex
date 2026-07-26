@@ -1,4 +1,8 @@
 defmodule Torrent.Controller do
+  @moduledoc """
+  Download pump GenServer: rarest-first piece scheduling and endgame orchestration.
+  """
+
   use GenServer
   use Via
 
@@ -6,7 +10,7 @@ defmodule Torrent.Controller do
 
   require Logger
 
-  alias Torrent.{Swarm, PiecesStatistic, Downloads, Model, Superseed}
+  alias Torrent.{Downloads, Model, PiecesStatistic, Superseed, Swarm}
 
   @next_piece_timeout 2_500
   # Concurrent in-flight pieces per torrent. Each active piece is what lets a
@@ -111,34 +115,8 @@ defmodule Torrent.Controller do
         {active, active_count}
       end
 
-    cond do
-      Model.downloaded?(hash) ->
-        # Torrent is complete — no more pump needed, but we still self-reschedule
-        # (defensively cheap) in case the model flips state during multi-file work.
-        :noop
-
-      active_count < effective_max and connected > 0 ->
-        Logger.info(
-          "[reconcile_pump] hash=#{Torrent.hex_encoded_hash(hash)} active=#{active_count} max=#{effective_max} unchoked=#{unchoked} peers=#{connected} kick=next_piece"
-        )
-
-        send(self(), {:next_piece, :rare})
-
-      true ->
-        Logger.debug(
-          "[reconcile_pump] hash=#{Torrent.hex_encoded_hash(hash)} active=#{active_count} max=#{effective_max} unchoked=#{unchoked} peers=#{connected} action=none"
-        )
-    end
-
-    # Endgame (or multiple in-flight pieces): refresh interest on every active
-    # index, not only Model.peer_status. A single controller status made
-    # Swarm.interested_for_piece a monopoly on one piece while choked peers
-    # sat pinned there with zero bytes and starved the rest (BEP-3 endgame
-    # needs redundant sources on ALL remaining pieces).
-    if active_count > 0 and connected > 0 and
-         (Model.get(hash, :mode) == :endgame or active_count > 1) do
-      Enum.each(Enum.sort(active), &Swarm.interested_for_piece(hash, &1))
-    end
+    reconcile_pump_kick(hash, active_count, effective_max, connected, unchoked)
+    reconcile_refresh_interest(hash, active, active_count, connected)
 
     send_after(self(), :reconcile_pump, @reconcile_interval)
     {:noreply, hash}
@@ -195,10 +173,20 @@ defmodule Torrent.Controller do
 
   defp pick_and_start_piece(hash, strategy, active, connected) do
     opts = [exclude: active]
-    index = PiecesStatistic.choice_piece(hash, strategy, opts)
+    index = choice_piece_with_reconcile(hash, strategy, opts, active)
 
-    index =
-      if index == nil do
+    case index do
+      nil ->
+        handle_no_piece_choice(hash, strategy, active, connected)
+
+      index ->
+        handle_piece_choice(hash, strategy, index, active, connected)
+    end
+  end
+
+  defp choice_piece_with_reconcile(hash, strategy, opts, active) do
+    case PiecesStatistic.choice_piece(hash, strategy, opts) do
+      nil ->
         cleared =
           PiecesStatistic.reconcile_stale_statuses(hash, &Downloads.piece_active?(hash, &1))
 
@@ -209,51 +197,86 @@ defmodule Torrent.Controller do
         end
 
         PiecesStatistic.choice_piece(hash, strategy, opts)
-      else
-        index
-      end
-
-    case index do
-      nil ->
-        Logger.debug(
-          "[piece_picker] hash=#{Torrent.hex_encoded_hash(hash)} strategy=#{strategy} chosen=none connected=#{connected} reason=no_available_pieces active_pieces=#{length(active)}"
-        )
-
-        if Model.downloaded?(hash) do
-          mark_complete(hash)
-        else
-          if active != [] do
-            index = hd(active)
-            Model.set_peer_status(hash, index)
-            Swarm.interested_for_piece(hash, index)
-          else
-            if connected > 0, do: PeerDiscovery.connecting_to_peers(hash)
-            Model.set_peer_status(hash, nil)
-          end
-
-          send_after(self(), {:next_piece, strategy}, @next_piece_timeout)
-        end
 
       index ->
-        if Swarm.any_has_piece?(hash, index) or seeder_has_piece?(hash, index) do
-          Logger.debug(
-            "[piece_picker] hash=#{Torrent.hex_encoded_hash(hash)} strategy=#{strategy} chosen=#{index} connected=#{connected} peers_have=true active_pieces=#{length(active) + 1}"
-          )
+        index
+    end
+  end
 
-          start_piece_download(hash, index, strategy)
-        else
-          log_availability_mismatch(hash, index, connected)
+  defp handle_no_piece_choice(hash, strategy, active, connected) do
+    Logger.debug(
+      "[piece_picker] hash=#{Torrent.hex_encoded_hash(hash)} strategy=#{strategy} chosen=none connected=#{connected} reason=no_available_pieces active_pieces=#{length(active)}"
+    )
 
-          # The statistic claimed a peer has this piece but no connected peer
-          # does — the count is stale (e.g. leaked on an unclean disconnect).
-          # Reset it so the picker moves on; live HAVE/bitfield traffic will
-          # re-establish the real availability.
-          PiecesStatistic.reset_availability(hash, index)
+    if Model.downloaded?(hash) do
+      mark_complete(hash)
+    else
+      fallback_when_no_piece(hash, active, connected)
+      send_after(self(), {:next_piece, strategy}, @next_piece_timeout)
+    end
+  end
 
-          Model.set_peer_status(hash, nil)
-          PeerDiscovery.connecting_to_peers(hash)
-          send_after(self(), {:next_piece, strategy}, @next_piece_timeout)
-        end
+  defp fallback_when_no_piece(hash, active, connected) do
+    if active != [] do
+      index = hd(active)
+      Model.set_peer_status(hash, index)
+      Swarm.interested_for_piece(hash, index)
+    else
+      if connected > 0, do: PeerDiscovery.connecting_to_peers(hash)
+      Model.set_peer_status(hash, nil)
+    end
+  end
+
+  defp handle_piece_choice(hash, strategy, index, active, connected) do
+    if Swarm.any_has_piece?(hash, index) or seeder_has_piece?(hash, index) do
+      Logger.debug(
+        "[piece_picker] hash=#{Torrent.hex_encoded_hash(hash)} strategy=#{strategy} chosen=#{index} connected=#{connected} peers_have=true active_pieces=#{length(active) + 1}"
+      )
+
+      start_piece_download(hash, index, strategy)
+    else
+      log_availability_mismatch(hash, index, connected)
+
+      # The statistic claimed a peer has this piece but no connected peer
+      # does — the count is stale (e.g. leaked on an unclean disconnect).
+      # Reset it so the picker moves on; live HAVE/bitfield traffic will
+      # re-establish the real availability.
+      PiecesStatistic.reset_availability(hash, index)
+
+      Model.set_peer_status(hash, nil)
+      PeerDiscovery.connecting_to_peers(hash)
+      send_after(self(), {:next_piece, strategy}, @next_piece_timeout)
+    end
+  end
+
+  defp reconcile_pump_kick(hash, active_count, effective_max, connected, unchoked) do
+    cond do
+      Model.downloaded?(hash) ->
+        :noop
+
+      active_count < effective_max and connected > 0 ->
+        Logger.info(
+          "[reconcile_pump] hash=#{Torrent.hex_encoded_hash(hash)} active=#{active_count} max=#{effective_max} unchoked=#{unchoked} peers=#{connected} kick=next_piece"
+        )
+
+        send(self(), {:next_piece, :rare})
+
+      true ->
+        Logger.debug(
+          "[reconcile_pump] hash=#{Torrent.hex_encoded_hash(hash)} active=#{active_count} max=#{effective_max} unchoked=#{unchoked} peers=#{connected} action=none"
+        )
+    end
+  end
+
+  defp reconcile_refresh_interest(hash, active, active_count, connected) do
+    # Endgame (or multiple in-flight pieces): refresh interest on every active
+    # index, not only Model.peer_status. A single controller status made
+    # Swarm.interested_for_piece a monopoly on one piece while choked peers
+    # sat pinned there with zero bytes and starved the rest (BEP-3 endgame
+    # needs redundant sources on ALL remaining pieces).
+    if active_count > 0 and connected > 0 and
+         (Model.get(hash, :mode) == :endgame or active_count > 1) do
+      Enum.each(Enum.sort(active), &Swarm.interested_for_piece(hash, &1))
     end
   end
 

@@ -12,7 +12,7 @@
 - **Peer.ConnectionManager:** outbound dial orchestration with per-family throttle
 - Mid-download session checkpoint (bitfield + counters every 30s)
 - Magnet `x.pe` peers kept as live dial candidates after metadata fetch
-- Developer quality gate: warnings-as-errors compile, Dialyzer, and Credo warning checks via `mix quality`
+- Developer quality gate: warnings-as-errors compile, Dialyzer, and all enabled Credo checks at every priority via `mix quality`
 
 ### Fixed
 

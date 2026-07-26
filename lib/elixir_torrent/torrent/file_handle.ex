@@ -1,4 +1,8 @@
 defmodule Torrent.FileHandle do
+  @moduledoc """
+  Supervisor for torrent disk I/O: shared file store and lazy per-piece writers.
+  """
+
   use Supervisor, type: :supervisor
   use Via
 

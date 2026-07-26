@@ -1,7 +1,10 @@
 defmodule Magnet.PexTest do
   use ExUnit.Case, async: false
 
+  alias Magnet.UtMetadata.Extension, as: UtMetadataExtension
+  alias Peer.LTEP.{Extensions, Handshake, Session}
   alias Peer.UtPex
+  alias Peer.UtPex.{Extension, InboundRate}
 
   defp pub4(n), do: {11, 0, 0, rem(n, 250)}
 
@@ -41,12 +44,12 @@ defmodule Magnet.PexTest do
     test "for_magnet includes ut_pex only when ConnectionManager consumer is active" do
       hash = :crypto.strong_rand_bytes(20)
 
-      refute Peer.UtPex.Extension in Peer.LTEP.Extensions.for_magnet(hash)
+      refute Extension in Extensions.for_magnet(hash)
 
       pid = start_manager(hash)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
 
-      assert Peer.UtPex.Extension in Peer.LTEP.Extensions.for_magnet(hash)
+      assert Extension in Extensions.for_magnet(hash)
     end
 
     test "for_magnet omits ut_pex when consume_pex is disabled" do
@@ -56,7 +59,7 @@ defmodule Magnet.PexTest do
 
       Application.put_env(:elixir_torrent, :magnet_connection, consume_pex: false)
 
-      refute Peer.UtPex.Extension in Peer.LTEP.Extensions.for_magnet(hash)
+      refute Extension in Extensions.for_magnet(hash)
     end
 
     test "for_magnet omits ut_pex for known private torrents" do
@@ -65,7 +68,7 @@ defmodule Magnet.PexTest do
       pid = start_manager(hash)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
 
-      refute Peer.UtPex.Extension in Peer.LTEP.Extensions.for_magnet(hash)
+      refute Extension in Extensions.for_magnet(hash)
     end
   end
 
@@ -160,7 +163,7 @@ defmodule Magnet.PexTest do
       conn_a =
         put_in(conn_a.pex_inbound.rate, %{
           initial?: false,
-          anchor_ms: System.monotonic_time(:millisecond) - Peer.UtPex.InboundRate.window_ms() - 1
+          anchor_ms: System.monotonic_time(:millisecond) - InboundRate.window_ms() - 1
         })
 
       _ =
@@ -209,7 +212,7 @@ defmodule Magnet.PexTest do
                Magnet.Connection.open(%Peer{ip: {127, 0, 0, 1}, port: port}, hash)
 
       assert conn.pex_source == remote_id
-      assert Peer.LTEP.Session.local_extension_id(conn.ltep, "ut_pex") == 2
+      assert Session.local_extension_id(conn.ltep, "ut_pex") == 2
 
       assert {:ok, decoded, ^info_blob} = Magnet.Connection.fetch_info(conn, hash)
       assert decoded["name"] == "magnet-pex-loopback"
@@ -264,8 +267,8 @@ defmodule Magnet.PexTest do
       assert :ok = Peer.Sender.deactivate(key)
 
       ltep =
-        Peer.LTEP.Session.new([Peer.UtPex.Extension, Magnet.UtMetadata.Extension])
-        |> Peer.LTEP.Session.apply_peer_handshake(%Peer.LTEP.Handshake{
+        Session.new([Extension, UtMetadataExtension])
+        |> Session.apply_peer_handshake(%Handshake{
           m: %{"ut_metadata" => 1, "ut_pex" => 3}
         })
 
@@ -280,12 +283,12 @@ defmodule Magnet.PexTest do
         peer: nil,
         unchoked?: true,
         unchoke_since: System.monotonic_time(:millisecond),
-        pex_inbound: %{initial?: true, rate: Peer.UtPex.InboundRate.initial()}
+        pex_inbound: %{initial?: true, rate: InboundRate.initial()}
       }
 
       pex_wire =
         Peer.LTEP.extended_message_wire(
-          Peer.UtPex.Extension.local_id(),
+          Extension.local_id(),
           UtPex.encode([pex_ep], [])
         )
 
@@ -323,7 +326,7 @@ defmodule Magnet.PexTest do
   end
 
   defp base_conn(hash, supplier) do
-    ltep = Peer.LTEP.Session.new([Peer.UtPex.Extension, Magnet.UtMetadata.Extension])
+    ltep = Session.new([Extension, UtMetadataExtension])
 
     %Magnet.Connection{
       socket: nil,
@@ -336,7 +339,7 @@ defmodule Magnet.PexTest do
       peer: nil,
       unchoked?: true,
       unchoke_since: System.monotonic_time(:millisecond),
-      pex_inbound: %{initial?: true, rate: Peer.UtPex.InboundRate.initial()}
+      pex_inbound: %{initial?: true, rate: InboundRate.initial()}
     }
   end
 
@@ -385,45 +388,83 @@ defmodule Magnet.PexTest do
     total_size = byte_size(info_blob)
 
     recv_loop = fn recv_loop ->
-      case :gen_tcp.recv(socket, 4, 10_000) do
-        {:ok, <<0, 0, 0, 0>>} ->
-          recv_loop.(recv_loop)
-
-        {:ok, <<len::32>>} ->
-          case :gen_tcp.recv(socket, len, 10_000) do
-            {:ok, <<20, _ext_id, payload::binary>>} ->
-              case Magnet.UtMetadata.decode_message(payload) do
-                {:ok, {:request, [piece: piece]}} ->
-                  if piece > 0 do
-                    second_pex =
-                      UtPex.encode([{elem(pex_ep, 0), elem(pex_ep, 1) + 1}], [])
-
-                    :gen_tcp.send(
-                      socket,
-                      Peer.LTEP.extended_message_wire(our_ut_pex, second_pex)
-                    )
-                  end
-
-                  offset = piece * 16_384
-                  size = Magnet.UtMetadata.piece_byte_size(total_size, piece)
-                  data = binary_part(info_blob, offset, size)
-                  data = Magnet.UtMetadata.encode_data(piece, total_size, data)
-                  :gen_tcp.send(socket, Peer.LTEP.extended_message_wire(1, data))
-                  recv_loop.(recv_loop)
-
-                _ ->
-                  recv_loop.(recv_loop)
-              end
-
-            _ ->
-              :ok
-          end
-
-        _ ->
-          :ok
-      end
+      recv_ut_metadata_loop(recv_loop, socket, info_blob, total_size, pex_ep, our_ut_pex)
     end
 
     recv_loop.(recv_loop)
+  end
+
+  defp recv_ut_metadata_loop(recv_loop, socket, info_blob, total_size, pex_ep, our_ut_pex) do
+    case :gen_tcp.recv(socket, 4, 10_000) do
+      {:ok, <<0, 0, 0, 0>>} ->
+        recv_loop.(recv_loop)
+
+      {:ok, <<len::32>>} ->
+        handle_ut_metadata_frame(
+          recv_loop,
+          socket,
+          len,
+          info_blob,
+          total_size,
+          pex_ep,
+          our_ut_pex
+        )
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp handle_ut_metadata_frame(recv_loop, socket, len, info_blob, total_size, pex_ep, our_ut_pex) do
+    case :gen_tcp.recv(socket, len, 10_000) do
+      {:ok, <<20, _ext_id, payload::binary>>} ->
+        dispatch_ut_metadata_payload(
+          recv_loop,
+          socket,
+          payload,
+          info_blob,
+          total_size,
+          pex_ep,
+          our_ut_pex
+        )
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp dispatch_ut_metadata_payload(
+         recv_loop,
+         socket,
+         payload,
+         info_blob,
+         total_size,
+         pex_ep,
+         our_ut_pex
+       ) do
+    case Magnet.UtMetadata.decode_message(payload) do
+      {:ok, {:request, [piece: piece]}} ->
+        maybe_send_pex_on_piece(socket, piece, pex_ep, our_ut_pex)
+        send_metadata_piece(socket, info_blob, total_size, piece)
+        recv_loop.(recv_loop)
+
+      _ ->
+        recv_loop.(recv_loop)
+    end
+  end
+
+  defp maybe_send_pex_on_piece(socket, piece, pex_ep, our_ut_pex) when piece > 0 do
+    second_pex = UtPex.encode([{elem(pex_ep, 0), elem(pex_ep, 1) + 1}], [])
+    :gen_tcp.send(socket, Peer.LTEP.extended_message_wire(our_ut_pex, second_pex))
+  end
+
+  defp maybe_send_pex_on_piece(_socket, _piece, _pex_ep, _our_ut_pex), do: :ok
+
+  defp send_metadata_piece(socket, info_blob, total_size, piece) do
+    offset = piece * 16_384
+    size = Magnet.UtMetadata.piece_byte_size(total_size, piece)
+    data = binary_part(info_blob, offset, size)
+    data = Magnet.UtMetadata.encode_data(piece, total_size, data)
+    :gen_tcp.send(socket, Peer.LTEP.extended_message_wire(1, data))
   end
 end

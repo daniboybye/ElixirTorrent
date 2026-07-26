@@ -1,7 +1,7 @@
 defmodule Magnet.ConnectionTest do
   use ExUnit.Case, async: false
 
-  alias Peer.LTEP.Handshake
+  alias Peer.LTEP.{Handshake, Session}
 
   test "request_piece returns error on closed socket without crashing" do
     {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, packet: :raw])
@@ -11,7 +11,7 @@ defmodule Magnet.ConnectionTest do
     :gen_tcp.close(listen)
 
     peer_hs = %Handshake{m: %{"ut_metadata" => 1}, metadata_size: 4096}
-    ltep = Peer.LTEP.Session.new() |> Peer.LTEP.Session.apply_peer_handshake(peer_hs)
+    ltep = Session.new() |> Session.apply_peer_handshake(peer_hs)
 
     conn = %Magnet.Connection{
       socket: socket,
@@ -26,13 +26,13 @@ defmodule Magnet.ConnectionTest do
   end
 
   test "ut_metadata responses match our advertised local extension id, not the peer's" do
-    peer_hs = %Handshake{m: %{"ut_metadata" => 2}, metadata_size: 60498}
-    ltep = Peer.LTEP.Session.new() |> Peer.LTEP.Session.apply_peer_handshake(peer_hs)
-    assert Peer.LTEP.Session.local_extension_id(ltep, "ut_metadata") == 1
-    assert Peer.LTEP.Session.peer_extension_id(ltep, "ut_metadata") == 2
+    peer_hs = %Handshake{m: %{"ut_metadata" => 2}, metadata_size: 60_498}
+    ltep = Session.new() |> Session.apply_peer_handshake(peer_hs)
+    assert Session.local_extension_id(ltep, "ut_metadata") == 1
+    assert Session.peer_extension_id(ltep, "ut_metadata") == 2
 
     request = Magnet.UtMetadata.encode_request(0)
-    data = Magnet.UtMetadata.encode_data(0, 60498, :binary.copy(<<0>>, 100))
+    data = Magnet.UtMetadata.encode_data(0, 60_498, :binary.copy(<<0>>, 100))
     wire = Peer.LTEP.extended_message_wire(1, data)
 
     assert <<20, 1, ^data::binary>> = binary_part(wire, 4, byte_size(wire) - 4)
@@ -44,6 +44,8 @@ end
 defmodule Acceptor.Connection.HandshakesTest do
   use ExUnit.Case, async: false
 
+  alias Acceptor.Connection.Handshakes
+
   test "recv does not crash when controlling_process gets badarg on closed socket" do
     {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, packet: :raw])
     {:ok, port} = :inet.port(listen)
@@ -51,7 +53,7 @@ defmodule Acceptor.Connection.HandshakesTest do
     :ok = :gen_tcp.close(socket)
     :gen_tcp.close(listen)
 
-    assert :ok = Acceptor.Connection.Handshakes.recv(socket)
+    assert :ok = Handshakes.recv(socket)
     Process.sleep(50)
   end
 end

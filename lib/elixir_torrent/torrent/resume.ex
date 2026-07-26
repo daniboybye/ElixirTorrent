@@ -3,7 +3,7 @@ defmodule Torrent.Resume do
 
   use GenServer
 
-  alias Torrent.{Bitfield, FileHandle, Model, Controller}
+  alias Torrent.{Bitfield, Controller, FileHandle, Model}
 
   require Logger
 

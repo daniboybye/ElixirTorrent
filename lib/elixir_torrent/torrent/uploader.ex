@@ -1,4 +1,8 @@
 defmodule Torrent.Uploader do
+  @moduledoc """
+  Task supervisor serving inbound BEP 3 `piece` uploads from disk for one torrent.
+  """
+
   use Via
 
   alias Torrent.{FileHandle, Model}

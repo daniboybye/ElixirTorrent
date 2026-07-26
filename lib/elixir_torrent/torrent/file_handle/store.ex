@@ -25,7 +25,7 @@ defmodule Torrent.FileHandle.Store do
   use GenServer
   use Via
 
-  alias Torrent.{Model, PathLayout, FileHandle}
+  alias Torrent.{FileHandle, Model, PathLayout}
 
   @spec start_link(Torrent.hash()) :: GenServer.on_start()
   def start_link(hash),

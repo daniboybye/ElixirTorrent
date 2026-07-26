@@ -14,7 +14,7 @@ defmodule HTTPTrackerTest do
         Tracker.request!(
           "http://127.0.0.1:1/announce",
           hash,
-          [uploaded: 0, downloaded: 0, left: 16384, event: Torrent.started()],
+          [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()],
           http_timeout_ms: 50
         )
 

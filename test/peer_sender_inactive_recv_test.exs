@@ -1,7 +1,7 @@
 defmodule Peer.SenderInactiveRecvTest do
   use ExUnit.Case, async: false
 
-  alias Peer.LTEP.Handshake
+  alias Peer.LTEP.{Handshake, Session}
   alias UTP.{Connection, Packet}
 
   setup do
@@ -188,7 +188,7 @@ defmodule Peer.SenderInactiveRecvTest do
     assert :ok = Peer.Sender.deactivate(key)
 
     peer_hs = %Handshake{m: %{"ut_metadata" => 2}, metadata_size: 256}
-    ltep = Peer.LTEP.Session.new() |> Peer.LTEP.Session.apply_peer_handshake(peer_hs)
+    ltep = Session.new() |> Session.apply_peer_handshake(peer_hs)
 
     conn = %Magnet.Connection{
       socket: nil,

@@ -5,7 +5,7 @@ defmodule MagnetTest do
     hash =
       :crypto.hash(
         :sha,
-        Bento.encode!(%{"name" => "test", "piece length" => 16384, "pieces" => <<0::160>>})
+        Bento.encode!(%{"name" => "test", "piece length" => 16_384, "pieces" => <<0::160>>})
       )
 
     hex = Base.encode16(hash, case: :lower)
@@ -81,7 +81,7 @@ defmodule MagnetTest do
     hash =
       :crypto.hash(
         :sha,
-        Bento.encode!(%{"name" => "test", "piece length" => 16384, "pieces" => <<0::160>>})
+        Bento.encode!(%{"name" => "test", "piece length" => 16_384, "pieces" => <<0::160>>})
       )
 
     hex = Base.encode16(hash, case: :lower)

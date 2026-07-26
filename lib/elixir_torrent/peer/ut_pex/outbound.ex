@@ -1,6 +1,7 @@
 defmodule Peer.UtPex.Outbound do
   @moduledoc false
 
+  alias Peer.LTEP.Session
   alias Peer.UtPex.{BEP40, Entry, Filter, RecentCache}
 
   @doc """
@@ -104,7 +105,7 @@ defmodule Peer.UtPex.Outbound do
 
   @spec yourip_from_ltep(Peer.Controller.State.t()) :: {:ok, :inet.ip_address()} | :error
   defp yourip_from_ltep(%Peer.Controller.State{ltep: ltep}) when not is_nil(ltep) do
-    case Peer.LTEP.Session.peer_handshake(ltep).yourip do
+    case Session.peer_handshake(ltep).yourip do
       <<a, b, c, d>> ->
         validate_yourip({a, b, c, d})
 

@@ -1,4 +1,8 @@
 defmodule Peer.Controller.FastExtension do
+  @moduledoc """
+  BEP 6 fast-extension state (allowed-fast sets) attached to a peer controller.
+  """
+
   defstruct allowed_fast: AllowedFast.new(), allowed_fast_me: AllowedFast.new()
 
   @type t :: %__MODULE__{

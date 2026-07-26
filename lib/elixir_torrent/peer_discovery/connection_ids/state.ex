@@ -1,4 +1,8 @@
 defmodule PeerDiscovery.ConnectionIds.State do
+  @moduledoc """
+  In-memory UDP tracker connection IDs and pending connect handshakes (BEP 15).
+  """
+
   defstruct ids: %{}, requests: %{}
 
   @type t :: %__MODULE__{

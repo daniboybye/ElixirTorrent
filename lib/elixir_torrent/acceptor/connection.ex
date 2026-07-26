@@ -1,4 +1,8 @@
 defmodule Acceptor.Connection do
+  @moduledoc """
+  Supervisor for the TCP listen handler and outbound/inbound handshake task pool.
+  """
+
   alias __MODULE__.{Handler, Handshakes}
 
   def child_spec(_) do

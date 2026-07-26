@@ -27,7 +27,7 @@ defmodule HandshakesTest do
 
   describe "dial_transports/2" do
     test "IPv6 always tries TCP first" do
-      ipv6 = {8193, 45073, 14364, 48314, 5656, 30719, 65108, 21111}
+      ipv6 = {8193, 45_073, 14_364, 48_314, 5656, 30_719, 65_108, 21_111}
       assert Handshakes.dial_transports(ipv6, @hash) == [:tcp, :utp]
     end
 
@@ -55,7 +55,7 @@ defmodule HandshakesTest do
     end
 
     test "skips IPv6 when host has no global IPv6" do
-      ipv6 = {8193, 45073, 14364, 48314, 5656, 30719, 65108, 21111}
+      ipv6 = {8193, 45_073, 14_364, 48_314, 5656, 30_719, 65_108, 21_111}
 
       if Acceptor.primary_ips().inet6 == nil do
         refute Handshakes.connectable_peer?(%Peer{ip: ipv6, port: 6881})

@@ -1,4 +1,8 @@
 defmodule Torrent.Superseed do
+  @moduledoc """
+  BEP 16 super-seeding mode: one-piece-at-a-time upload hints to a single leecher.
+  """
+
   use GenServer
   use Via
 

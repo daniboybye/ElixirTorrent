@@ -1,4 +1,8 @@
 defmodule Tracker.Response do
+  @moduledoc """
+  Normalized HTTP/UDP tracker announce response (interval, peers, swarm counts).
+  """
+
   @enforce_keys [:interval, :peers, :complete, :incomplete]
   defstruct [:interval, :peers, :complete, :incomplete, external_ip: nil, min_interval: nil]
 

@@ -22,7 +22,7 @@ defmodule DHT.Compact do
   @spec encode_node(node_id(), :inet.ip_address(), :inet.port_number()) ::
           <<_::208>> | {:error, :unsupported_ip}
   def encode_node(id, {a, b, c, d}, port)
-      when byte_size(id) == 20 and is_integer(port) and port in 1..65535 do
+      when byte_size(id) == 20 and is_integer(port) and port in 1..65_535 do
     <<id::binary-size(20), a, b, c, d, port::16>>
   end
 
@@ -56,7 +56,7 @@ defmodule DHT.Compact do
   @spec encode_peer(:inet.ip_address(), :inet.port_number()) ::
           <<_::48>> | {:error, :unsupported_ip}
   def encode_peer({a, b, c, d}, port)
-      when is_integer(port) and port in 1..65535 do
+      when is_integer(port) and port in 1..65_535 do
     <<a, b, c, d, port::16>>
   end
 
@@ -78,7 +78,7 @@ defmodule DHT.Compact do
   @spec encode_ipv6_peer(:inet.ip_address(), :inet.port_number()) ::
           <<_::144>> | {:error, :unsupported_ip}
   def encode_ipv6_peer({s1, s2, s3, s4, s5, s6, s7, s8}, port)
-      when is_integer(port) and port in 1..65535 do
+      when is_integer(port) and port in 1..65_535 do
     <<s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16, port::16>>
   end
 
@@ -120,7 +120,7 @@ defmodule DHT.Compact do
   @spec encode_node6(node_id(), :inet.ip_address(), :inet.port_number()) ::
           <<_::304>> | {:error, :unsupported_ip}
   def encode_node6(id, {s1, s2, s3, s4, s5, s6, s7, s8}, port)
-      when byte_size(id) == 20 and is_integer(port) and port in 1..65535 do
+      when byte_size(id) == 20 and is_integer(port) and port in 1..65_535 do
     <<id::binary-size(20), s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16,
       port::16>>
   end

@@ -174,7 +174,7 @@ defmodule Peer.LTEP.Handshake do
   defp parse_m(_), do: %{}
 
   @spec parse_port(term()) :: :inet.port_number() | nil
-  defp parse_port(p) when is_integer(p) and p > 0 and p <= 65535, do: p
+  defp parse_port(p) when is_integer(p) and p > 0 and p <= 65_535, do: p
   defp parse_port(_), do: nil
 
   @spec parse_string(term()) :: String.t() | nil

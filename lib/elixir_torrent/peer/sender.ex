@@ -1,4 +1,8 @@
 defmodule Peer.Sender do
+  @moduledoc """
+  Per-peer wire I/O GenServer: frames BEP 3 messages and extension payloads on the socket.
+  """
+
   # restart overridden to :temporary in Peer.start_link (auto_shutdown tree).
   use GenServer, restart: :temporary
   use Via
@@ -213,23 +217,21 @@ defmodule Peer.Sender do
   end
 
   def handle_call({:send_operations, operations}, _, %__MODULE__{socket: socket} = state) do
-    try do
-      socket =
-        Enum.reduce(operations, socket, fn
-          :choke, sock ->
-            do_send_sync(sock, @choke_id)
+    socket =
+      Enum.reduce(operations, socket, fn
+        :choke, sock ->
+          do_send_sync(sock, @choke_id)
 
-          :not_interested, sock ->
-            do_send_sync(sock, @not_interested_id)
+        :not_interested, sock ->
+          do_send_sync(sock, @not_interested_id)
 
-          {:cancel, index, begin, len}, sock ->
-            do_send_sync(sock, [@cancel_id, <<index::32>>, <<begin::32>>, <<len::32>>])
-        end)
+        {:cancel, index, begin, len}, sock ->
+          do_send_sync(sock, [@cancel_id, <<index::32>>, <<begin::32>>, <<len::32>>])
+      end)
 
-      {:reply, :ok, %{state | socket: socket}, @timeout}
-    catch
-      :send_failed -> {:stop, :normal, state}
-    end
+    {:reply, :ok, %{state | socket: socket}, @timeout}
+  catch
+    :send_failed -> {:stop, :normal, state}
   end
 
   def handle_cast(:choke, state), do: do_send(state, @choke_id)
@@ -446,28 +448,36 @@ defmodule Peer.Sender do
   @spec recv_inactive(t(), non_neg_integer(), timeout()) ::
           {:ok, binary(), t()} | {:error, term()}
   defp recv_inactive(%__MODULE__{buffer: buffer, socket: socket} = state, len, timeout) do
-    cond do
-      byte_size(buffer) >= len ->
-        <<data::binary-size(^len), rest::binary>> = buffer
-        {:ok, data, %{state | buffer: rest}}
+    if byte_size(buffer) >= len do
+      take_from_buffer(state, buffer, len)
+    else
+      recv_inactive_fetch(state, socket, buffer, len, timeout)
+    end
+  end
 
-      true ->
-        need = len - byte_size(buffer)
+  defp take_from_buffer(state, buffer, len) do
+    <<data::binary-size(^len), rest::binary>> = buffer
+    {:ok, data, %{state | buffer: rest}}
+  end
 
-        case Peer.Transport.safe_recv(socket, need, timeout) do
-          {:ok, chunk} ->
-            combined = buffer <> chunk
+  defp recv_inactive_fetch(state, socket, buffer, len, timeout) do
+    need = len - byte_size(buffer)
 
-            if byte_size(combined) >= len do
-              <<data::binary-size(^len), rest::binary>> = combined
-              {:ok, data, %{state | buffer: rest}}
-            else
-              recv_inactive(%{state | buffer: combined}, len, 0)
-            end
+    case Peer.Transport.safe_recv(socket, need, timeout) do
+      {:ok, chunk} ->
+        recv_inactive_combine(state, buffer <> chunk, len)
 
-          {:error, _} = error ->
-            error
-        end
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp recv_inactive_combine(state, combined, len) do
+    if byte_size(combined) >= len do
+      <<data::binary-size(^len), rest::binary>> = combined
+      {:ok, data, %{state | buffer: rest}}
+    else
+      recv_inactive(%{state | buffer: combined}, len, 0)
     end
   end
 

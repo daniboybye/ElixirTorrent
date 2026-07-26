@@ -1,4 +1,8 @@
 defmodule Acceptor.Connection.Handshakes do
+  @moduledoc """
+  Task supervisor and helpers for TCP/uTP dials, MSE, and BEP 3/10 handshakes.
+  """
+
   require Logger
 
   def child_spec(_) do
@@ -46,6 +50,7 @@ defmodule Acceptor.Connection.Handshakes do
   @mse_outbound :prefer
 
   alias Acceptor.BlackList
+  alias Peer.MSE.Handshake
 
   def recv(socket) do
     case start_task(fn -> do_recv(socket) end) do
@@ -177,58 +182,72 @@ defmodule Acceptor.Connection.Handshakes do
   defp take_dial_batch(peers, batch, hash) do
     {v6, v4} = Enum.split_with(peers, &ipv6_peer?/1)
     critical? = Torrent.Swarm.count(hash) < @critical_connected_threshold
-
-    # A family is only a throttle candidate if it actually has peers in this batch
-    # *and* Peer.DialStats has proven it wasteful for this torrent.
     v4_wasteful? = v4 != [] and Peer.DialStats.throttle_worthy?(hash, :inet)
     v6_wasteful? = v6 != [] and Peer.DialStats.throttle_worthy?(hash, :inet6)
 
+    if v4 == [] or v6 == [] do
+      take_dial_batch_one_family(v4, v6, batch, hash, v4_wasteful?, critical?)
+    else
+      take_dial_batch_dual(v4, v6, batch, hash, critical?, v4_wasteful?, v6_wasteful?)
+    end
+  end
+
+  @spec take_dial_batch_dual(
+          [Peer.t()],
+          [Peer.t()],
+          non_neg_integer(),
+          Torrent.hash(),
+          boolean(),
+          boolean(),
+          boolean()
+        ) :: [Peer.t()]
+  defp take_dial_batch_dual(v4, v6, batch, hash, critical?, v4_wasteful?, v6_wasteful?) do
     cond do
-      v4 == [] or v6 == [] ->
-        cond do
-          v4 != [] and v6 == [] and Torrent.Swarm.count(hash) > 0 and
-              (v4_wasteful? or critical?) ->
-            # Under CGNAT, sole v4 with no v6 candidates must not burn the whole
-            # dial budget on connect timeouts when v4 is proven wasteful *and* we
-            # already have peers, or when connected is 1..11 (critical) so
-            # DialBackoff may have temporarily exhausted v6 — cap to a probe so
-            # slots stay free for the next replenish wave. At connected==0 after a
-            # tracker response, always dial the full batch (lottery width): prior
-            # timeout waves may have marked v4 wasteful, but every offered peer may
-            # still be the first connect.
-            Enum.take(v4, min(@dial_probe, batch))
-
-          true ->
-            # Sole v6, or non-critical sole v4 not yet proven wasteful: no other
-            # family to spend slots on, so use the full batch — DialBackoff spaces
-            # re-dials.
-            Enum.take(v4 ++ v6, batch)
-        end
-
       critical? ->
         v6_take = Enum.take(v6, batch)
         v6_take ++ Enum.take(v4, batch - length(v6_take))
 
       Peer.DialStats.prefer_inet6?(hash) ->
-        # Live stats show v6 connects succeed ~2×+ more often than v4 on this
-        # torrent; outside critical tier, bias the batch v6-heavy but keep a
-        # minimum v4 slice so we still notice v4 recovering.
         v6_heavy(v4, v6, batch)
 
       v4_wasteful? and not v6_wasteful? ->
-        # v4 is proven wasteful and v6 is a viable alternative: dial a tiny v4
-        # probe (to catch v4 recovering) and fill the rest from v6.
         throttle_family(v4, v6, batch)
 
       v6_wasteful? and not v4_wasteful? ->
-        # Symmetric case: v6 proven wasteful, v4 viable.
         throttle_family(v6, v4, batch)
 
       true ->
-        # Neither family is proven wasteful for this torrent — both are dialing
-        # acceptably, both still lack a sample, or both are dead with no better
-        # alternative (so throttling either would just idle slots). Fill from both.
         balanced(v4, v6, batch)
+    end
+  end
+
+  @spec take_dial_batch_one_family(
+          [Peer.t()],
+          [Peer.t()],
+          non_neg_integer(),
+          Torrent.hash(),
+          boolean(),
+          boolean()
+        ) :: [Peer.t()]
+  defp take_dial_batch_one_family(v4, v6, batch, hash, v4_wasteful?, critical?) do
+    sole_v4_probe? =
+      v4 != [] and v6 == [] and Torrent.Swarm.count(hash) > 0 and (v4_wasteful? or critical?)
+
+    if sole_v4_probe? do
+      # Under CGNAT, sole v4 with no v6 candidates must not burn the whole
+      # dial budget on connect timeouts when v4 is proven wasteful *and* we
+      # already have peers, or when connected is 1..11 (critical) so
+      # DialBackoff may have temporarily exhausted v6 — cap to a probe so
+      # slots stay free for the next replenish wave. At connected==0 after a
+      # tracker response, always dial the full batch (lottery width): prior
+      # timeout waves may have marked v4 wasteful, but every offered peer may
+      # still be the first connect.
+      Enum.take(v4, min(@dial_probe, batch))
+    else
+      # Sole v6, or non-critical sole v4 not yet proven wasteful: no other
+      # family to spend slots on, so use the full batch — DialBackoff spaces
+      # re-dials.
+      Enum.take(v4 ++ v6, batch)
     end
   end
 
@@ -367,9 +386,8 @@ defmodule Acceptor.Connection.Handshakes do
       {:error, :already_connected}
     else
       # Hole-punched uTP connections stay plaintext — the punch is the hard part.
-      with {:ok, socket} <- safe_utp_connect(ip, port),
-           :ok <- handshake_peer(peer, hash, socket, :utp, started, :plaintext) do
-        :ok
+      with {:ok, socket} <- safe_utp_connect(ip, port) do
+        handshake_peer(peer, hash, socket, :utp, started, :plaintext)
       end
     end
   catch
@@ -434,7 +452,7 @@ defmodule Acceptor.Connection.Handshakes do
   defp outbound_socket(socket, hash, mode) do
     case mode do
       :prefer ->
-        case Peer.MSE.Handshake.initiate(socket, hash, handshake_bytes(hash)) do
+        case Handshake.initiate(socket, hash, handshake_bytes(hash)) do
           # Peer selected RC4: wrap the socket so the rest of the stream is
           # encrypted. Our BT handshake already went out as the encrypted IA.
           {:ok, %{mode: :rc4} = ciphers} ->
@@ -583,14 +601,14 @@ defmodule Acceptor.Connection.Handshakes do
   end
 
   defp safe_utp_connect(ip, port) do
-    if not ipv6_dialable?(ip) do
-      {:error, :eafnosupport}
-    else
+    if ipv6_dialable?(ip) do
       try do
         UTP.Dispatcher.connect(ip, port, [], @utp_connect_timeout_ms)
       catch
         :exit, _ -> {:error, :timeout}
       end
+    else
+      {:error, :eafnosupport}
     end
   end
 
@@ -603,7 +621,7 @@ defmodule Acceptor.Connection.Handshakes do
   @spec connectable_peer?(Peer.t(), :inet.port_number()) :: boolean()
   def connectable_peer?(%Peer{ip: ip, port: port}, listen_port) do
     not local_endpoint?(ip, port, listen_port) and valid_ip?(ip) and routable_ip?(ip) and
-      ipv6_dialable?(ip) and is_integer(port) and port > 0 and port <= 65535
+      ipv6_dialable?(ip) and is_integer(port) and port > 0 and port <= 65_535
   end
 
   @doc false
@@ -747,10 +765,10 @@ defmodule Acceptor.Connection.Handshakes do
   # the cipher-wrapped socket.
   @spec do_recv_mse(Peer.Transport.socket(), binary()) :: :ok
   defp do_recv_mse(socket, prefix) do
-    resolver = Peer.MSE.Handshake.resolver(Torrents.list())
+    resolver = Handshake.resolver(Torrents.list())
 
     with {:ok, %{recv: r, send: s, leftover: ia}} <-
-           Peer.MSE.Handshake.respond(socket, resolver, @handshake_recv_timeout_ms, prefix),
+           Handshake.respond(socket, resolver, @handshake_recv_timeout_ms, prefix),
          mse_socket = Peer.Transport.wrap(socket, %{recv: r, send: s}),
          {hash, peer_id, reserved} <- parse_handshake(ia),
          false <- BlackList.member?(peer_id),
@@ -923,14 +941,12 @@ defmodule Acceptor.Connection.Handshakes do
 
   @spec notify_current_piece(Torrent.hash(), pid()) :: :ok
   defp notify_current_piece(hash, pid) do
-    try do
-      case Torrent.get(hash, :peer_status) do
-        index when is_integer(index) -> Peer.interested(pid, index)
-        _ -> :ok
-      end
-    catch
-      :exit, _ -> :ok
+    case Torrent.get(hash, :peer_status) do
+      index when is_integer(index) -> Peer.interested(pid, index)
+      _ -> :ok
     end
+  catch
+    :exit, _ -> :ok
   end
 
   defp send_msg(socket, hash) do

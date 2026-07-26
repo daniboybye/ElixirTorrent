@@ -1,7 +1,22 @@
 defmodule Peer.UtPexTest do
   use ExUnit.Case, async: true
 
+  alias Peer.ConnectionManager.Queue, as: DialQueue
+  alias Peer.Controller.State
+  alias Peer.LTEP
+  alias Peer.LTEP.{Extensions, Handshake, Session}
+  alias Peer.UtHolepunch
   alias Peer.UtPex
+
+  alias Peer.UtPex.{
+    BEP40,
+    DisconnectReason,
+    Extension,
+    Filter,
+    InboundRate,
+    Outbound,
+    RecentCache
+  }
 
   # A globally routable-shaped range used only in in-memory PEX tests.
   defp pub4(n), do: {11, 0, 0, rem(n, 250)}
@@ -27,7 +42,7 @@ defmodule Peer.UtPexTest do
   end
 
   test "encode/decode IPv4 peer delta" do
-    added = [{{1, 2, 3, 4}, 6881}, {{5, 6, 7, 8}, 51413}]
+    added = [{{1, 2, 3, 4}, 6881}, {{5, 6, 7, 8}, 51_413}]
     dropped = [{{9, 9, 9, 9}, 6000}]
 
     payload = UtPex.encode(added, dropped)
@@ -41,7 +56,7 @@ defmodule Peer.UtPexTest do
 
   test "encode carries BEP 11 added.f bits and round-trips through Entry" do
     v4 = {{1, 2, 3, 4}, 6881}
-    v6 = {{0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x1}, 51413}
+    v6 = {{0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x1}, 51_413}
 
     flags =
       Bitwise.bor(UtPex.flag_encrypted(), UtPex.flag_seed())
@@ -204,10 +219,10 @@ defmodule Peer.UtPexTest do
 
   test "entry_from_connection maps LTEP e and outbound origin to flags" do
     ltep =
-      Peer.LTEP.Session.new([])
-      |> Peer.LTEP.Session.apply_peer_handshake(%Peer.LTEP.Handshake{e: 1})
+      Session.new([])
+      |> Session.apply_peer_handshake(%Handshake{e: 1})
 
-    base = %Peer.Controller.State{
+    base = %State{
       hash: <<0::160>>,
       id: <<1::160>>,
       fast_extension: nil,
@@ -228,12 +243,12 @@ defmodule Peer.UtPexTest do
 
   test "entry_from_connection derives uTP, holepunch and MSE flags from the peer" do
     ltep =
-      Peer.LTEP.Session.new([])
-      |> Peer.LTEP.Session.apply_peer_handshake(%Peer.LTEP.Handshake{
-        m: %{Peer.UtHolepunch.extension_name() => 7}
+      Session.new([])
+      |> Session.apply_peer_handshake(%Handshake{
+        m: %{UtHolepunch.extension_name() => 7}
       })
 
-    state = %Peer.Controller.State{
+    state = %State{
       hash: <<0::160>>,
       id: <<4::160>>,
       fast_extension: nil,
@@ -251,7 +266,7 @@ defmodule Peer.UtPexTest do
 
     mse_entry =
       UtPex.entry_from_connection(
-        %{state | socket: {:mse, nil, %{recv: nil, send: nil}}, ltep: Peer.LTEP.Session.new([])},
+        %{state | socket: {:mse, nil, %{recv: nil, send: nil}}, ltep: Session.new([])},
         {203, 0, 113, 3},
         6881
       )
@@ -313,9 +328,9 @@ defmodule Peer.UtPexTest do
     hash = :crypto.strong_rand_bytes(20)
     endpoint = {pub4(50), 6881}
 
-    ltep = Peer.LTEP.Session.new([Peer.UtPex.Extension])
+    ltep = Session.new([Extension])
 
-    state = %Peer.Controller.State{
+    state = %State{
       hash: hash,
       id: <<1::160>>,
       fast_extension: nil,
@@ -326,9 +341,9 @@ defmodule Peer.UtPexTest do
     }
 
     added_state =
-      Peer.Controller.State.handle_extended(
+      State.handle_extended(
         state,
-        Peer.UtPex.Extension.local_id(),
+        Extension.local_id(),
         UtPex.encode([endpoint], [])
       )
 
@@ -337,13 +352,13 @@ defmodule Peer.UtPexTest do
     rate_cleared =
       put_in(added_state.pex_inbound.rate, %{
         initial?: false,
-        anchor_ms: System.monotonic_time(:millisecond) - Peer.UtPex.InboundRate.window_ms() - 1
+        anchor_ms: System.monotonic_time(:millisecond) - InboundRate.window_ms() - 1
       })
 
     dropped_state =
-      Peer.Controller.State.handle_extended(
+      State.handle_extended(
         rate_cleared,
-        Peer.UtPex.Extension.local_id(),
+        Extension.local_id(),
         UtPex.encode([], [endpoint])
       )
 
@@ -359,9 +374,9 @@ defmodule Peer.UtPexTest do
           do: <<11, 0, 0, rem(i, 250), 12_000 + i::16>>
 
     payload = Bento.encode!(%{"added" => compact})
-    ltep = Peer.LTEP.Session.new([Peer.UtPex.Extension])
+    ltep = Session.new([Extension])
 
-    state = %Peer.Controller.State{
+    state = %State{
       hash: hash,
       id: <<3::160>>,
       fast_extension: nil,
@@ -372,7 +387,7 @@ defmodule Peer.UtPexTest do
     }
 
     after_initial =
-      Peer.Controller.State.handle_extended(state, Peer.UtPex.Extension.local_id(), payload)
+      State.handle_extended(state, Extension.local_id(), payload)
 
     assert MapSet.size(after_initial.holepunch.pex_endpoints) == 51
     refute after_initial.pex_inbound.initial?
@@ -380,13 +395,13 @@ defmodule Peer.UtPexTest do
     rate_cleared =
       put_in(after_initial.pex_inbound.rate, %{
         initial?: false,
-        anchor_ms: System.monotonic_time(:millisecond) - Peer.UtPex.InboundRate.window_ms() - 1
+        anchor_ms: System.monotonic_time(:millisecond) - InboundRate.window_ms() - 1
       })
 
     after_delta =
-      Peer.Controller.State.handle_extended(
+      State.handle_extended(
         rate_cleared,
-        Peer.UtPex.Extension.local_id(),
+        Extension.local_id(),
         payload
       )
 
@@ -399,12 +414,12 @@ defmodule Peer.UtPexTest do
     _model = start_private_model(hash)
     endpoint = {pub4(50), 6881}
 
-    refute Peer.UtPex.Extension in Peer.LTEP.Extensions.for_peer(hash)
+    refute Extension in Extensions.for_peer(hash)
     assert :error = UtPex.ingest(hash, UtPex.encode([endpoint], []))
 
-    ltep = Peer.LTEP.Session.new([Peer.UtPex.Extension])
+    ltep = Session.new([Extension])
 
-    state = %Peer.Controller.State{
+    state = %State{
       hash: hash,
       id: <<2::160>>,
       fast_extension: nil,
@@ -415,9 +430,9 @@ defmodule Peer.UtPexTest do
     }
 
     routed =
-      Peer.Controller.State.handle_extended(
+      State.handle_extended(
         state,
-        Peer.UtPex.Extension.local_id(),
+        Extension.local_id(),
         UtPex.encode([endpoint], [])
       )
 
@@ -427,10 +442,8 @@ defmodule Peer.UtPexTest do
 
   describe "outbound per-connection (BEP 11 item 4)" do
     defp ltep_with_peer_pex do
-      Peer.LTEP.Session.new([Peer.UtPex.Extension])
-      |> Peer.LTEP.merge_handshake(
-        Bento.encode!(%{"m" => %{"ut_pex" => Peer.UtPex.Extension.local_id()}})
-      )
+      Session.new([Extension])
+      |> LTEP.merge_handshake(Bento.encode!(%{"m" => %{"ut_pex" => Extension.local_id()}}))
     end
 
     defp outbound_state(opts) do
@@ -441,7 +454,7 @@ defmodule Peer.UtPexTest do
 
       ltep = Keyword.get(opts, :ltep, ltep_with_peer_pex())
 
-      %Peer.Controller.State{
+      %State{
         hash: hash,
         id: <<9::160>>,
         fast_extension: nil,
@@ -454,7 +467,7 @@ defmodule Peer.UtPexTest do
     end
 
     defp apply_snapshot(state, current) do
-      Peer.Controller.State.apply_pex_snapshot(state, current, send_fun: fn _payload -> :ok end)
+      State.apply_pex_snapshot(state, current, send_fun: fn _payload -> :ok end)
     end
 
     defp listen_socket do
@@ -570,21 +583,21 @@ defmodule Peer.UtPexTest do
 
     test "re-handshake with ut_pex sends initial once" do
       state = outbound_state(initial_sent?: false)
-      payload = Bento.encode!(%{"m" => %{"ut_pex" => Peer.UtPex.Extension.local_id()}})
+      payload = Bento.encode!(%{"m" => %{"ut_pex" => Extension.local_id()}})
 
-      merged = Peer.Controller.State.handle_extended(state, 0, payload)
-      assert Peer.Controller.State.pex_initial_needed?(merged)
+      merged = State.handle_extended(state, 0, payload)
+      assert State.pex_initial_needed?(merged)
 
-      pending = Peer.Controller.State.mark_pex_initial_pending(merged)
-      refute Peer.Controller.State.pex_initial_needed?(pending)
+      pending = State.mark_pex_initial_pending(merged)
+      refute State.pex_initial_needed?(pending)
 
       once = apply_snapshot(pending, %{})
       assert once.pex_outbound.initial_sent?
 
-      twice = Peer.Controller.State.handle_extended(once, 0, payload)
+      twice = State.handle_extended(once, 0, payload)
       assert twice.pex_outbound.initial_sent?
       assert twice.pex_outbound.sent == once.pex_outbound.sent
-      refute Peer.Controller.State.pex_initial_needed?(twice)
+      refute State.pex_initial_needed?(twice)
     end
 
     test "private torrents stay silent on outbound apply" do
@@ -605,15 +618,13 @@ defmodule Peer.UtPexTest do
       current = %{ep => UtPex.Entry.new(ep)}
       state = outbound_state(initial_sent?: true, sent: %{})
 
-      routed = Peer.Controller.State.apply_pex_snapshot(state, current)
+      routed = State.apply_pex_snapshot(state, current)
 
       assert routed.pex_outbound.sent == %{}
     end
   end
 
   describe "source-aware ingest (PEX item 5)" do
-    alias Peer.ConnectionManager.Queue, as: DialQueue
-
     defp start_manager(hash) do
       name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
       {:ok, pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: name)
@@ -714,20 +725,20 @@ defmodule Peer.UtPexTest do
       supplier = <<8::160>>
       endpoint = {pub4(15), 7015}
 
-      state = %Peer.Controller.State{
+      state = %State{
         hash: hash,
         id: supplier,
         fast_extension: nil,
         status: nil,
         pieces_count: 1,
         socket: nil,
-        ltep: Peer.LTEP.Session.new([Peer.UtPex.Extension])
+        ltep: Session.new([Extension])
       }
 
       routed =
-        Peer.Controller.State.handle_extended(
+        State.handle_extended(
           state,
-          Peer.UtPex.Extension.local_id(),
+          Extension.local_id(),
           UtPex.encode([endpoint], [])
         )
 
@@ -739,16 +750,13 @@ defmodule Peer.UtPexTest do
   end
 
   describe "PEX items 6–7 (underpopulated list + abuse/determinism)" do
-    alias Peer.UtPex.{BEP40, DisconnectReason, Filter, InboundRate, RecentCache}
-    alias Peer.ConnectionManager.Queue, as: DialQueue
-
     @client_v4 {123, 213, 32, 10}
     @peer_far {98, 76, 54, 32}
     @peer_near {123, 213, 32, 234}
 
     test "BEP 40 official CRC32C vectors" do
-      assert {:ok, 0xEC2D7224} = BEP40.priority({@client_v4, 6881}, {@peer_far, 51413})
-      assert {:ok, 0x99568189} = BEP40.priority({@client_v4, 6881}, {@peer_near, 51413})
+      assert {:ok, 0xEC2D7224} = BEP40.priority({@client_v4, 6881}, {@peer_far, 51_413})
+      assert {:ok, 0x99568189} = BEP40.priority({@client_v4, 6881}, {@peer_near, 51_413})
     end
 
     test "BEP 40 sort is stable and family-separated" do
@@ -784,7 +792,7 @@ defmodule Peer.UtPexTest do
       refute DisconnectReason.eligible?(:timeout)
       refute DisconnectReason.eligible?(:normal)
 
-      handshaken = %Peer.Controller.State{
+      handshaken = %State{
         hash: <<0::160>>,
         id: <<0::160>>,
         fast_extension: nil,
@@ -879,7 +887,7 @@ defmodule Peer.UtPexTest do
         RecentCache.record(hash, UtPex.Entry.new(endpoint), System.monotonic_time(:millisecond))
 
       {current, [_]} =
-        Peer.UtPex.Outbound.prepare_current(hash, %{},
+        Outbound.prepare_current(hash, %{},
           supplement_recent?: true,
           drain_recent?: false,
           now_ms: nil
@@ -933,7 +941,7 @@ defmodule Peer.UtPexTest do
       end
 
       {periodic, drained} =
-        Peer.UtPex.Outbound.prepare_current(hash, live,
+        Outbound.prepare_current(hash, live,
           supplement_recent?: true,
           drain_recent?: true,
           now_ms: now
@@ -943,7 +951,7 @@ defmodule Peer.UtPexTest do
       state = outbound_state(hash: hash, initial_sent?: true, sent: live)
 
       after_added =
-        Peer.Controller.State.apply_pex_snapshot(state, periodic,
+        State.apply_pex_snapshot(state, periodic,
           send_fun: fn payload ->
             send(self(), {:pex_payload, payload})
             :ok
@@ -955,7 +963,7 @@ defmodule Peer.UtPexTest do
       assert length(added) == 20
 
       _after_dropped =
-        Peer.Controller.State.apply_pex_snapshot(after_added, live,
+        State.apply_pex_snapshot(after_added, live,
           send_fun: fn payload ->
             send(self(), {:pex_payload, payload})
             :ok
@@ -1118,29 +1126,29 @@ defmodule Peer.UtPexTest do
       ep = {pub4(40), 7040}
       supplier = <<9::160>>
 
-      state = %Peer.Controller.State{
+      state = %State{
         hash: hash,
         id: supplier,
         fast_extension: nil,
         status: nil,
         pieces_count: 1,
         socket: nil,
-        ltep: Peer.LTEP.Session.new([Peer.UtPex.Extension])
+        ltep: Session.new([Extension])
       }
 
       payload = UtPex.encode([ep], [])
 
       after_first =
-        Peer.Controller.State.handle_extended(
+        State.handle_extended(
           state,
-          Peer.UtPex.Extension.local_id(),
+          Extension.local_id(),
           payload
         )
 
       _ignored =
-        Peer.Controller.State.handle_extended(
+        State.handle_extended(
           after_first,
-          Peer.UtPex.Extension.local_id(),
+          Extension.local_id(),
           payload
         )
 
@@ -1153,27 +1161,27 @@ defmodule Peer.UtPexTest do
       pid = start_pex_manager(hash)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
 
-      state = %Peer.Controller.State{
+      state = %State{
         hash: hash,
         id: <<10::160>>,
         fast_extension: nil,
         status: nil,
         pieces_count: 1,
         socket: nil,
-        ltep: Peer.LTEP.Session.new([Peer.UtPex.Extension])
+        ltep: Session.new([Extension])
       }
 
       after_bad =
-        Peer.Controller.State.handle_extended(
+        State.handle_extended(
           state,
-          Peer.UtPex.Extension.local_id(),
+          Extension.local_id(),
           <<1, 2, 3>>
         )
 
       after_excess =
-        Peer.Controller.State.handle_extended(
+        State.handle_extended(
           after_bad,
-          Peer.UtPex.Extension.local_id(),
+          Extension.local_id(),
           UtPex.encode([{pub4(41), 7041}], [])
         )
 

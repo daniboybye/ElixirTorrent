@@ -1,4 +1,8 @@
 defmodule Torrent.Downloads do
+  @moduledoc """
+  DynamicSupervisor of per-piece download workers for one torrent hash.
+  """
+
   use Via
 
   alias __MODULE__.Piece
@@ -76,19 +80,19 @@ defmodule Torrent.Downloads do
       _ ->
         via(hash)
         |> DynamicSupervisor.which_children()
-        |> Enum.flat_map(fn
-          {_id, pid, _, _} when is_pid(pid) ->
-            case Registry.keys(Registry, pid) do
-              [{{index, ^hash}, Piece}] when is_integer(index) -> [index]
-              _ -> []
-            end
-
-          _ ->
-            []
-        end)
+        |> Enum.flat_map(&active_piece_index(&1, hash))
     end
   end
 
   @spec piece_active?(Torrent.hash(), Torrent.index()) :: boolean()
   def piece_active?(hash, index), do: index in active_indices(hash)
+
+  defp active_piece_index({_id, pid, _, _}, hash) when is_pid(pid) do
+    case Registry.keys(Registry, pid) do
+      [{{index, ^hash}, Piece}] when is_integer(index) -> [index]
+      _ -> []
+    end
+  end
+
+  defp active_piece_index(_, _hash), do: []
 end

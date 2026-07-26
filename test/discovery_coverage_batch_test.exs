@@ -1,6 +1,9 @@
 defmodule MagnetConnectionLoopbackTest do
   use ExUnit.Case, async: false
 
+  alias Peer.LTEP
+  alias Peer.LTEP.Session
+
   test "fetch_info assembles metadata from loopback ut_metadata replies" do
     info_map = %{
       "name" => "loopback-magnet",
@@ -35,7 +38,7 @@ defmodule MagnetConnectionLoopbackTest do
              :gen_tcp.recv(socket, 68, 5_000)
 
     assert {:ok, ltep} =
-             Peer.LTEP.handshake_exchange(socket, Peer.LTEP.Session.new(), timeout: 5_000)
+             LTEP.handshake_exchange(socket, Session.new(), timeout: 5_000)
 
     assert :ok = :gen_tcp.send(socket, <<0, 0, 0, 1, 2>>)
     assert {:ok, <<0, 0, 0, 1, 1>>} = :gen_tcp.recv(socket, 5, 5_000)
@@ -87,7 +90,7 @@ defmodule MagnetConnectionLoopbackTest do
     assert {:ok, _} = :gen_tcp.recv(socket, 68, 5_000)
 
     assert {:ok, ltep} =
-             Peer.LTEP.handshake_exchange(socket, Peer.LTEP.Session.new(), timeout: 5_000)
+             LTEP.handshake_exchange(socket, Session.new(), timeout: 5_000)
 
     assert :ok = :gen_tcp.send(socket, <<0, 0, 0, 1, 2>>)
     assert {:ok, <<0, 0, 0, 1, 1>>} = :gen_tcp.recv(socket, 5, 5_000)
@@ -142,33 +145,45 @@ defmodule MagnetConnectionLoopbackTest do
     total_size = byte_size(info_blob)
 
     recv_loop = fn recv_loop ->
-      case :gen_tcp.recv(socket, 4, 10_000) do
-        {:ok, <<0, 0, 0, 0>>} ->
-          recv_loop.(recv_loop)
-
-        {:ok, <<len::32>>} ->
-          case :gen_tcp.recv(socket, len, 10_000) do
-            {:ok, <<20, _ext_id, payload::binary>>} ->
-              case Magnet.UtMetadata.decode_message(payload) do
-                {:ok, {:request, [piece: 0]}} ->
-                  data = Magnet.UtMetadata.encode_data(0, total_size, info_blob)
-                  :gen_tcp.send(socket, Peer.LTEP.extended_message_wire(1, data))
-                  recv_loop.(recv_loop)
-
-                _ ->
-                  :ok
-              end
-
-            _ ->
-              :ok
-          end
-
-        _ ->
-          :ok
-      end
+      ut_metadata_recv_step(recv_loop, socket, info_blob, total_size)
     end
 
     recv_loop.(recv_loop)
+  end
+
+  defp ut_metadata_recv_step(recv_loop, socket, info_blob, total_size) do
+    case :gen_tcp.recv(socket, 4, 10_000) do
+      {:ok, <<0, 0, 0, 0>>} ->
+        recv_loop.(recv_loop)
+
+      {:ok, <<len::32>>} ->
+        ut_metadata_payload_step(recv_loop, socket, info_blob, total_size, len)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp ut_metadata_payload_step(recv_loop, socket, info_blob, total_size, len) do
+    case :gen_tcp.recv(socket, len, 10_000) do
+      {:ok, <<20, _ext_id, payload::binary>>} ->
+        ut_metadata_handle_payload(recv_loop, socket, info_blob, total_size, payload)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp ut_metadata_handle_payload(recv_loop, socket, info_blob, total_size, payload) do
+    case Magnet.UtMetadata.decode_message(payload) do
+      {:ok, {:request, [piece: 0]}} ->
+        data = Magnet.UtMetadata.encode_data(0, total_size, info_blob)
+        :gen_tcp.send(socket, Peer.LTEP.extended_message_wire(1, data))
+        recv_loop.(recv_loop)
+
+      _ ->
+        :ok
+    end
   end
 end
 

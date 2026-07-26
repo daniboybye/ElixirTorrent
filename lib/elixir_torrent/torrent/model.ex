@@ -1,4 +1,8 @@
 defmodule Torrent.Model do
+  @moduledoc """
+  Per-torrent runtime stats, bitfield mirror, and periodic session checkpoints.
+  """
+
   use GenServer
   use Via
 

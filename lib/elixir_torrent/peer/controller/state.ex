@@ -1,6 +1,12 @@
 defmodule Peer.Controller.State do
-  alias Torrent.{Bitfield, PiecesStatistic, Uploader, Downloads, HashServe, Model, Superseed}
-  alias Peer.{Sender, Controller.FastExtension, HashWire, HashTransfer}
+  @moduledoc """
+  Mutable peer-session state and pure transitions for `Peer.Controller`.
+  """
+
+  alias Peer.{Controller.FastExtension, HashTransfer, HashWire, Sender}
+  alias Peer.LTEP.{Extensions, Session}
+  alias Peer.UtPex.{DisconnectReason, Entry, InboundRate, Outbound, RecentCache}
+  alias Torrent.{Bitfield, Downloads, HashServe, Model, PiecesStatistic, Superseed, Uploader}
 
   import Peer, only: [make_key: 2]
 
@@ -21,7 +27,7 @@ defmodule Peer.Controller.State do
     holepunch: %{pex_endpoints: MapSet.new(), rate: nil},
     # The 50-contact BEP 11 cap does not apply to the first inbound snapshot.
     # This is connection state; an added-only delta is not inherently "initial".
-    pex_inbound: %{initial?: true, rate: Peer.UtPex.InboundRate.initial()},
+    pex_inbound: %{initial?: true, rate: InboundRate.initial()},
     # BEP 11 outbound is per-connection: each remote that negotiates ut_pex gets its
     # own view of what we already told them (`sent`), not a torrent-global ledger.
     pex_outbound: %{initial_sent?: false, initial_pending?: false, sent: %{}},
@@ -83,7 +89,7 @@ defmodule Peer.Controller.State do
           status: Peer.status(),
           pieces_count: pos_integer(),
           socket: Peer.Transport.socket(),
-          ltep: Peer.LTEP.Session.t() | nil,
+          ltep: Session.t() | nil,
           peer_v2_support?: boolean(),
           holepunch: %{
             pex_endpoints: MapSet.t(endpoint()),
@@ -93,7 +99,7 @@ defmodule Peer.Controller.State do
           pex_outbound: %{
             initial_sent?: boolean(),
             initial_pending?: boolean(),
-            sent: %{endpoint() => Peer.UtPex.Entry.t()}
+            sent: %{endpoint() => Entry.t()}
           },
           ut_metadata_requests: %{window_started_at: integer() | nil, count: non_neg_integer()},
           hash_requests: %{Peer.HashTransfer.ref() => map()},
@@ -282,8 +288,8 @@ defmodule Peer.Controller.State do
   """
   @spec start_ltep(t()) :: t()
   def start_ltep(%__MODULE__{} = state) do
-    extensions = Peer.LTEP.Extensions.for_peer(state.hash)
-    session = Peer.LTEP.Session.new(extensions)
+    extensions = Extensions.for_peer(state.hash)
+    session = Session.new(extensions)
 
     opts =
       case Torrent.Metadata.metadata_size(state.hash) do
@@ -334,16 +340,16 @@ defmodule Peer.Controller.State do
 
   @spec ut_metadata?(t(), non_neg_integer()) :: boolean()
   defp ut_metadata?(state, extended_id) do
-    Peer.LTEP.Session.local_extension_id(state.ltep, Magnet.UtMetadata.extension_name()) ==
+    Session.local_extension_id(state.ltep, Magnet.UtMetadata.extension_name()) ==
       extended_id
   end
 
   @spec route_inbound_pex(t(), binary()) :: t()
   defp route_inbound_pex(%__MODULE__{} = state, payload) when is_binary(payload) do
     now_ms = System.monotonic_time(:millisecond)
-    rate = Map.get(state.pex_inbound, :rate, Peer.UtPex.InboundRate.initial())
+    rate = Map.get(state.pex_inbound, :rate, InboundRate.initial())
 
-    case Peer.UtPex.InboundRate.gate(rate, now_ms) do
+    case InboundRate.gate(rate, now_ms) do
       {:reject, rate} ->
         put_in(state.pex_inbound.rate, rate)
 
@@ -373,10 +379,10 @@ defmodule Peer.Controller.State do
   @doc false
   @spec record_pex_recent_disconnect(t(), term()) :: :ok
   def record_pex_recent_disconnect(%__MODULE__{} = state, reason) do
-    if Peer.UtPex.DisconnectReason.eligible?(reason) and
-         Peer.UtPex.DisconnectReason.handshaken?(state) do
+    if DisconnectReason.eligible?(reason) and
+         DisconnectReason.handshaken?(state) do
       with {:ok, entry} <- pex_entry(state) do
-        Peer.UtPex.RecentCache.record(
+        RecentCache.record(
           state.hash,
           entry,
           System.monotonic_time(:millisecond)
@@ -389,12 +395,12 @@ defmodule Peer.Controller.State do
 
   @spec ut_pex?(t(), non_neg_integer()) :: boolean()
   defp ut_pex?(state, extended_id) do
-    Peer.LTEP.Session.local_extension_id(state.ltep, Peer.UtPex.extension_name()) == extended_id
+    Session.local_extension_id(state.ltep, Peer.UtPex.extension_name()) == extended_id
   end
 
   @spec ut_holepunch?(t(), non_neg_integer()) :: boolean()
   defp ut_holepunch?(state, extended_id) do
-    Peer.LTEP.Session.local_extension_id(state.ltep, Peer.UtHolepunch.extension_name()) ==
+    Session.local_extension_id(state.ltep, Peer.UtHolepunch.extension_name()) ==
       extended_id
   end
 
@@ -429,7 +435,7 @@ defmodule Peer.Controller.State do
     initial? = Keyword.get(opts, :initial?, false)
 
     {current, _drained} =
-      Peer.UtPex.Outbound.prepare_current(state.hash, current,
+      Outbound.prepare_current(state.hash, current,
         state: state,
         self_ep: self_ep,
         now_ms: Keyword.get(opts, :now_ms),
@@ -441,13 +447,13 @@ defmodule Peer.Controller.State do
 
     {added, dropped} =
       if initial? do
-        {Peer.UtPex.Outbound.order_entries(Map.values(current), clients), []}
+        {Outbound.order_entries(Map.values(current), clients), []}
       else
         {added_raw, dropped_raw} = Peer.UtPex.outbound_delta(state.pex_outbound.sent, current)
 
         {
-          Peer.UtPex.Outbound.order_entries(added_raw, clients),
-          Peer.UtPex.Outbound.order_endpoints(dropped_raw, clients)
+          Outbound.order_entries(added_raw, clients),
+          Outbound.order_endpoints(dropped_raw, clients)
         }
       end
 
@@ -509,14 +515,14 @@ defmodule Peer.Controller.State do
   end
 
   @spec client_for_order(t()) :: term()
-  defp client_for_order(state), do: Peer.UtPex.Outbound.client_refs(state)
+  defp client_for_order(state), do: Outbound.client_refs(state)
 
   @spec pex_outbound_peer?(t()) :: boolean()
   defp pex_outbound_peer?(%__MODULE__{ltep: nil}), do: false
 
   defp pex_outbound_peer?(%__MODULE__{} = state) do
     Peer.UtPex.allowed?(state.hash) and
-      Peer.LTEP.Session.peer_supports?(state.ltep, Peer.UtPex.extension_name())
+      Session.peer_supports?(state.ltep, Peer.UtPex.extension_name())
   end
 
   @doc false
@@ -537,13 +543,13 @@ defmodule Peer.Controller.State do
   @spec own_endpoint(t()) :: Peer.UtPex.endpoint() | nil
   defp own_endpoint(%__MODULE__{} = state) do
     case pex_entry(state) do
-      {:ok, entry} -> Peer.UtPex.Entry.endpoint(entry)
+      {:ok, entry} -> Entry.endpoint(entry)
       :error -> nil
     end
   end
 
   @doc false
-  @spec pex_entry(t()) :: {:ok, Peer.UtPex.Entry.t()} | :error
+  @spec pex_entry(t()) :: {:ok, Entry.t()} | :error
   def pex_entry(%__MODULE__{socket: nil}), do: :error
 
   def pex_entry(%__MODULE__{} = state) do
@@ -567,7 +573,7 @@ defmodule Peer.Controller.State do
   """
   @spec apply_pex_snapshot(
           t(),
-          %{Peer.UtPex.endpoint() => Peer.UtPex.Entry.t()},
+          %{Peer.UtPex.endpoint() => Entry.t()},
           keyword()
         ) :: t()
   def apply_pex_snapshot(%__MODULE__{} = state, current, opts \\ []) when is_map(current) do
@@ -598,10 +604,10 @@ defmodule Peer.Controller.State do
   defp transmit_pex(%__MODULE__{ltep: nil} = state, _payload), do: {:error, state}
 
   defp transmit_pex(%__MODULE__{} = state, payload) do
-    ut_id = Peer.LTEP.Session.peer_extension_id(state.ltep, Peer.UtPex.extension_name())
+    ut_id = Session.peer_extension_id(state.ltep, Peer.UtPex.extension_name())
 
     if Peer.UtPex.allowed?(state.hash) and is_integer(ut_id) and ut_id > 0 and
-         Peer.LTEP.Session.peer_supports?(state.ltep, Peer.UtPex.extension_name()) do
+         Session.peer_supports?(state.ltep, Peer.UtPex.extension_name()) do
       case Peer.LTEP.send_extended(key(state), ut_id, payload) do
         :ok -> {:ok, state}
         _ -> {:error, state}
@@ -613,7 +619,7 @@ defmodule Peer.Controller.State do
 
   @spec respond_ut_metadata(t(), binary()) :: t()
   defp respond_ut_metadata(state, payload) do
-    ut_id = Peer.LTEP.Session.peer_extension_id(state.ltep, Magnet.UtMetadata.extension_name())
+    ut_id = Session.peer_extension_id(state.ltep, Magnet.UtMetadata.extension_name())
 
     case Magnet.UtMetadata.decode_message(payload) do
       {:ok, {:request, [piece: piece]}} ->
@@ -960,52 +966,78 @@ defmodule Peer.Controller.State do
   end
 
   defp do_handle_request(state, index, begin, length) do
+    case request_reject_reason(state, index, begin, length) do
+      :ok ->
+        do_serve_request(state, index, begin, length)
+
+      {:reject, reason} ->
+        reject_upload_request(state, index, begin, length, reason)
+    end
+  end
+
+  defp request_reject_reason(state, index, begin, length) do
     cond do
       index < 0 or index >= state.pieces_count ->
-        log_upload(state, "request_reject index=#{index} reason=bad_index")
-        {:error, :protocol_error, state}
+        {:reject, :bad_index}
 
       not upload_request_in_bounds?(state.hash, index, begin, length) ->
-        log_upload(
-          state,
-          "request_reject index=#{index} begin=#{begin} len=#{length} reason=bad_bounds"
-        )
-
-        {:error, :protocol_error, state}
+        {:reject, :bad_bounds}
 
       Superseed.active?(state.hash) and state.superseed_piece not in [index, :all] ->
-        log_upload(state, "request_reject index=#{index} reason=superseed_hidden")
-
-        if state.fast_extension != nil do
-          Sender.reject(key(state), index, begin, length)
-        end
-
-        state
+        {:reject, :superseed_hidden}
 
       not Torrent.have?(state.hash, index) ->
-        # Bitfield vs disk can race during verify/invalidate. BEP 6 reject (or
-        # silent ignore without Fast) is enough — protocol_error would tear down
-        # the whole peer via one_for_all and lose a productive remote seeder.
-        model_count =
-          case Torrent.get(state.hash, :bitfield) do
-            bf when is_binary(bf) -> Torrent.Bitfield.count(bf, state.pieces_count)
-            _ -> 0
-          end
-
-        log_upload(
-          state,
-          "request_reject index=#{index} reason=no_piece_on_disk model_pieces=#{model_count}"
-        )
-
-        if state.fast_extension != nil do
-          Sender.reject(key(state), index, begin, length)
-        end
-
-        state
+        {:reject, :no_piece_on_disk}
 
       true ->
-        do_serve_request(state, index, begin, length)
+        :ok
     end
+  end
+
+  defp reject_upload_request(state, index, _begin, _length, :bad_index) do
+    log_upload(state, "request_reject index=#{index} reason=bad_index")
+    {:error, :protocol_error, state}
+  end
+
+  defp reject_upload_request(state, index, begin, length, :bad_bounds) do
+    log_upload(
+      state,
+      "request_reject index=#{index} begin=#{begin} len=#{length} reason=bad_bounds"
+    )
+
+    {:error, :protocol_error, state}
+  end
+
+  defp reject_upload_request(state, index, begin, length, :superseed_hidden) do
+    log_upload(state, "request_reject index=#{index} reason=superseed_hidden")
+
+    if state.fast_extension != nil do
+      Sender.reject(key(state), index, begin, length)
+    end
+
+    state
+  end
+
+  defp reject_upload_request(state, index, begin, length, :no_piece_on_disk) do
+    # Bitfield vs disk can race during verify/invalidate. BEP 6 reject (or
+    # silent ignore without Fast) is enough — protocol_error would tear down
+    # the whole peer via one_for_all and lose a productive remote seeder.
+    model_count =
+      case Torrent.get(state.hash, :bitfield) do
+        bf when is_binary(bf) -> Torrent.Bitfield.count(bf, state.pieces_count)
+        _ -> 0
+      end
+
+    log_upload(
+      state,
+      "request_reject index=#{index} reason=no_piece_on_disk model_pieces=#{model_count}"
+    )
+
+    if state.fast_extension != nil do
+      Sender.reject(key(state), index, begin, length)
+    end
+
+    state
   end
 
   defp upload_request_in_bounds?(hash, index, begin, length) do
@@ -1026,6 +1058,11 @@ defmodule Peer.Controller.State do
       :debug
     )
 
+    state = maybe_reject_choked_request(state, index, begin, length, allowed_while_choked?)
+    serve_upload_request(state, index, begin, length, request, allowed_while_choked?)
+  end
+
+  defp maybe_reject_choked_request(state, index, begin, length, allowed_while_choked?) do
     if state.choke and state.fast_extension != nil and not allowed_while_choked? do
       log_upload(
         state,
@@ -1036,60 +1073,71 @@ defmodule Peer.Controller.State do
       Sender.reject(key(state), index, begin, length)
     end
 
+    state
+  end
+
+  defp serve_upload_request(state, index, begin, length, request, allowed_while_choked?) do
     cond do
-      match?(%FastExtension{}, state.fast_extension) and
-          MapSet.member?(state.upload_requests, request) ->
-        # Registry keys and upload tracking are one-per-subpiece. Give a
-        # duplicate Fast request its own explicit response instead of losing
-        # it behind the already queued request.
+      duplicate_fast_request?(state, request) ->
         Sender.reject(key(state), index, begin, length)
         state
 
       not state.choke or allowed_while_choked? ->
-        pid = self()
-        sender_key = key(state)
-
-        callback =
-          if match?(%FastExtension{}, state.fast_extension) do
-            fn block ->
-              GenServer.call(pid, {:complete_upload, index, begin, length, block})
-            end
-          else
-            fn block ->
-              Sender.piece(sender_key, index, begin, block)
-
-              log_upload(
-                state,
-                "piece_sent index=#{index} begin=#{begin} len=#{byte_size(block)}",
-                :debug
-              )
-
-              GenServer.cast(pid, {:upload, [length]})
-            end
-          end
-
-        case Uploader.request(state.hash, state.id, index, begin, length, callback) do
-          {:ok, _task} when not is_nil(state.fast_extension) ->
-            update_in(state.upload_requests, &MapSet.put(&1, request))
-
-          {:ok, _task} ->
-            state
-
-          {:error, reason} ->
-            log_upload(
-              state,
-              "request_reject index=#{index} begin=#{begin} len=#{length} reason=#{inspect(reason)}"
-            )
-
-            if match?(%FastExtension{}, state.fast_extension) do
-              Sender.reject(key(state), index, begin, length)
-            end
-
-            state
-        end
+        enqueue_peer_upload(state, index, begin, length, request)
 
       true ->
         state
+    end
+  end
+
+  defp duplicate_fast_request?(state, request) do
+    match?(%FastExtension{}, state.fast_extension) and
+      MapSet.member?(state.upload_requests, request)
+  end
+
+  defp enqueue_peer_upload(state, index, begin, length, request) do
+    pid = self()
+    sender_key = key(state)
+    callback = upload_complete_callback(state, pid, sender_key, index, begin, length)
+
+    case Uploader.request(state.hash, state.id, index, begin, length, callback) do
+      {:ok, _task} when not is_nil(state.fast_extension) ->
+        update_in(state.upload_requests, &MapSet.put(&1, request))
+
+      {:ok, _task} ->
+        state
+
+      {:error, reason} ->
+        log_upload(
+          state,
+          "request_reject index=#{index} begin=#{begin} len=#{length} reason=#{inspect(reason)}"
+        )
+
+        if match?(%FastExtension{}, state.fast_extension) do
+          Sender.reject(key(state), index, begin, length)
+        end
+
+        state
+    end
+  end
+
+  defp upload_complete_callback(state, pid, sender_key, index, begin, length) do
+    if match?(%FastExtension{}, state.fast_extension) do
+      fn block ->
+        GenServer.call(pid, {:complete_upload, index, begin, length, block})
+      end
+    else
+      fn block ->
+        Sender.piece(sender_key, index, begin, block)
+
+        log_upload(
+          state,
+          "piece_sent index=#{index} begin=#{begin} len=#{byte_size(block)}",
+          :debug
+        )
+
+        GenServer.cast(pid, {:upload, [length]})
+      end
     end
   end
 
@@ -1114,7 +1162,7 @@ defmodule Peer.Controller.State do
   # DHT (BEP 5 § BitTorrent Protocol Extension)
   @spec handle_port(t(), non_neg_integer()) :: t()
   def handle_port(%__MODULE__{hash: hash} = state, dht_port)
-      when is_integer(dht_port) and dht_port in 1..65535 do
+      when is_integer(dht_port) and dht_port in 1..65_535 do
     if Magnet.Bootstrap.active?(hash) do
       state
     else
@@ -1554,23 +1602,32 @@ defmodule Peer.Controller.State do
         apply_pin(state, index)
 
       _ ->
-        case PiecesStatistic.choice_piece(hash, :random) do
-          nil ->
-            case Downloads.active_indices(hash) do
-              [index | _] ->
-                log_download(state, "piece_index from_active index=#{index}", :debug)
-                apply_pin(state, index)
-
-              [] ->
-                log_download(state, "piece_index none_available", :debug)
-                state
-            end
-
-          index ->
-            log_download(state, "piece_index chosen=#{index}", :debug)
-            apply_pin(state, index)
-        end
+        choose_and_pin_piece(state, hash)
     end
+  end
+
+  defp choose_and_pin_piece(state, hash) do
+    case PiecesStatistic.choice_piece(hash, :random) do
+      nil -> pin_from_active_or_none(state, hash)
+      index -> pin_chosen_piece(state, index)
+    end
+  end
+
+  defp pin_from_active_or_none(state, hash) do
+    case Downloads.active_indices(hash) do
+      [index | _] ->
+        log_download(state, "piece_index from_active index=#{index}", :debug)
+        apply_pin(state, index)
+
+      [] ->
+        log_download(state, "piece_index none_available", :debug)
+        state
+    end
+  end
+
+  defp pin_chosen_piece(state, index) do
+    log_download(state, "piece_index chosen=#{index}", :debug)
+    apply_pin(state, index)
   end
 
   @spec maybe_optimistic_unchoke(t()) :: t()
@@ -1660,22 +1717,22 @@ defmodule Peer.Controller.State do
   defp sync_superseed_peer_bitfield(%__MODULE__{} = state) do
     if Superseed.active?(state.hash) do
       _ = Superseed.assign(state.hash, state.id, state.bitfield)
-
-      case state.superseed_piece do
-        index when is_integer(index) ->
-          if has_index?(state, index) do
-            rotate_propagated_superseed_piece(state, index)
-          else
-            state
-          end
-
-        _ ->
-          state
-      end
+      sync_superseed_piece_index(state)
     else
       state
     end
   end
+
+  defp sync_superseed_piece_index(%__MODULE__{superseed_piece: index} = state)
+       when is_integer(index) do
+    if has_index?(state, index) do
+      rotate_propagated_superseed_piece(state, index)
+    else
+      state
+    end
+  end
+
+  defp sync_superseed_piece_index(state), do: state
 
   @spec seed_allowed_fast(t()) :: t()
   defp seed_allowed_fast(%__MODULE__{fast_extension: %FastExtension{}} = state),
@@ -1805,7 +1862,7 @@ defmodule Peer.Controller.State do
 
   # BEP 10: peers advertise how many requests they are willing to queue (reqq);
   # exceeding it gets requests silently dropped by some clients.
-  defp max_unanswered_requests(%__MODULE__{ltep: %Peer.LTEP.Session{peer: %{reqq: reqq}}})
+  defp max_unanswered_requests(%__MODULE__{ltep: %Session{peer: %{reqq: reqq}}})
        when is_integer(reqq) and reqq > 0,
        do: min(reqq, @max_unanswered_requests)
 

@@ -1,6 +1,8 @@
 defmodule Peer.UtPex.Filter do
   @moduledoc false
 
+  alias Acceptor.Connection.Handshakes
+
   @type endpoint :: {:inet.ip_address(), :inet.port_number()}
 
   @doc """
@@ -9,14 +11,14 @@ defmodule Peer.UtPex.Filter do
   """
   @spec global_unicast_endpoint?(endpoint()) :: boolean()
   def global_unicast_endpoint?({ip, port}) do
-    global_unicast_ip?(ip) and is_integer(port) and port > 0 and port <= 65535
+    global_unicast_ip?(ip) and is_integer(port) and port > 0 and port <= 65_535
   end
 
   @doc false
   @spec advertisable?(Torrent.hash(), endpoint(), endpoint() | nil) :: boolean()
   def advertisable?(hash, endpoint, self_ep \\ nil) do
     global_unicast_endpoint?(endpoint) and endpoint != self_ep and
-      not Acceptor.Connection.Handshakes.local_endpoint?(
+      not Handshakes.local_endpoint?(
         elem(endpoint, 0),
         elem(endpoint, 1),
         listen_port(hash)
@@ -30,7 +32,7 @@ defmodule Peer.UtPex.Filter do
 
     Enum.filter(peers, fn %Peer{ip: ip, port: port} ->
       global_unicast_endpoint?({ip, port}) and
-        not Acceptor.Connection.Handshakes.local_endpoint?(ip, port, lp)
+        not Handshakes.local_endpoint?(ip, port, lp)
     end)
   end
 

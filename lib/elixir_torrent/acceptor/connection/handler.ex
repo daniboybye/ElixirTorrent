@@ -10,7 +10,7 @@ defmodule Acceptor.Connection.Handler do
   """
 
   @spec port() :: :inet.port_number()
-  def port(), do: GenServer.call(__MODULE__, :port)
+  def port, do: GenServer.call(__MODULE__, :port)
 
   def init(_) do
     with {:ok, socket} <- open_listen_socket({:stop, :no_free_port}) do
@@ -18,7 +18,7 @@ defmodule Acceptor.Connection.Handler do
       %{inet: ip4, inet6_all: v6_all} = Acceptor.all_global_ips()
 
       Logger.info(
-        "[acceptor] listening proto=tcp port=#{port} ipv4=#{if ip4, do: Acceptor.format_ip(ip4), else: "none"} ipv6_all=#{Enum.map(v6_all, &Acceptor.format_ip/1) |> Enum.join(",")} dual_stack=#{v6_all != []}"
+        "[acceptor] listening proto=tcp port=#{port} ipv4=#{if ip4, do: Acceptor.format_ip(ip4), else: "none"} ipv6_all=#{Enum.map_join(v6_all, ",", &Acceptor.format_ip/1)} dual_stack=#{v6_all != []}"
       )
 
       {:ok, _} = Task.start_link(fn -> loop(socket) end)
@@ -53,21 +53,19 @@ defmodule Acceptor.Connection.Handler do
   end
 
   defp open_listen_socket(default) do
-    Enum.find_value(
-      Acceptor.port_range(),
-      default,
-      fn number ->
-        case :gen_tcp.listen(number, Acceptor.tcp_socket_options(:inet6)) do
-          {:ok, _socket} = ok ->
-            ok
+    Enum.find_value(Acceptor.port_range(), default, &listen_on_port/1)
+  end
 
-          {:error, _} ->
-            case :gen_tcp.listen(number, Acceptor.tcp_socket_options(:inet)) do
-              {:ok, _socket} = ok -> ok
-              {:error, _} -> nil
-            end
+  defp listen_on_port(number) do
+    case :gen_tcp.listen(number, Acceptor.tcp_socket_options(:inet6)) do
+      {:ok, _socket} = ok ->
+        ok
+
+      {:error, _} ->
+        case :gen_tcp.listen(number, Acceptor.tcp_socket_options(:inet)) do
+          {:ok, _socket} = ok -> ok
+          {:error, _} -> nil
         end
-      end
-    )
+    end
   end
 end

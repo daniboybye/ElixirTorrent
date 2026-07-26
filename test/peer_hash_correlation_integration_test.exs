@@ -3,7 +3,7 @@ defmodule Peer.HashCorrelationIntegrationTest do
 
   alias Peer.{Controller, HashWire}
   alias Peer.Controller.State
-  alias Torrent.Merkle
+  alias Torrent.{FileHandle, Merkle, Model, PiecesStatistic}
 
   @block Merkle.block_size()
   @timeout 5_000
@@ -178,9 +178,9 @@ defmodule Peer.HashCorrelationIntegrationTest do
       merkle: merkle
     }
 
-    :ok = Torrent.PiecesStatistic.init(torrent)
-    {:ok, model} = Torrent.Model.start_link(torrent)
-    {:ok, store} = Torrent.FileHandle.Store.start_link(hash)
+    :ok = PiecesStatistic.init(torrent)
+    {:ok, model} = Model.start_link(torrent)
+    {:ok, store} = FileHandle.Store.start_link(hash)
 
     {:ok, hash_sup} =
       Task.Supervisor.start_link(
@@ -213,10 +213,8 @@ defmodule Peer.HashCorrelationIntegrationTest do
   end
 
   defp cleanup_stub(stub) do
-    try do
-      if Process.alive?(stub), do: GenServer.stop(stub, :normal, 500)
-    catch
-      :exit, _ -> :ok
-    end
+    if Process.alive?(stub), do: GenServer.stop(stub, :normal, 500)
+  catch
+    :exit, _ -> :ok
   end
 end

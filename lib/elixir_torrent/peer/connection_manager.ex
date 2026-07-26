@@ -8,6 +8,7 @@ defmodule Peer.ConnectionManager do
 
   require Logger
 
+  alias Acceptor.Connection.Handshakes
   alias Peer.ConnectionManager.Queue, as: DialQueue
   alias Torrent.Swarm
 
@@ -165,50 +166,7 @@ defmodule Peer.ConnectionManager do
   def handle_info(:tick, %{hash: hash} = state) do
     connected = Swarm.count(hash)
     send_after(self(), :tick, tick_interval(hash, connected))
-
-    cond do
-      connected >= @swarm_cap and low_download_speed?(hash) and downloading?(hash) ->
-        {evicted, reason} = evict_stale_peers(hash, connected)
-
-        if evicted > 0 do
-          Logger.info(
-            "[peer_evict] hash=#{Torrent.hex_encoded_hash(hash)} n=#{evicted} reason=#{reason}"
-          )
-        end
-
-        connected = Swarm.count(hash)
-        maybe_replenish_discovery(state, connected)
-        maybe_dial_or_noreply(state, connected)
-
-      connected >= @swarm_cap ->
-        {:noreply, state}
-
-      low_download_speed?(hash) and downloading?(hash) and connected >= @low_connected_threshold ->
-        now = System.monotonic_time(:millisecond)
-
-        state =
-          if is_nil(state.last_snub_ms) or now - state.last_snub_ms >= @snub_min_interval_ms do
-            evicted = evict_snub_peers(hash, connected)
-
-            if evicted > 0 do
-              Logger.info("[peer_snub] hash=#{Torrent.hex_encoded_hash(hash)} n=#{evicted}")
-
-              %{state | last_snub_ms: now}
-            else
-              state
-            end
-          else
-            state
-          end
-
-        connected = Swarm.count(hash)
-        maybe_replenish_discovery(state, connected)
-        maybe_dial_or_noreply(state, connected)
-
-      true ->
-        maybe_replenish_discovery(state, connected)
-        maybe_dial_or_noreply(state, connected)
-    end
+    handle_tick(state, hash, connected)
   end
 
   @impl true
@@ -225,6 +183,65 @@ defmodule Peer.ConnectionManager do
     maybe_replenish_discovery(state, connected)
 
     maybe_dial(state, connected)
+  end
+
+  defp handle_tick(state, hash, connected) do
+    cond do
+      connected >= @swarm_cap and low_download_speed?(hash) and downloading?(hash) ->
+        handle_tick_swarm_cap_evict(state, hash, connected)
+
+      connected >= @swarm_cap ->
+        {:noreply, state}
+
+      low_download_speed?(hash) and downloading?(hash) and connected >= @low_connected_threshold ->
+        handle_tick_snub(state, hash, connected)
+
+      true ->
+        handle_tick_replenish_dial(state, hash, connected)
+    end
+  end
+
+  defp handle_tick_swarm_cap_evict(state, hash, connected) do
+    {evicted, reason} = evict_stale_peers(hash, connected)
+
+    if evicted > 0 do
+      Logger.info(
+        "[peer_evict] hash=#{Torrent.hex_encoded_hash(hash)} n=#{evicted} reason=#{reason}"
+      )
+    end
+
+    connected = Swarm.count(hash)
+    handle_tick_replenish_dial(state, hash, connected)
+  end
+
+  defp handle_tick_snub(state, hash, connected) do
+    now = System.monotonic_time(:millisecond)
+
+    state =
+      if is_nil(state.last_snub_ms) or now - state.last_snub_ms >= @snub_min_interval_ms do
+        apply_snub_evict(state, hash, connected, now)
+      else
+        state
+      end
+
+    connected = Swarm.count(hash)
+    handle_tick_replenish_dial(state, hash, connected)
+  end
+
+  defp apply_snub_evict(state, hash, connected, now) do
+    evicted = evict_snub_peers(hash, connected)
+
+    if evicted > 0 do
+      Logger.info("[peer_snub] hash=#{Torrent.hex_encoded_hash(hash)} n=#{evicted}")
+      %{state | last_snub_ms: now}
+    else
+      state
+    end
+  end
+
+  defp handle_tick_replenish_dial(state, _hash, connected) do
+    maybe_replenish_discovery(state, connected)
+    maybe_dial_or_noreply(state, connected)
   end
 
   defp maybe_continue_dial(state, queue, continue?) do
@@ -254,7 +271,7 @@ defmodule Peer.ConnectionManager do
     peers =
       hash
       |> prioritize_dial_queue(DialQueue.peers(queue))
-      |> Acceptor.Connection.Handshakes.select_peers_to_dial(hash, batch)
+      |> Handshakes.select_peers_to_dial(hash, batch)
 
     if peers == [] do
       if map_size(queue) == 0 do
@@ -267,7 +284,7 @@ defmodule Peer.ConnectionManager do
       parent = self()
 
       Task.start(fn ->
-        results = Acceptor.Connection.Handshakes.dial_peers(peers, hash)
+        results = Handshakes.dial_peers(peers, hash)
         send(parent, {:dial_done, selected_keys, results})
       end)
 

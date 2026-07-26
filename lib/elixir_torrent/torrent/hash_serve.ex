@@ -8,8 +8,8 @@ defmodule Torrent.HashServe do
 
   use Via
 
-  alias Torrent.{FileHandle, Merkle}
   alias Peer.{HashWire, Sender}
+  alias Torrent.{FileHandle, Merkle}
 
   @max_tasks 8
 
@@ -103,11 +103,12 @@ defmodule Torrent.HashServe do
     with {:ok, ctx} <- fetch_context(hash),
          {:ok, piece_layer} <- Merkle.piece_layer_level(ctx.piece_length),
          :ok <- HashWire.validate_request(req, piece_layer),
-         {:ok, file} <- find_file(ctx, req.pieces_root),
-         num_layers = num_layers_for_file(file.length),
-         :ok <- HashWire.validate_response_header(req, piece_layer, num_layers),
-         :ok <- validate_index_bounds(file, req, ctx.piece_length) do
-      :ok
+         {:ok, file} <- find_file(ctx, req.pieces_root) do
+      num_layers = num_layers_for_file(file.length)
+
+      with :ok <- HashWire.validate_response_header(req, piece_layer, num_layers) do
+        validate_index_bounds(file, req, ctx.piece_length)
+      end
     end
   end
 

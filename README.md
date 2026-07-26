@@ -48,8 +48,8 @@ Run the project quality gate with:
 mix quality
 ```
 
-It compiles with warnings as errors, runs Dialyzer, and runs Credo's warning-level checks. Use
-`mix credo --strict` when auditing the existing readability and refactoring backlog.
+It compiles with warnings as errors, runs Dialyzer, and runs `mix credo --strict --all`.
+The same strict Credo gate runs in CI, covering every enabled check at every priority.
 
 ## Quick start
 

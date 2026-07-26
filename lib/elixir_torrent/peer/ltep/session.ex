@@ -7,7 +7,7 @@ defmodule Peer.LTEP.Session do
   register through `Peer.LTEP.Extensions` (BEP 10 § rationale — per-peer ids).
   """
 
-  alias Peer.LTEP.{Extension, Handshake}
+  alias Peer.LTEP.{Extension, Extensions, Handshake}
 
   # BEP 10 `reqq`: how many pending `request` messages *from* the peer we accept
   # without dropping. Torrent.Uploader spawns a Task per request (no internal cap),
@@ -33,7 +33,7 @@ defmodule Peer.LTEP.Session do
   outbound handshake.
   """
   @spec new([module()]) :: t()
-  def new(extensions \\ Peer.LTEP.Extensions.all()) do
+  def new(extensions \\ Extensions.all()) do
     registrations =
       extensions
       |> Enum.map(fn mod -> {Extension.name(mod), Extension.local_id(mod)} end)

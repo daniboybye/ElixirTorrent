@@ -1,6 +1,11 @@
 defmodule Torrent.Swarm do
+  @moduledoc """
+  Peer assignment and connection lifecycle for one torrent (dial, pin pieces, disconnect).
+  """
+
   use Via
 
+  alias __MODULE__.Disconnect
   alias Torrent.{Downloads, Model}
 
   require Logger
@@ -58,15 +63,7 @@ defmodule Torrent.Swarm do
     hash
     |> peer_pids()
     |> sort_peers_seeders_first()
-    |> Enum.flat_map(fn pid ->
-      case Peer.get_key(pid) do
-        key when is_tuple(key) ->
-          if do_assign_peer_to_piece?(hash, key, index, active), do: [pid], else: []
-
-        _ ->
-          []
-      end
-    end)
+    |> Enum.flat_map(&interest_pid_if_assignable(hash, index, active, &1))
   end
 
   @doc false
@@ -183,14 +180,14 @@ defmodule Torrent.Swarm do
 
   @spec unchoke(Torrent.hash()) :: :ok
   def unchoke(hash) do
-    unless torrent_offers_pieces?(hash) do
+    if torrent_offers_pieces?(hash) do
+      do_unchoke(hash)
+    else
       Logger.debug(
         "[peer_upload] hash=#{Torrent.hex_encoded_hash(hash)} unchoke_skip reason=no_pieces_to_offer"
       )
 
       :ok
-    else
-      do_unchoke(hash)
     end
   end
 
@@ -216,21 +213,33 @@ defmodule Torrent.Swarm do
 
   @spec torrent_offers_pieces?(Torrent.hash()) :: boolean()
   defp torrent_offers_pieces?(hash) do
-    cond do
-      Torrent.Model.downloaded?(hash) ->
-        true
-
-      true ->
-        case Torrent.get(hash, [:pieces_count]) do
-          [count] when is_integer(count) and count > 0 ->
-            Enum.any?(0..(count - 1), &Torrent.have?(hash, &1))
-
-          _ ->
-            false
-        end
+    if Torrent.Model.downloaded?(hash) do
+      true
+    else
+      torrent_has_any_have_bit?(hash)
     end
   catch
     :exit, _ -> false
+  end
+
+  defp torrent_has_any_have_bit?(hash) do
+    case Torrent.get(hash, [:pieces_count]) do
+      [count] when is_integer(count) and count > 0 ->
+        Enum.any?(0..(count - 1), &Torrent.have?(hash, &1))
+
+      _ ->
+        false
+    end
+  end
+
+  defp interest_pid_if_assignable(hash, index, active, pid) do
+    case Peer.get_key(pid) do
+      key when is_tuple(key) ->
+        if do_assign_peer_to_piece?(hash, key, index, active), do: [pid], else: []
+
+      _ ->
+        []
+    end
   end
 
   @spec any_has_piece?(Torrent.hash(), Torrent.index()) :: boolean()
@@ -301,7 +310,7 @@ defmodule Torrent.Swarm do
 
   @doc false
   @spec disconnect_all(Torrent.hash()) :: :ok
-  def disconnect_all(hash), do: Torrent.Swarm.Disconnect.all(hash)
+  def disconnect_all(hash), do: Disconnect.all(hash)
 
   @doc false
   @spec evict_peers(Torrent.hash(), [pid()]) :: :ok

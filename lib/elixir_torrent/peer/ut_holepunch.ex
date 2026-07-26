@@ -7,6 +7,7 @@ defmodule Peer.UtHolepunch do
 
   require Logger
 
+  alias Peer.Controller.State
   alias Peer.LTEP.Session
 
   @extension_name "ut_holepunch"
@@ -82,7 +83,7 @@ defmodule Peer.UtHolepunch do
   @spec encode_message(byte(), :inet.ip_address(), :inet.port_number(), non_neg_integer() | nil) ::
           binary() | {:error, :unsupported_ip}
   defp encode_message(msg_type, {a, b, c, d}, port, err_code)
-       when is_integer(port) and port in 1..65535 do
+       when is_integer(port) and port in 1..65_535 do
     base = <<msg_type, @addr_ipv4, a, b, c, d, port::16>>
 
     case err_code do
@@ -92,7 +93,7 @@ defmodule Peer.UtHolepunch do
   end
 
   defp encode_message(msg_type, {s1, s2, s3, s4, s5, s6, s7, s8}, port, err_code)
-       when is_integer(port) and port in 1..65535 do
+       when is_integer(port) and port in 1..65_535 do
     base =
       <<msg_type, @addr_ipv6, s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, s8::16,
         port::16>>
@@ -253,17 +254,25 @@ defmodule Peer.UtHolepunch do
         relay_error(state, target_ip, target_port, @err_not_connected)
 
       true ->
-        case target_session(hash, target_ip, target_port) do
-          {:ok, target_key, target_ltep} ->
-            if Session.peer_supports?(target_ltep, @extension_name) do
-              do_relay(state, target_key, target_ltep, target_ip, target_port)
-            else
-              relay_error(state, target_ip, target_port, @err_no_support)
-            end
+        relay_rendezvous_target(state, hash, target_ip, target_port)
+    end
+  end
 
-          :error ->
-            relay_error(state, target_ip, target_port, @err_no_such_peer)
-        end
+  defp relay_rendezvous_target(state, hash, target_ip, target_port) do
+    case target_session(hash, target_ip, target_port) do
+      {:ok, target_key, target_ltep} ->
+        relay_if_target_supports(state, target_key, target_ltep, target_ip, target_port)
+
+      :error ->
+        relay_error(state, target_ip, target_port, @err_no_such_peer)
+    end
+  end
+
+  defp relay_if_target_supports(state, target_key, target_ltep, target_ip, target_port) do
+    if Session.peer_supports?(target_ltep, @extension_name) do
+      do_relay(state, target_key, target_ltep, target_ip, target_port)
+    else
+      relay_error(state, target_ip, target_port, @err_no_support)
     end
   end
 
@@ -276,7 +285,7 @@ defmodule Peer.UtHolepunch do
         ) :: Peer.Controller.State.t()
   defp do_relay(state, target_key, target_ltep, target_ip, target_port) do
     hash = state.hash
-    initiator_key = Peer.Controller.State.key(state)
+    initiator_key = State.key(state)
 
     with true <- Session.peer_supports?(state.ltep, @extension_name),
          {:ok, {init_ip, init_port}} <- peer_endpoint(state.socket),
@@ -287,15 +296,8 @@ defmodule Peer.UtHolepunch do
       # BEP 55 relay sends connect hints to two peers; either may drop mid-relay
       # (Endpoints still registered briefly while Sender/uTP is shutting down).
       case relay_connect_sends(
-             hash,
-             {target_ip, target_port},
-             {init_ip, init_port},
-             initiator_key,
-             state.ltep,
-             target_for_initiator,
-             target_key,
-             target_ltep,
-             initiator_for_target
+             {initiator_key, state.ltep, target_for_initiator},
+             {target_key, target_ltep, initiator_for_target}
            ) do
         :ok ->
           Logger.info(
@@ -317,26 +319,12 @@ defmodule Peer.UtHolepunch do
   end
 
   @spec relay_connect_sends(
-          Torrent.hash(),
-          {:inet.ip_address(), :inet.port_number()},
-          {:inet.ip_address(), :inet.port_number()},
-          Peer.key(),
-          Session.t(),
-          binary(),
-          Peer.key(),
-          Session.t(),
-          binary()
+          {Peer.key(), Session.t(), binary()},
+          {Peer.key(), Session.t(), binary()}
         ) :: :ok | {:error, term()}
   defp relay_connect_sends(
-         _hash,
-         _target,
-         _initiator,
-         initiator_key,
-         initiator_ltep,
-         target_for_initiator,
-         target_key,
-         target_ltep,
-         initiator_for_target
+         {initiator_key, initiator_ltep, target_for_initiator},
+         {target_key, target_ltep, initiator_for_target}
        ) do
     with :ok <- send_to_peer(initiator_key, initiator_ltep, target_for_initiator),
          :ok <- send_to_peer(target_key, target_ltep, initiator_for_target) do
@@ -355,7 +343,7 @@ defmodule Peer.UtHolepunch do
           non_neg_integer()
         ) :: Peer.Controller.State.t()
   defp relay_error(state, target_ip, target_port, code) do
-    initiator_key = Peer.Controller.State.key(state)
+    initiator_key = State.key(state)
 
     case encode(:error, target_ip, target_port, err_code: code) do
       bin when is_binary(bin) ->

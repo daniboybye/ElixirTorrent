@@ -35,7 +35,7 @@ defmodule Tracker.UDP do
 
   @doc "BEP 15 connect request magic constant `protocol_id`."
   @spec protocol_id() :: <<_::64>>
-  def protocol_id(), do: @protocol_id
+  def protocol_id, do: @protocol_id
 
   @doc "BEP 15 § Time outs — backoff interval in seconds for attempt `n` (0..8)."
   @spec backoff_timeout_seconds(0..8) :: pos_integer()
@@ -45,15 +45,15 @@ defmodule Tracker.UDP do
 
   @doc "Highest retransmission attempt index (inclusive) before giving up."
   @spec max_backoff_attempt() :: 0..8
-  def max_backoff_attempt(), do: @max_backoff_attempt
+  def max_backoff_attempt, do: @max_backoff_attempt
 
   @doc "BEP 15 § UDP connections — connection_id reuse window in milliseconds."
   @spec connection_id_lifetime_ms() :: pos_integer()
-  def connection_id_lifetime_ms(), do: @connection_id_lifetime_ms
+  def connection_id_lifetime_ms, do: @connection_id_lifetime_ms
 
   @doc "Maximum info_hashes per scrape request (BEP 15 § Scrape)."
   @spec max_scrape_hashes() :: pos_integer()
-  def max_scrape_hashes(), do: @max_scrape_hashes
+  def max_scrape_hashes, do: @max_scrape_hashes
 
   @doc """
   BEP 15 § Connect — 16-byte connect request (protocol_id, action=0, transaction_id).
@@ -242,33 +242,46 @@ defmodule Tracker.UDP do
           | {:ok, [scrape_stats()]}
           | {:error, String.t() | atom()}
   def classify_response(body, transaction_id, opts) when byte_size(transaction_id) == 4 do
-    expected = Keyword.get(opts, :expected, :announce)
+    case Keyword.get(opts, :expected, :announce) do
+      :connect -> classify_connect_response(body, transaction_id)
+      :announce -> classify_announce_response(body, transaction_id, opts)
+      :scrape -> classify_scrape_response(body, transaction_id, opts)
+    end
+  end
+
+  @spec classify_connect_response(binary(), transaction_id()) ::
+          :ignore | {:ok, connection_id()} | {:error, String.t() | atom()}
+  defp classify_connect_response(body, transaction_id) do
+    case decode_connect_response(body, transaction_id) do
+      {:ok, _} = ok -> ok
+      {:error, :transaction_mismatch} -> :ignore
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec classify_announce_response(binary(), transaction_id(), keyword()) ::
+          :ignore | {:ok, Response.t()} | {:error, String.t() | atom()}
+  defp classify_announce_response(body, transaction_id, opts) do
     family = Keyword.get(opts, :family, :inet)
+
+    case decode_announce_response(body, transaction_id, family) do
+      {:ok, _} = ok -> ok
+      {:error, :transaction_mismatch} -> :ignore
+      {:error, reason} when is_binary(reason) -> {:error, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec classify_scrape_response(binary(), transaction_id(), keyword()) ::
+          :ignore | {:ok, [scrape_stats()]} | {:error, String.t() | atom()}
+  defp classify_scrape_response(body, transaction_id, opts) do
     hash_count = Keyword.get(opts, :hash_count, 1)
 
-    case expected do
-      :connect ->
-        case decode_connect_response(body, transaction_id) do
-          {:ok, _} = ok -> ok
-          {:error, :transaction_mismatch} -> :ignore
-          {:error, reason} -> {:error, reason}
-        end
-
-      :announce ->
-        case decode_announce_response(body, transaction_id, family) do
-          {:ok, _} = ok -> ok
-          {:error, :transaction_mismatch} -> :ignore
-          {:error, reason} when is_binary(reason) -> {:error, reason}
-          {:error, reason} -> {:error, reason}
-        end
-
-      :scrape ->
-        case decode_scrape_response(body, transaction_id, hash_count) do
-          {:ok, _} = ok -> ok
-          {:error, :transaction_mismatch} -> :ignore
-          {:error, reason} when is_binary(reason) -> {:error, reason}
-          {:error, reason} -> {:error, reason}
-        end
+    case decode_scrape_response(body, transaction_id, hash_count) do
+      {:ok, _} = ok -> ok
+      {:error, :transaction_mismatch} -> :ignore
+      {:error, reason} when is_binary(reason) -> {:error, reason}
+      {:error, reason} -> {:error, reason}
     end
   end
 

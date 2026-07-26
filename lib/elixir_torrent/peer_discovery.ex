@@ -1,4 +1,8 @@
 defmodule PeerDiscovery do
+  @moduledoc """
+  Top-level peer discovery supervisor: tracker announces, DHT, LSD, and seed peers.
+  """
+
   alias __MODULE__.{Announce, AnnouncesSupervisor, ConnectionIds, LSD, SeedPeers}
 
   require Logger

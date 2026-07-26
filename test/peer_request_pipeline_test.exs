@@ -5,6 +5,7 @@ defmodule PeerRequestPipelineTest do
 
   alias Peer.Controller.State, as: PeerState
   alias Torrent.Downloads
+  alias Torrent.Downloads.Piece
   alias Torrent.Downloads.Piece.{Request, State}
 
   @piece_len 16_384
@@ -66,7 +67,7 @@ defmodule PeerRequestPipelineTest do
       with_model(torrent, fn _ ->
         {:ok, piece_pid} = start_piece_worker(hash, 0)
         peer_pid = ensure_peer_registered(hash, @peer_a)
-        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
 
         on_exit(fn -> stop_piece(piece_pid) end)
 
@@ -95,7 +96,7 @@ defmodule PeerRequestPipelineTest do
       with_model(torrent, fn _ ->
         {:ok, piece_pid} = start_piece_worker(hash, 0)
         peer_pid = ensure_peer_registered(hash, @peer_a)
-        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
         on_exit(fn -> stop_piece(piece_pid) end)
 
         state =
@@ -128,7 +129,7 @@ defmodule PeerRequestPipelineTest do
       with_model(torrent, fn _ ->
         {:ok, piece_pid} = start_piece_worker(hash, 1)
         peer_pid = ensure_peer_registered(hash, @peer_a)
-        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
         on_exit(fn -> stop_piece(piece_pid) end)
 
         :sys.replace_state(piece_pid, fn state ->
@@ -159,7 +160,7 @@ defmodule PeerRequestPipelineTest do
       with_model(torrent, fn _ ->
         {:ok, piece_pid} = start_piece_worker(hash, 0)
         peer_pid = ensure_peer_registered(hash, @peer_a)
-        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
         on_exit(fn -> stop_piece(piece_pid) end)
 
         state =
@@ -205,7 +206,7 @@ defmodule PeerRequestPipelineTest do
       with_model(torrent, fn _ ->
         {:ok, piece_pid} = start_piece_worker(hash, 0)
         peer_pid = ensure_peer_registered(hash, @peer_a)
-        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
         on_exit(fn -> stop_piece(piece_pid) end)
 
         capped_requests =
@@ -252,7 +253,7 @@ defmodule PeerRequestPipelineTest do
       with_model(torrent, fn _ ->
         {:ok, piece_pid} = start_piece_worker(hash, 1)
         peer_pid = ensure_peer_registered(hash, @peer_a)
-        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
         on_exit(fn -> stop_piece(piece_pid) end)
 
         :sys.replace_state(piece_pid, fn state ->
@@ -364,7 +365,7 @@ defmodule PeerRequestPipelineTest do
 
         {:ok, piece_pid} = GenServer.start(Torrent.Downloads.Piece, {hash, 1})
 
-        Torrent.Downloads.Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
 
         :sys.replace_state(piece_pid, fn state ->
           %{
@@ -483,11 +484,9 @@ defmodule PeerRequestPipelineTest do
   end
 
   defp stop_piece(pid) do
-    try do
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
-    catch
-      :exit, _ -> :ok
-    end
+    if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+  catch
+    :exit, _ -> :ok
   end
 
   # Piece-worker callbacks cast to self() during pure State tests; drain any

@@ -99,21 +99,24 @@ defmodule Magnet do
   defp extract_xt_values(query) when is_binary(query) do
     query
     |> String.split("&", trim: true)
-    |> Enum.flat_map(fn pair ->
-      case String.split(pair, "=", parts: 2) do
-        [key, value] ->
-          key = URI.decode(key)
+    |> Enum.flat_map(&xt_value_from_pair/1)
+  end
 
-          if key == "xt" or String.starts_with?(key, "xt.") do
-            [URI.decode(value)]
-          else
-            []
-          end
+  @spec xt_value_from_pair(String.t()) :: [String.t()]
+  defp xt_value_from_pair(pair) do
+    case String.split(pair, "=", parts: 2) do
+      [key, value] ->
+        key = URI.decode(key)
 
-        _ ->
+        if key == "xt" or String.starts_with?(key, "xt.") do
+          [URI.decode(value)]
+        else
           []
-      end
-    end)
+        end
+
+      _ ->
+        []
+    end
   end
 
   # Fold the collected xt values into {v1_hash, v2_hash, kind}. Anything we
@@ -124,7 +127,8 @@ defmodule Magnet do
   defp classify_xt([]), do: {:error, :missing_xt}
 
   defp classify_xt(values) do
-    Enum.reduce_while(values, {nil, nil}, fn value, {v1, v2} ->
+    values
+    |> Enum.reduce_while({nil, nil}, fn value, {v1, v2} ->
       case classify_one(value) do
         {:v1, hash} -> {:cont, {v1 || hash, v2}}
         {:v2, hash} -> {:cont, {v1, v2 || hash}}
@@ -132,26 +136,23 @@ defmodule Magnet do
         :ignore -> {:cont, {v1, v2}}
       end
     end)
-    |> case do
-      {nil, nil} ->
-        {:error, :missing_xt}
-
-      {v1, nil} when is_binary(v1) ->
-        {:ok, v1, nil, :v1}
-
-      {v1, v2} when is_binary(v1) and is_binary(v2) ->
-        {:ok, v1, v2, :hybrid}
-
-      {nil, _v2} ->
-        # The magnet bootstrap is still keyed by a v1 btih and verifies BEP 9
-        # metadata with SHA-1. A btmh-only link needs truncated-v2 discovery
-        # plus SHA-256 metadata verification before it can enter that pipeline.
-        {:error, :v2_only_unsupported}
-
-      {:error, _} = error ->
-        error
-    end
+    |> finalize_xt_classification()
   end
+
+  @spec finalize_xt_classification(term()) ::
+          {:ok, Torrent.hash(), Torrent.hash_v2() | nil, Torrent.kind()} | {:error, term()}
+  defp finalize_xt_classification({nil, nil}), do: {:error, :missing_xt}
+
+  defp finalize_xt_classification({v1, nil}) when is_binary(v1),
+    do: {:ok, v1, nil, :v1}
+
+  defp finalize_xt_classification({v1, v2}) when is_binary(v1) and is_binary(v2),
+    do: {:ok, v1, v2, :hybrid}
+
+  defp finalize_xt_classification({nil, _v2}),
+    do: {:error, :v2_only_unsupported}
+
+  defp finalize_xt_classification({:error, _} = error), do: error
 
   @spec classify_one(String.t()) ::
           {:v1, Torrent.hash()} | {:v2, Torrent.hash_v2()} | {:error, term()} | :ignore
@@ -228,26 +229,28 @@ defmodule Magnet do
   defp extract_x_pe(query) when is_binary(query) do
     query
     |> String.split("&", trim: true)
-    |> Enum.flat_map(fn
-      pair ->
-        case String.split(pair, "=", parts: 2) do
-          [key, value] ->
-            key = URI.decode(key)
-
-            if key == "x.pe" or String.starts_with?(key, "x.pe.") do
-              case parse_x_pe_endpoint(URI.decode(value)) do
-                {:ok, peer} -> [peer]
-                :error -> []
-              end
-            else
-              []
-            end
-
-          _ ->
-            []
-        end
-    end)
+    |> Enum.flat_map(&x_pe_from_pair/1)
     |> Enum.uniq_by(&{&1.ip, &1.port})
+  end
+
+  @spec x_pe_from_pair(String.t()) :: [Peer.t()]
+  defp x_pe_from_pair(pair) do
+    case String.split(pair, "=", parts: 2) do
+      [key, value] -> x_pe_value_if_key(URI.decode(key), URI.decode(value))
+      _ -> []
+    end
+  end
+
+  @spec x_pe_value_if_key(String.t(), String.t()) :: [Peer.t()]
+  defp x_pe_value_if_key(key, value) do
+    if key == "x.pe" or String.starts_with?(key, "x.pe.") do
+      case parse_x_pe_endpoint(value) do
+        {:ok, peer} -> [peer]
+        :error -> []
+      end
+    else
+      []
+    end
   end
 
   @spec parse_x_pe_endpoint(String.t()) :: {:ok, Peer.t()} | :error
@@ -279,24 +282,26 @@ defmodule Magnet do
   defp extract_trackers(query) when is_binary(query) do
     query
     |> String.split("&", trim: true)
-    |> Enum.flat_map(fn
-      pair ->
-        case String.split(pair, "=", parts: 2) do
-          [key, value] ->
-            key = URI.decode(key)
-
-            if key == "tr" or String.starts_with?(key, "tr.") do
-              [URI.decode(value)]
-            else
-              []
-            end
-
-          _ ->
-            []
-        end
-    end)
+    |> Enum.flat_map(&tracker_from_pair/1)
     |> Enum.map(&normalize_tracker/1)
     |> Enum.uniq()
+  end
+
+  @spec tracker_from_pair(String.t()) :: [String.t()]
+  defp tracker_from_pair(pair) do
+    case String.split(pair, "=", parts: 2) do
+      [key, value] ->
+        key = URI.decode(key)
+
+        if key == "tr" or String.starts_with?(key, "tr.") do
+          [URI.decode(value)]
+        else
+          []
+        end
+
+      _ ->
+        []
+    end
   end
 
   @doc false

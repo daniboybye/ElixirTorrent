@@ -1,4 +1,8 @@
 defmodule Peer.Const do
+  @moduledoc """
+  Compile-time wire message ID constants for the BEP 3 peer protocol.
+  """
+
   defmacro __using__(_opts) do
     quote do
       # Core Protocol

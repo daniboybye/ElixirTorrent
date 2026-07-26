@@ -75,7 +75,7 @@ defmodule UTPPacketTest do
   end
 
   test "seq arithmetic wraps at 16 bits" do
-    assert Packet.seq_add(65535, 1) == 0
+    assert Packet.seq_add(65_535, 1) == 0
     assert Packet.seq_before?(5, 10)
     assert Packet.seq_after?(10, 5)
   end

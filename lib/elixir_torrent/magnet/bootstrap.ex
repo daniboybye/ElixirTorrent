@@ -5,6 +5,7 @@ defmodule Magnet.Bootstrap do
 
   require Logger
 
+  alias Peer.LTEP.Session
   alias Torrent.{Model, Swarm}
 
   @spec ensure(Magnet.t()) :: :ok
@@ -110,7 +111,7 @@ defmodule Magnet.Bootstrap do
 
   @spec metadata_peer_candidate?(map()) :: boolean()
   def metadata_peer_candidate?(info) when is_map(info) do
-    Peer.LTEP.Session.peer_supports?(info.ltep, Magnet.UtMetadata.extension_name())
+    Session.peer_supports?(info.ltep, Magnet.UtMetadata.extension_name())
   end
 
   @spec metadata_peer_eligible?(map()) :: boolean()

@@ -1,4 +1,8 @@
 defmodule Torrent.Downloads.Piece.State do
+  @moduledoc """
+  Pure state and transitions for a single-piece download worker.
+  """
+
   @enforce_keys [:index, :hash, :waiting]
   defstruct [
     :index,
@@ -13,11 +17,11 @@ defmodule Torrent.Downloads.Piece.State do
   ]
 
   alias Torrent.{
-    Downloads.Piece.Request,
     Downloads.Piece,
+    Downloads.Piece.Request,
     FileHandle,
-    PiecesStatistic,
     Model,
+    PiecesStatistic,
     Swarm
   }
 
@@ -145,15 +149,13 @@ defmodule Torrent.Downloads.Piece.State do
       already_requested_by_me? = MapSet.member?(mine, subpiece)
       redundancy_full? = subpiece_request_count(state, subpiece) >= @endgame_redundancy
 
-      cond do
-        already_requested_by_me? or redundancy_full? ->
-          false
-
-        true ->
-          new_request(state, callback, %Request{
-            peer_id: peer_id,
-            subpiece: subpiece
-          })
+      if already_requested_by_me? or redundancy_full? do
+        false
+      else
+        new_request(state, callback, %Request{
+          peer_id: peer_id,
+          subpiece: subpiece
+        })
       end
     end)
   end
@@ -185,10 +187,10 @@ defmodule Torrent.Downloads.Piece.State do
     length = byte_size(block)
     subpiece = {begin, length}
 
-    unless valid_subpiece?(state, begin, length) do
-      state
-    else
+    if valid_subpiece?(state, begin, length) do
       do_response(state, peer_id, begin, block, subpiece)
+    else
+      state
     end
   end
 
@@ -208,13 +210,7 @@ defmodule Torrent.Downloads.Piece.State do
     else
       FileHandle.write(state.hash, state.index, begin, block)
 
-      Enum.each(list, fn request ->
-        cancel_request(request)
-
-        unless peer_id == request.peer_id do
-          Peer.cancel(state.hash, request.peer_id, state.index, begin, length)
-        end
-      end)
+      Enum.each(list, &cancel_duplicate_request(state, peer_id, begin, length, &1))
 
       state = %__MODULE__{
         state
@@ -363,14 +359,22 @@ defmodule Torrent.Downloads.Piece.State do
 
   defp cancel_timer(timer, message) do
     # cancel_timer is false => message is send
-    unless Process.cancel_timer(timer) do
+    if Process.cancel_timer(timer) do
+      :ok
+    else
       receive do
         ^message -> :ok
       after
         0 -> :ok
       end
-    else
-      :ok
+    end
+  end
+
+  defp cancel_duplicate_request(state, peer_id, begin, length, request) do
+    cancel_request(request)
+
+    if peer_id != request.peer_id do
+      Peer.cancel(state.hash, request.peer_id, state.index, begin, length)
     end
   end
 

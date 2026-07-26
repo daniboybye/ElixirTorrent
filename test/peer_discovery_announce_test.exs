@@ -21,6 +21,7 @@ end
 defmodule PeerDiscoveryAnnounceTest do
   use ExUnit.Case, async: false
 
+  alias Peer.UtPex.Entry, as: UtPexEntry
   alias PeerDiscovery.Announce
   alias Tracker.{Error, Response}
 
@@ -540,7 +541,7 @@ defmodule PeerDiscoveryAnnounceTest do
 
   test "private torrents ignore PEX broadcast ticks without advancing snapshots" do
     endpoint = {{10, 0, 0, 50}, 6881}
-    snapshot = %{endpoint => Peer.UtPex.Entry.new(endpoint)}
+    snapshot = %{endpoint => UtPexEntry.new(endpoint)}
     state = base_state(pex_snapshot: snapshot)
 
     after_state = Announce.dispatch_task_message(state, :pex_broadcast)
@@ -551,7 +552,7 @@ defmodule PeerDiscoveryAnnounceTest do
 
   test "PEX announce tick retains an unchanged global snapshot" do
     endpoint = {{10, 0, 0, 50}, 6881}
-    snapshot = %{endpoint => Peer.UtPex.Entry.new(endpoint)}
+    snapshot = %{endpoint => UtPexEntry.new(endpoint)}
     state = base_state(pex_snapshot: snapshot, private?: false)
 
     after_state = Announce.apply_pex_snapshot(state, snapshot)
@@ -566,7 +567,7 @@ defmodule PeerDiscoveryAnnounceTest do
     current =
       for i <- 1..3, into: %{} do
         endpoint = {{198, 18, 0, i}, 15_000 + i}
-        {endpoint, Peer.UtPex.Entry.new(endpoint)}
+        {endpoint, UtPexEntry.new(endpoint)}
       end
 
     after_state = Announce.apply_pex_snapshot(state, current)
@@ -812,6 +813,24 @@ defmodule PeerDiscoveryAnnounceTest do
       assert new_state.tier_index == 1
       assert new_state.tier_batches == %{1 => 1}
       assert new_state.last_tracker_announce_ms == nil
+      refute_receive {:parallel_announce, _}, 50
+    end
+
+    test "exhausted under-target fanout keeps the announce state while scheduling retry" do
+      dead0 = "udp://9.rarbg.me:6969/announce"
+      dead1 = "udp://9.rarbg.me:2720/announce"
+      dead2 = "udp://9.rarbg.me:2750/announce"
+
+      state =
+        base_state(
+          tiers: [[dead0], [dead1], [dead2]],
+          disabled: MapSet.new([dead0, dead1, dead2]),
+          last_tracker_announce_ms: nil
+        )
+
+      assert %Announce{} =
+               Announce.dispatch_task_message(state, {:parallel_announce, 1})
+
       refute_receive {:parallel_announce, _}, 50
     end
 

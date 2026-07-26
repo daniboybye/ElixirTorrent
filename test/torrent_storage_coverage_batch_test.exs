@@ -1024,30 +1024,32 @@ defmodule TorrentStorageCoverageBatchTest do
   defp serve_controlled_http(listen, owner, server_ref) do
     case :gen_tcp.accept(listen) do
       {:ok, socket} ->
-        spawn(fn ->
-          case :gen_tcp.recv(socket, 0, 5_000) do
-            {:ok, request} ->
-              send(owner, {:webseed_http_request, server_ref, self(), request})
-
-              receive do
-                {:webseed_http_reply, code, body} ->
-                  send_http_response(socket, code, body)
-              after
-                5_000 -> :ok
-              end
-
-            {:error, _} ->
-              :ok
-          end
-
-          :gen_tcp.close(socket)
-        end)
+        spawn(fn -> handle_controlled_http_connection(socket, owner, server_ref) end)
 
         serve_controlled_http(listen, owner, server_ref)
 
       {:error, _} ->
         :ok
     end
+  end
+
+  defp handle_controlled_http_connection(socket, owner, server_ref) do
+    case :gen_tcp.recv(socket, 0, 5_000) do
+      {:ok, request} ->
+        send(owner, {:webseed_http_request, server_ref, self(), request})
+
+        receive do
+          {:webseed_http_reply, code, body} ->
+            send_http_response(socket, code, body)
+        after
+          5_000 -> :ok
+        end
+
+      {:error, _} ->
+        :ok
+    end
+
+    :gen_tcp.close(socket)
   end
 
   defp reply_for_range(request_pid, request, piece0, piece1) do
@@ -1095,43 +1097,48 @@ defmodule TorrentStorageCoverageBatchTest do
   defp serve_range_http(listen, body) do
     case :gen_tcp.accept(listen) do
       {:ok, socket} ->
-        spawn(fn ->
-          case :gen_tcp.recv(socket, 0, 5_000) do
-            {:ok, request} ->
-              {code, resp_body, extra} = range_response(request, body)
-
-              status =
-                case code do
-                  200 -> "200 OK"
-                  206 -> "206 Partial Content"
-                  other -> "#{other} Error"
-                end
-
-              response =
-                IO.iodata_to_binary([
-                  "HTTP/1.1 ",
-                  status,
-                  "\r\nContent-Length: ",
-                  Integer.to_string(byte_size(resp_body)),
-                  extra,
-                  "\r\nConnection: close\r\n\r\n",
-                  resp_body
-                ])
-
-              :gen_tcp.send(socket, response)
-
-            {:error, _} ->
-              :ok
-          end
-
-          :gen_tcp.close(socket)
-        end)
+        spawn(fn -> handle_range_http_connection(socket, body) end)
 
         serve_range_http(listen, body)
 
       {:error, _} ->
         :ok
     end
+  end
+
+  defp handle_range_http_connection(socket, body) do
+    case :gen_tcp.recv(socket, 0, 5_000) do
+      {:ok, request} ->
+        {code, resp_body, extra} = range_response(request, body)
+        send_http_range_response(socket, code, resp_body, extra)
+
+      {:error, _} ->
+        :ok
+    end
+
+    :gen_tcp.close(socket)
+  end
+
+  defp send_http_range_response(socket, code, resp_body, extra) do
+    status =
+      case code do
+        200 -> "200 OK"
+        206 -> "206 Partial Content"
+        other -> "#{other} Error"
+      end
+
+    response =
+      IO.iodata_to_binary([
+        "HTTP/1.1 ",
+        status,
+        "\r\nContent-Length: ",
+        Integer.to_string(byte_size(resp_body)),
+        extra,
+        "\r\nConnection: close\r\n\r\n",
+        resp_body
+      ])
+
+    :gen_tcp.send(socket, response)
   end
 
   defp range_response(request, body) do
@@ -1265,11 +1272,9 @@ defmodule TorrentStorageCoverageBatchTest do
   end
 
   defp safe_stop(pid) when is_pid(pid) do
-    try do
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
-    catch
-      :exit, _ -> :ok
-    end
+    if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+  catch
+    :exit, _ -> :ok
   end
 end
 

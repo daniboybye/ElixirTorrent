@@ -148,17 +148,21 @@ defmodule Peer.MSE.Handshake do
       with :ok <- scan_for(socket, MSE.req1(s), timeout),
            {:ok, req2_3} <- recv_exact(socket, 20, timeout),
            info_hash when is_binary(info_hash) <- resolve.(s, req2_3) do
-        recv_cipher = MSE.new_cipher(MSE.key_a(s, info_hash))
-        send_cipher = MSE.new_cipher(MSE.key_b(s, info_hash))
-
-        with {:ok, ia} <- read_initiator_payload(socket, recv_cipher, timeout),
-             :ok <- send_encrypted_reply(socket, send_cipher) do
-          {:ok, %{recv: recv_cipher, send: send_cipher, leftover: ia}}
-        end
+        finish_respond(socket, s, info_hash, timeout)
       else
         nil -> {:error, :unknown_info_hash}
         {:error, _} = error -> error
       end
+    end
+  end
+
+  defp finish_respond(socket, s, info_hash, timeout) do
+    recv_cipher = MSE.new_cipher(MSE.key_a(s, info_hash))
+    send_cipher = MSE.new_cipher(MSE.key_b(s, info_hash))
+
+    with {:ok, ia} <- read_initiator_payload(socket, recv_cipher, timeout),
+         :ok <- send_encrypted_reply(socket, send_cipher) do
+      {:ok, %{recv: recv_cipher, send: send_cipher, leftover: ia}}
     end
   end
 
@@ -168,14 +172,18 @@ defmodule Peer.MSE.Handshake do
       <<vc::bytes-size(8), _provide::32, pad_len::16>> = MSE.crypt(cipher, head)
 
       if vc == @vc do
-        with {:ok, _padc} <- recv_exact_maybe_decrypt(socket, cipher, pad_len, timeout),
-             {:ok, ia_len_enc} <- recv_exact(socket, 2, timeout) do
-          <<ia_len::16>> = MSE.crypt(cipher, ia_len_enc)
-          recv_exact_decrypt(socket, cipher, ia_len, timeout)
-        end
+        read_initiator_after_vc(socket, cipher, pad_len, timeout)
       else
         {:error, :mse_bad_vc}
       end
+    end
+  end
+
+  defp read_initiator_after_vc(socket, cipher, pad_len, timeout) do
+    with {:ok, _padc} <- recv_exact_maybe_decrypt(socket, cipher, pad_len, timeout),
+         {:ok, ia_len_enc} <- recv_exact(socket, 2, timeout) do
+      <<ia_len::16>> = MSE.crypt(cipher, ia_len_enc)
+      recv_exact_decrypt(socket, cipher, ia_len, timeout)
     end
   end
 

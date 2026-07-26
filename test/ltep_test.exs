@@ -2,6 +2,7 @@ defmodule Peer.LTEPTest do
   use ExUnit.Case, async: true
 
   alias Peer.Controller.State
+  alias Peer.LTEP
   alias Peer.LTEP.{Handshake, Session}
 
   @ut_metadata Magnet.UtMetadata.Extension
@@ -285,10 +286,10 @@ defmodule Peer.LTEPTest do
       assert <<19, "BitTorrent protocol"::binary, _::binary>> = server_hs
 
       assert {:ok, session} =
-               Peer.LTEP.handshake_exchange(client, Peer.LTEP.Session.new(), timeout: 5_000)
+               LTEP.handshake_exchange(client, Session.new(), timeout: 5_000)
 
-      assert Peer.LTEP.Session.peer_extension_id(session, "ut_metadata") == 2
-      assert Peer.LTEP.Session.peer_handshake(session).metadata_size == 512
+      assert Session.peer_extension_id(session, "ut_metadata") == 2
+      assert Session.peer_handshake(session).metadata_size == 512
       :gen_tcp.close(client)
       assert :ok = Task.await(accept, 5_000)
     end

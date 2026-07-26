@@ -1,4 +1,8 @@
 defmodule Torrent.FileHandle.Piece do
+  @moduledoc """
+  GenServer buffering and flushing one piece's bytes across multi-file layouts.
+  """
+
   @enforce_keys [:hash, :offset, :files, :length]
   defstruct [:hash, :offset, :files, :length, pending_writes: %{}]
   # offset: offset from the beginning of the first file
@@ -23,7 +27,7 @@ defmodule Torrent.FileHandle.Piece do
   use GenServer
   use Via
 
-  alias Torrent.{PiecesStatistic, Model, FileHandle, Merkle}
+  alias Torrent.{FileHandle, Merkle, Model, PiecesStatistic}
 
   require Logger
 
@@ -261,22 +265,23 @@ defmodule Torrent.FileHandle.Piece do
   defp merge_contiguous_writes([]), do: []
 
   defp merge_contiguous_writes(sorted) do
-    Enum.reduce(sorted, [], fn {begin, block}, acc ->
-      case acc do
-        [] ->
-          [{begin, block}]
-
-        [{prev_begin, prev_block} | rest] ->
-          prev_end = prev_begin + byte_size(prev_block)
-
-          if begin == prev_end do
-            [{prev_begin, prev_block <> block} | rest]
-          else
-            [{begin, block}, {prev_begin, prev_block} | rest]
-          end
-      end
-    end)
+    sorted
+    |> Enum.reduce([], &merge_one_write/2)
     |> Enum.reverse()
+  end
+
+  defp merge_one_write({begin, block}, []) do
+    [{begin, block}]
+  end
+
+  defp merge_one_write({begin, block}, [{prev_begin, prev_block} | rest]) do
+    prev_end = prev_begin + byte_size(prev_block)
+
+    if begin == prev_end do
+      [{prev_begin, prev_block <> block} | rest]
+    else
+      [{begin, block}, {prev_begin, prev_block} | rest]
+    end
   end
 
   defp do_write(_, _, <<>>), do: :ok

@@ -62,9 +62,9 @@ defmodule PeerDiscoveryLSDTest do
 
   test "received IPv6 BT-SEARCH is parsed and our own cookie is deduped" do
     source = {0x2001, 0xDB8, 0, 1, 0, 0, 0, 7}
-    packet = IO.iodata_to_binary(LSD.build_message([@hash1], 51413, "remote", :inet6))
+    packet = IO.iodata_to_binary(LSD.build_message([@hash1], 51_413, "remote", :inet6))
 
-    assert LSD.decode_packet(packet, source, "ours") == [{@hash1, source, 51413}]
+    assert LSD.decode_packet(packet, source, "ours") == [{@hash1, source, 51_413}]
     assert LSD.decode_packet(packet, source, "remote") == []
   end
 

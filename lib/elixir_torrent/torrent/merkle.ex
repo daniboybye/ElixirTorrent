@@ -146,24 +146,32 @@ defmodule Torrent.Merkle do
   def verify(root, index, hash, proof_layers)
       when is_binary(root) and is_integer(index) and index >= 0 and is_binary(hash) and
              is_list(proof_layers) do
-    if valid_hash?(root) and valid_hash?(hash) and Enum.all?(proof_layers, &valid_hash?/1) do
-      {computed, _index} =
-        Enum.reduce(proof_layers, {hash, index}, fn sibling, {current, node_index} ->
-          parent =
-            if rem(node_index, 2) == 0,
-              do: hash_pair(current, sibling),
-              else: hash_pair(sibling, current)
-
-          {parent, div(node_index, 2)}
-        end)
-
-      computed == root
+    if valid_verify_inputs?(root, hash, proof_layers) do
+      computed_verify_root(hash, index, proof_layers) == root
     else
       false
     end
   end
 
   def verify(_root, _index, _hash, _proof_layers), do: false
+
+  defp valid_verify_inputs?(root, hash, proof_layers) do
+    valid_hash?(root) and valid_hash?(hash) and Enum.all?(proof_layers, &valid_hash?/1)
+  end
+
+  defp computed_verify_root(hash, index, proof_layers) do
+    {computed, _index} =
+      Enum.reduce(proof_layers, {hash, index}, fn sibling, {current, node_index} ->
+        parent =
+          if rem(node_index, 2) == 0,
+            do: hash_pair(current, sibling),
+            else: hash_pair(sibling, current)
+
+        {parent, div(node_index, 2)}
+      end)
+
+    computed
+  end
 
   @doc """
   Validates a BEP 52 hash request against a built tree.
@@ -344,25 +352,26 @@ defmodule Torrent.Merkle do
     if proof_layers == 0 do
       []
     else
-      start = flat_start_index(block_count, 0, index)
-      base_tree = base_tree_layers(length)
-
-      {_, acc} =
-        proof_parent_fold(proof_layers, start, [], fn i, {proof_idx, acc} ->
-          proof_idx = if proof_idx > 0, do: flat_parent(proof_idx), else: 0
-
-          acc =
-            if i >= base_tree and proof_idx > 0 do
-              [flat_sibling(proof_idx) | acc]
-            else
-              acc
-            end
-
-          {proof_idx, acc}
-        end)
-
-      Enum.reverse(acc)
+      collect_proof_flat_siblings_loop(block_count, index, length, proof_layers)
     end
+  end
+
+  defp collect_proof_flat_siblings_loop(block_count, index, length, proof_layers) do
+    start = flat_start_index(block_count, 0, index)
+    base_tree = base_tree_layers(length)
+
+    {_, acc} =
+      proof_parent_fold(proof_layers, start, [], fn i, {proof_idx, acc} ->
+        advance_flat_proof_fold(i, proof_idx, acc, base_tree)
+      end)
+
+    Enum.reverse(acc)
+  end
+
+  defp advance_flat_proof_fold(i, proof_idx, acc, base_tree) do
+    proof_idx = flat_proof_parent(proof_idx)
+    acc = proof_flat_sibling_acc(i, base_tree, proof_idx, acc)
+    {proof_idx, acc}
   end
 
   @doc """
@@ -378,13 +387,15 @@ defmodule Torrent.Merkle do
           non_neg_integer()
         ) :: [non_neg_integer()]
   def leaf_read_indices(block_count, piece_length, index, length, proof_layers) do
-    with {:ok, piece_layer} <- piece_layer_level(piece_length) do
-      block_count
-      |> leaf_read_index_set(piece_length, piece_layer, index, length, proof_layers)
-      |> MapSet.to_list()
-      |> Enum.sort()
-    else
-      _ -> []
+    case piece_layer_level(piece_length) do
+      {:ok, piece_layer} ->
+        block_count
+        |> leaf_read_index_set(piece_length, piece_layer, index, length, proof_layers)
+        |> MapSet.to_list()
+        |> Enum.sort()
+
+      _ ->
+        []
     end
   end
 
@@ -606,15 +617,16 @@ defmodule Torrent.Merkle do
           into: %{} do
         leaf_index = file_piece_index * blocks_per_piece + block_idx
 
-        cond do
-          block_start >= bytes_in_file ->
-            {leaf_index, @zero_hash}
-
-          true ->
+        hash =
+          if block_start >= bytes_in_file do
+            @zero_hash
+          else
             size = min(@block_size, bytes_in_file - block_start)
             <<chunk::binary-size(^size), _::binary>> = binary_part(file_data, block_start, size)
-            {leaf_index, :crypto.hash(:sha256, chunk)}
-        end
+            :crypto.hash(:sha256, chunk)
+          end
+
+        {leaf_index, hash}
       end
 
     block_count = file_block_count(file.length)
@@ -751,28 +763,34 @@ defmodule Torrent.Merkle do
   def piece_layer_level(_piece_length), do: {:error, :invalid_piece_length}
 
   defp validate_request_shape(base_layer, index, length, proof_layers, piece_layer) do
+    with :ok <- validate_base_layer(base_layer, piece_layer),
+         :ok <- validate_request_length(length),
+         :ok <- validate_request_index(index, length),
+         do: validate_request_nonneg(index, proof_layers)
+  end
+
+  defp validate_base_layer(base_layer, piece_layer) do
     allowed_layers =
       case piece_layer do
         nil -> [0]
         layer -> [0, layer]
       end
 
-    cond do
-      base_layer not in allowed_layers ->
-        {:error, :invalid_base_layer}
+    if base_layer in allowed_layers, do: :ok, else: {:error, :invalid_base_layer}
+  end
 
-      length < 2 or length > 512 or not power_of_two?(length) ->
-        {:error, :invalid_length}
+  defp validate_request_length(length) do
+    if length >= 2 and length <= 512 and power_of_two?(length),
+      do: :ok,
+      else: {:error, :invalid_length}
+  end
 
-      rem(index, length) != 0 ->
-        {:error, :invalid_index}
+  defp validate_request_index(index, length) do
+    if rem(index, length) == 0, do: :ok, else: {:error, :invalid_index}
+  end
 
-      index < 0 or proof_layers < 0 ->
-        {:error, :invalid_index}
-
-      true ->
-        :ok
-    end
+  defp validate_request_nonneg(index, proof_layers) do
+    if index >= 0 and proof_layers >= 0, do: :ok, else: {:error, :invalid_index}
   end
 
   defp node_count(%__MODULE__{block_count: block_count}, layer) do
@@ -816,15 +834,10 @@ defmodule Torrent.Merkle do
 
     {_, acc} =
       proof_parent_fold(proof_layers, start, [], fn i, {proof_idx, acc} ->
-        proof_idx = if proof_idx > 0, do: flat_parent(proof_idx), else: 0
+        proof_idx = flat_proof_parent(proof_idx)
 
         acc =
-          if i >= base_tree and proof_idx > 0 do
-            sib = flat_sibling(proof_idx)
-            [flat_hash_from_levels(levels, block_count, sib) | acc]
-          else
-            acc
-          end
+          proof_levels_sibling_acc(i, base_tree, proof_idx, acc, levels, block_count)
 
         {proof_idx, acc}
       end)
@@ -860,40 +873,56 @@ defmodule Torrent.Merkle do
     if proof_layers == 0 do
       []
     else
-      num_leafs = next_power_of_two(block_count)
-      max_layer = integer_log2(num_leafs, 0)
-      start = flat_start_index(block_count, 0, index)
-      base_tree = base_tree_layers(length)
-
-      {_, acc} =
-        proof_parent_fold(proof_layers, start, [], fn i, {proof_idx, acc} ->
-          proof_idx = if proof_idx > 0, do: flat_parent(proof_idx), else: 0
-
-          acc =
-            if i >= base_tree and proof_idx > 0 do
-              sib = flat_sibling(proof_idx)
-
-              hash =
-                flat_hash_for_disk_response(
-                  metadata_levels,
-                  cache,
-                  block_count,
-                  max_layer,
-                  piece_layer,
-                  sib
-                )
-
-              [hash | acc]
-            else
-              acc
-            end
-
-          {proof_idx, acc}
-        end)
-
-      Enum.reverse(acc)
+      proof_siblings_from_disk_loop(
+        metadata_levels,
+        cache,
+        block_count,
+        piece_layer,
+        index,
+        length,
+        proof_layers
+      )
     end
   end
+
+  defp proof_siblings_from_disk_loop(
+         metadata_levels,
+         cache,
+         block_count,
+         piece_layer,
+         index,
+         length,
+         proof_layers
+       ) do
+    num_leafs = next_power_of_two(block_count)
+    max_layer = integer_log2(num_leafs, 0)
+    start = flat_start_index(block_count, 0, index)
+    base_tree = base_tree_layers(length)
+
+    ctx = %{
+      metadata_levels: metadata_levels,
+      cache: cache,
+      block_count: block_count,
+      max_layer: max_layer,
+      piece_layer: piece_layer
+    }
+
+    {_, acc} =
+      proof_parent_fold(proof_layers, start, [], fn i, {proof_idx, acc} ->
+        advance_disk_proof_fold(i, proof_idx, acc, base_tree, ctx)
+      end)
+
+    Enum.reverse(acc)
+  end
+
+  defp advance_disk_proof_fold(i, proof_idx, acc, base_tree, ctx) do
+    proof_idx = flat_proof_parent(proof_idx)
+    acc = proof_disk_sibling_acc(i, base_tree, proof_idx, acc, ctx)
+    {proof_idx, acc}
+  end
+
+  defp flat_proof_parent(0), do: 0
+  defp flat_proof_parent(proof_idx), do: flat_parent(proof_idx)
 
   defp flat_hash_for_disk_response(
          metadata_levels,
@@ -1002,56 +1031,59 @@ defmodule Torrent.Merkle do
       false
     else
       tree = Map.put(tree, target_idx, node)
-      cursor = target_idx
 
-      result =
-        Enum.reduce_while(proofs, {tree, cursor, false}, fn proof, {tree, cursor, _done} ->
-          if cursor == 0 do
-            {:halt, {tree, cursor, false}}
-          else
-            sib_idx = flat_sibling(cursor)
-            sib_existing = Map.get(tree, sib_idx, @zero_hash)
-
-            tree =
-              cond do
-                sib_existing == @zero_hash ->
-                  Map.put(tree, sib_idx, proof)
-
-                sib_existing == proof ->
-                  tree
-
-                true ->
-                  nil
-              end
-
-            if tree == nil do
-              {:halt, {tree, cursor, false}}
-            else
-              left = min(sib_idx, cursor)
-              parent_hash = hash_pair(Map.fetch!(tree, left), Map.fetch!(tree, left + 1))
-              cursor = flat_parent(cursor)
-              known = Map.get(tree, cursor, @zero_hash)
-
-              cond do
-                known == parent_hash ->
-                  {:halt, {tree, cursor, true}}
-
-                known != @zero_hash ->
-                  {:halt, {tree, cursor, false}}
-
-                true ->
-                  {:cont, {Map.put(tree, cursor, parent_hash), cursor, false}}
-              end
-            end
-          end
-        end)
-
-      case result do
-        {_tree, _cursor, true} -> true
-        _ -> false
-      end
+      proofs
+      |> Enum.reduce_while({tree, target_idx, false}, &reduce_insert_proof/2)
+      |> proof_insert_succeeded?()
     end
   end
+
+  defp reduce_insert_proof(proof, {tree, cursor, _done}) do
+    if cursor == 0 do
+      {:halt, {tree, cursor, false}}
+    else
+      reduce_insert_proof_step(tree, cursor, proof)
+    end
+  end
+
+  defp reduce_insert_proof_step(tree, cursor, proof) do
+    sib_idx = flat_sibling(cursor)
+    sib_existing = Map.get(tree, sib_idx, @zero_hash)
+
+    tree =
+      case sib_existing do
+        @zero_hash -> Map.put(tree, sib_idx, proof)
+        ^proof -> tree
+        _ -> nil
+      end
+
+    if tree == nil do
+      {:halt, {tree, cursor, false}}
+    else
+      advance_proof_insert(tree, sib_idx, cursor)
+    end
+  end
+
+  defp advance_proof_insert(tree, sib_idx, cursor) do
+    left = min(sib_idx, cursor)
+    parent_hash = hash_pair(Map.fetch!(tree, left), Map.fetch!(tree, left + 1))
+    cursor = flat_parent(cursor)
+    known = Map.get(tree, cursor, @zero_hash)
+
+    cond do
+      known == parent_hash ->
+        {:halt, {tree, cursor, true}}
+
+      known != @zero_hash ->
+        {:halt, {tree, cursor, false}}
+
+      true ->
+        {:cont, {Map.put(tree, cursor, parent_hash), cursor, false}}
+    end
+  end
+
+  defp proof_insert_succeeded?({_tree, _cursor, true}), do: true
+  defp proof_insert_succeeded?(_), do: false
 
   defp upward_levels(nodes, start_layer) do
     padded =
@@ -1079,6 +1111,43 @@ defmodule Torrent.Merkle do
 
   defp proof_parent_fold(proof_layers, start, acc, fun) when proof_layers > 0 do
     Enum.reduce(0..(proof_layers - 1), {start, acc}, fun)
+  end
+
+  defp proof_flat_sibling_acc(i, base_tree, proof_idx, acc) do
+    if i >= base_tree and proof_idx > 0 do
+      [flat_sibling(proof_idx) | acc]
+    else
+      acc
+    end
+  end
+
+  defp proof_levels_sibling_acc(i, base_tree, proof_idx, acc, levels, block_count) do
+    if i >= base_tree and proof_idx > 0 do
+      sib = flat_sibling(proof_idx)
+      [flat_hash_from_levels(levels, block_count, sib) | acc]
+    else
+      acc
+    end
+  end
+
+  defp proof_disk_sibling_acc(i, base_tree, proof_idx, acc, ctx) do
+    if i >= base_tree and proof_idx > 0 do
+      sib = flat_sibling(proof_idx)
+
+      hash =
+        flat_hash_for_disk_response(
+          ctx.metadata_levels,
+          ctx.cache,
+          ctx.block_count,
+          ctx.max_layer,
+          ctx.piece_layer,
+          sib
+        )
+
+      [hash | acc]
+    else
+      acc
+    end
   end
 
   defp proof_sibling_leaf_indices(
@@ -1186,18 +1255,32 @@ defmodule Torrent.Merkle do
   end
 
   defp verify_piece_subtrees(cache, piece_hashes, piece_length, block_count, index, length) do
-    blocks_per_piece = div(piece_length, @block_size)
-    first_piece = div(index, blocks_per_piece)
-    last_piece = div(index + length - 1, blocks_per_piece)
-
-    if Enum.all?(first_piece..last_piece, fn piece_idx ->
-         computed = piece_subtree_hash(cache, block_count, blocks_per_piece, piece_idx)
-         Enum.at(piece_hashes, piece_idx) == computed
-       end) do
+    if piece_subtrees_match?(cache, piece_hashes, piece_length, block_count, index, length) do
       :ok
     else
       {:error, :piece_mismatch}
     end
+  end
+
+  defp piece_subtrees_match?(cache, piece_hashes, piece_length, block_count, index, length) do
+    blocks_per_piece = div(piece_length, @block_size)
+    first_piece = div(index, blocks_per_piece)
+    last_piece = div(index + length - 1, blocks_per_piece)
+
+    Enum.all?(first_piece..last_piece, fn piece_idx ->
+      piece_subtree_matches_hash?(
+        cache,
+        piece_hashes,
+        block_count,
+        blocks_per_piece,
+        piece_idx
+      )
+    end)
+  end
+
+  defp piece_subtree_matches_hash?(cache, piece_hashes, block_count, blocks_per_piece, piece_idx) do
+    computed = piece_subtree_hash(cache, block_count, blocks_per_piece, piece_idx)
+    Enum.at(piece_hashes, piece_idx) == computed
   end
 
   defp piece_subtree_hash(cache, block_count, blocks_per_piece, piece_idx) do
@@ -1230,18 +1313,26 @@ defmodule Torrent.Merkle do
         parse_file_properties(properties, path, map_size(node))
 
       :error ->
-        node
-        |> Enum.sort_by(&elem(&1, 0))
-        |> Enum.reduce_while({:ok, []}, fn {component, child}, {:ok, files} ->
-          case walk_file_tree(child, path ++ [component]) do
-            {:ok, child_files} -> {:cont, {:ok, files ++ child_files}}
-            {:error, _reason} = error -> {:halt, error}
-          end
-        end)
+        walk_file_tree_children(node, path)
     end
   end
 
   defp walk_file_tree(_node, _path), do: {:error, :invalid_file_tree}
+
+  defp walk_file_tree_children(node, path) do
+    node
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce_while({:ok, []}, fn {component, child}, {:ok, files} ->
+      append_walk_file_tree(child, path ++ [component], files)
+    end)
+  end
+
+  defp append_walk_file_tree(child, path, files) do
+    case walk_file_tree(child, path) do
+      {:ok, child_files} -> {:cont, {:ok, files ++ child_files}}
+      {:error, _reason} = error -> {:halt, error}
+    end
+  end
 
   defp parse_file_properties(%{"length" => length} = properties, path, 1)
        when is_integer(length) and length >= 0 and path != [] do

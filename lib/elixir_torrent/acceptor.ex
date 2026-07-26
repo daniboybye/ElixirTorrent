@@ -1,6 +1,10 @@
 defmodule Acceptor do
+  @moduledoc """
+  Inbound peer acceptor: global IP cache, blacklist, TCP listener, and handshake workers.
+  """
+
   alias __MODULE__.{BlackList, Connection, IpCache}
-  alias Connection.{Handshakes, Handler}
+  alias Connection.{Handler, Handshakes}
   require Logger
 
   def child_spec(_) do
@@ -22,10 +26,10 @@ defmodule Acceptor do
   @tcp_connect_fallback [nodelay: true]
 
   @spec socket_options() :: list()
-  def socket_options(), do: [:binary, active: false, reuseaddr: true]
+  def socket_options, do: [:binary, active: false, reuseaddr: true]
 
   @spec tcp_socket_options() :: list()
-  def tcp_socket_options(), do: socket_options() ++ @tcp_performance
+  def tcp_socket_options, do: socket_options() ++ @tcp_performance
 
   @spec apply_tcp_performance(:gen_tcp.socket()) :: :ok
   def apply_tcp_performance(socket) when is_port(socket) do
@@ -60,10 +64,10 @@ defmodule Acceptor do
   def tcp_socket_options(:inet6), do: tcp_socket_options() ++ [:inet6, ipv6_v6only: false]
 
   @spec port_range() :: Range.t()
-  def port_range(), do: 6881..9999
+  def port_range, do: 6881..9999
 
   @spec open_udp() :: {:ok, port()} | :error
-  def open_udp(), do: open_udp(:inet)
+  def open_udp, do: open_udp(:inet)
 
   # Request sockets (UDP trackers) bind an OS-chosen ephemeral port. Binding
   # into 6881..6889 attracts stray DHT/uTP traffic: some trackers hand out our
@@ -85,10 +89,10 @@ defmodule Acceptor do
   @key :crypto.strong_rand_bytes(4)
 
   @spec key() :: <<_::32>>
-  def key(), do: @key
+  def key, do: @key
 
   @spec ip() :: tuple()
-  def ip() do
+  def ip do
     :inet.getif()
     |> elem(1)
     |> hd()
@@ -114,17 +118,17 @@ defmodule Acceptor do
 
   @doc false
   @spec ip_cache_key() :: term()
-  def ip_cache_key(), do: @ip_cache_key
+  def ip_cache_key, do: @ip_cache_key
 
   @spec primary_ips() :: %{inet: :inet.ip4_address() | nil, inet6: :inet.ip6_address() | nil}
-  def primary_ips() do
+  def primary_ips do
     %{inet: v4, inet6: v6} = all_global_ips()
     %{inet: v4, inet6: v6}
   end
 
   @doc false
   @spec all_global_ips() :: ip_snapshot()
-  def all_global_ips() do
+  def all_global_ips do
     case :persistent_term.get(@ip_cache_key, nil) do
       nil -> compute_all_global_ips()
       cached -> cached
@@ -133,7 +137,7 @@ defmodule Acceptor do
 
   @doc false
   @spec compute_all_global_ips() :: ip_snapshot()
-  def compute_all_global_ips() do
+  def compute_all_global_ips do
     case :inet.getifaddrs() do
       {:ok, ifs} ->
         ips =
@@ -161,7 +165,7 @@ defmodule Acceptor do
 
   @doc false
   @spec multicast_interfaces() :: multicast_interfaces()
-  def multicast_interfaces(), do: all_global_ips().multicast_interfaces
+  def multicast_interfaces, do: all_global_ips().multicast_interfaces
 
   @doc false
   @spec multicast_interfaces_from(
@@ -170,31 +174,40 @@ defmodule Acceptor do
         ) :: multicast_interfaces()
   def multicast_interfaces_from(ifs, index_fun \\ &:net.if_name2index/1) do
     {v4, v6} =
-      Enum.reduce(ifs, {[], []}, fn {ifname, props}, {v4_acc, v6_acc} ->
-        flags = Keyword.get(props, :flags, [])
-        addresses = Keyword.get_values(props, :addr)
-
-        if :up in flags and :running in flags and :multicast in flags and
-             :loopback not in flags and :pointtopoint not in flags do
-          interface_v4 = Enum.filter(addresses, &multicast_ipv4?/1)
-
-          interface_v6 =
-            if Enum.any?(addresses, &multicast_ipv6?/1) do
-              case index_fun.(ifname) do
-                {:ok, index} -> [index]
-                {:error, _reason} -> []
-              end
-            else
-              []
-            end
-
-          {interface_v4 ++ v4_acc, interface_v6 ++ v6_acc}
-        else
-          {v4_acc, v6_acc}
-        end
+      Enum.reduce(ifs, {[], []}, fn {ifname, props}, acc ->
+        multicast_reduce_if(ifname, props, acc, index_fun)
       end)
 
     %{inet: Enum.uniq(v4), inet6: Enum.uniq(v6)}
+  end
+
+  defp multicast_reduce_if(ifname, props, {v4_acc, v6_acc}, index_fun) do
+    flags = Keyword.get(props, :flags, [])
+    addresses = Keyword.get_values(props, :addr)
+
+    if multicast_eligible?(flags) do
+      interface_v4 = Enum.filter(addresses, &multicast_ipv4?/1)
+      interface_v6 = multicast_ipv6_indices(addresses, ifname, index_fun)
+      {interface_v4 ++ v4_acc, interface_v6 ++ v6_acc}
+    else
+      {v4_acc, v6_acc}
+    end
+  end
+
+  defp multicast_eligible?(flags) do
+    :up in flags and :running in flags and :multicast in flags and
+      :loopback not in flags and :pointtopoint not in flags
+  end
+
+  defp multicast_ipv6_indices(addresses, ifname, index_fun) do
+    if Enum.any?(addresses, &multicast_ipv6?/1) do
+      case index_fun.(ifname) do
+        {:ok, index} -> [index]
+        {:error, _reason} -> []
+      end
+    else
+      []
+    end
   end
 
   @spec multicast_ipv4?(term()) :: boolean()
@@ -246,7 +259,7 @@ defmodule Acceptor do
   defp global_ipv6?(_), do: false
 
   @spec ip_binary() :: <<_::32>> | <<_::128>>
-  def ip_binary() do
+  def ip_binary do
     case ip() do
       {a, b, c, d} ->
         <<a, b, c, d>>
@@ -258,7 +271,7 @@ defmodule Acceptor do
 
   @doc false
   @spec ipv4_binary() :: <<_::32>> | nil
-  def ipv4_binary() do
+  def ipv4_binary do
     case primary_ips().inet do
       {a, b, c, d} -> <<a, b, c, d>>
       _ -> nil
@@ -267,7 +280,7 @@ defmodule Acceptor do
 
   @doc false
   @spec ipv6_binary() :: <<_::128>> | nil
-  def ipv6_binary() do
+  def ipv6_binary do
     case primary_ips().inet6 do
       ip when is_tuple(ip) -> ipv6_binary(ip)
       _ -> nil
@@ -276,7 +289,7 @@ defmodule Acceptor do
 
   @doc false
   @spec announcable_ipv6() :: [:inet.ip6_address()]
-  def announcable_ipv6() do
+  def announcable_ipv6 do
     case all_global_ips() do
       %{inet6: nil} -> []
       %{inet6: ip} -> [ip]

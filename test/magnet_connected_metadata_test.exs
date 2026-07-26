@@ -18,7 +18,7 @@ defmodule MagnetConnectedMetadataTest do
   test "wait_controller_ready proceeds without metadata_size when ut_metadata is advertised" do
     source = File.read!(@connection_ex)
 
-    assert source =~ "Peer.LTEP.Session.peer_supports?(info.ltep, @ut_metadata)"
+    assert source =~ "Session.peer_supports?(info.ltep, @ut_metadata)"
     assert source =~ "metadata_size=unknown ut_metadata=true"
     assert source =~ "learn total_size from the data message"
     refute source =~ "metadata_seeder?(info) and System.monotonic_time(:millisecond) >= deadline"

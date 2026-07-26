@@ -37,12 +37,12 @@ defmodule UTP.Packet do
           type: 0..4,
           version: 1,
           extension: byte(),
-          conn_id: 0..65535,
+          conn_id: 0..65_535,
           timestamp: non_neg_integer(),
           timestamp_difference: non_neg_integer(),
           wnd_size: non_neg_integer(),
-          seq_nr: 0..65535,
-          ack_nr: 0..65535,
+          seq_nr: 0..65_535,
+          ack_nr: 0..65_535,
           extensions: [extension()]
         }
 
@@ -139,7 +139,7 @@ defmodule UTP.Packet do
 
   def decode(_), do: {:error, :too_short}
 
-  @spec selective_ack_acks(t(), [extension()]) :: [0..65535]
+  @spec selective_ack_acks(t(), [extension()]) :: [0..65_535]
   def selective_ack_acks(%__MODULE__{ack_nr: ack_nr}, extensions) do
     extensions
     |> Enum.filter(&match?({:selective_ack, _}, &1))
@@ -148,35 +148,39 @@ defmodule UTP.Packet do
     end)
   end
 
-  @spec parse_selective_ack(0..65535, binary()) :: [0..65535]
+  @spec parse_selective_ack(0..65_535, binary()) :: [0..65_535]
   def parse_selective_ack(ack_nr, bitmask) when is_binary(bitmask) do
     bitmask
     |> :binary.bin_to_list()
     |> Enum.with_index()
     |> Enum.flat_map(fn {byte, byte_idx} ->
-      Enum.flat_map(0..7, fn bit_idx ->
-        if Bitwise.band(byte, Bitwise.bsl(1, bit_idx)) != 0 do
-          [seq_add(ack_nr, 2 + byte_idx * 8 + bit_idx)]
-        else
-          []
-        end
-      end)
+      sack_byte_seqs(ack_nr, byte, byte_idx)
     end)
   end
 
-  @spec seq_add(0..65535, integer()) :: 0..65535
-  def seq_add(seq, delta), do: rem(seq + delta + 65536, 65536)
+  defp sack_byte_seqs(ack_nr, byte, byte_idx) do
+    Enum.flat_map(0..7, fn bit_idx ->
+      if Bitwise.band(byte, Bitwise.bsl(1, bit_idx)) != 0 do
+        [seq_add(ack_nr, 2 + byte_idx * 8 + bit_idx)]
+      else
+        []
+      end
+    end)
+  end
 
-  @spec seq_diff(0..65535, 0..65535) :: integer()
-  def seq_diff(a, b), do: rem(a - b + 32768, 65536) - 32768
+  @spec seq_add(0..65_535, integer()) :: 0..65_535
+  def seq_add(seq, delta), do: rem(seq + delta + 65_536, 65_536)
 
-  @spec seq_before?(0..65535, 0..65535) :: boolean()
+  @spec seq_diff(0..65_535, 0..65_535) :: integer()
+  def seq_diff(a, b), do: rem(a - b + 32_768, 65_536) - 32_768
+
+  @spec seq_before?(0..65_535, 0..65_535) :: boolean()
   def seq_before?(a, b), do: seq_diff(a, b) < 0
 
-  @spec seq_after?(0..65535, 0..65535) :: boolean()
+  @spec seq_after?(0..65_535, 0..65_535) :: boolean()
   def seq_after?(a, b), do: seq_diff(a, b) > 0
 
-  @spec seq_between?(0..65535, 0..65535, 0..65535) :: boolean()
+  @spec seq_between?(0..65_535, 0..65_535, 0..65_535) :: boolean()
   def seq_between?(seq, low, high) do
     seq_diff(seq, low) >= 0 and seq_diff(high, seq) >= 0
   end

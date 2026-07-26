@@ -1,4 +1,8 @@
 defmodule Acceptor.BlackList do
+  @moduledoc """
+  GenServer holding peer IDs rejected after failed handshakes (BEP 3 peer churn guard).
+  """
+
   use GenServer, start: {GenServer, :start_link, [__MODULE__, nil, [name: __MODULE__]]}
 
   @spec put(Peer.id()) :: :ok

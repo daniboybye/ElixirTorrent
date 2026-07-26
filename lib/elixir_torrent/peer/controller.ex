@@ -1,10 +1,15 @@
 defmodule Peer.Controller do
+  @moduledoc """
+  Per-peer GenServer: choke/unchoke, piece requests, LTEP extensions, and hash transfer.
+  """
+
   use GenServer
   use Via
 
   alias __MODULE__.{State, FastExtension}
+  alias Peer.LTEP.Session
   alias Peer.Sender
-  alias Torrent.{Uploader, Downloads}
+  alias Torrent.{Downloads, Uploader}
 
   import Peer, only: [make_key: 2, key_to_id: 1, key_to_hash: 1]
 
@@ -138,7 +143,7 @@ defmodule Peer.Controller do
     :exit, _ -> :error
   end
 
-  @spec ltep_session(Peer.key()) :: {:ok, Peer.LTEP.Session.t()} | :error
+  @spec ltep_session(Peer.key()) :: {:ok, Session.t()} | :error
   def ltep_session(key) do
     GenServer.call(via(key), :ltep_session)
   catch
@@ -147,7 +152,7 @@ defmodule Peer.Controller do
 
   @doc false
   @spec holepunch_relay_info(Peer.key()) ::
-          {:ok, Peer.LTEP.Session.t(), MapSet.t({:inet.ip_address(), :inet.port_number()})}
+          {:ok, Session.t(), MapSet.t({:inet.ip_address(), :inet.port_number()})}
           | :error
   def holepunch_relay_info(key) do
     GenServer.call(via(key), :holepunch_relay_info)
@@ -517,9 +522,9 @@ defmodule Peer.Controller do
     ut = Magnet.UtMetadata.extension_name()
 
     reply =
-      if Peer.LTEP.Session.peer_supports?(ltep, ut) do
+      if Session.peer_supports?(ltep, ut) do
         metadata_size =
-          case Peer.LTEP.Session.peer_handshake(ltep).metadata_size do
+          case Session.peer_handshake(ltep).metadata_size do
             size when is_integer(size) and size > 0 -> size
             _ -> nil
           end
@@ -568,9 +573,9 @@ defmodule Peer.Controller do
     ut = Magnet.UtMetadata.extension_name()
 
     reply =
-      if Peer.LTEP.Session.peer_supports?(ltep, ut) do
+      if Session.peer_supports?(ltep, ut) do
         metadata_size =
-          case Peer.LTEP.Session.peer_handshake(ltep).metadata_size do
+          case Session.peer_handshake(ltep).metadata_size do
             size when is_integer(size) and size > 0 -> size
             _ -> nil
           end
@@ -634,14 +639,12 @@ defmodule Peer.Controller do
     state = maybe_send_dht_port(state, reserved)
 
     state =
-      cond do
-        metadata_leech_peer?(state.hash) ->
-          leech_startup(state)
-
-        true ->
-          state
-          |> maybe_leech_startup(downloaded)
-          |> State.first_message(downloaded)
+      if metadata_leech_peer?(state.hash) do
+        leech_startup(state)
+      else
+        state
+        |> maybe_leech_startup(downloaded)
+        |> State.first_message(downloaded)
       end
 
     if ltep_exts != [] do
@@ -708,9 +711,9 @@ defmodule Peer.Controller do
   defp ltep_extension_names(%State{ltep: ltep}) do
     Peer.UtPex.extension_name()
     |> then(fn ut_pex ->
-      names = if Peer.LTEP.Session.peer_supports?(ltep, ut_pex), do: [ut_pex], else: []
+      names = if Session.peer_supports?(ltep, ut_pex), do: [ut_pex], else: []
 
-      if Peer.LTEP.Session.peer_supports?(ltep, Magnet.UtMetadata.extension_name()) do
+      if Session.peer_supports?(ltep, Magnet.UtMetadata.extension_name()) do
         [Magnet.UtMetadata.extension_name() | names]
       else
         names

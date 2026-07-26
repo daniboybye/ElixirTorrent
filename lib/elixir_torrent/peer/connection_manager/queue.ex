@@ -53,15 +53,19 @@ defmodule Peer.ConnectionManager.Queue do
           acc
 
         %__MODULE__{sources: sources} = entry ->
-          sources = MapSet.delete(sources, tag)
-
-          if MapSet.size(sources) == 0 do
-            Map.delete(acc, key)
-          else
-            Map.put(acc, key, %{entry | sources: sources})
-          end
+          update_revoke_sources(acc, key, entry, sources, tag)
       end
     end)
+  end
+
+  defp update_revoke_sources(acc, key, entry, sources, tag) do
+    sources = MapSet.delete(sources, tag)
+
+    if MapSet.size(sources) == 0 do
+      Map.delete(acc, key)
+    else
+      Map.put(acc, key, %{entry | sources: sources})
+    end
   end
 
   @doc false
@@ -140,15 +144,19 @@ defmodule Peer.ConnectionManager.Queue do
       if length(keys_for_source) <= @max_pex_per_source do
         acc
       else
-        evict_keys =
-          keys_for_source
-          |> sort_keys_for_eviction(acc, clients, src)
-          |> Enum.take(length(keys_for_source) - @max_pex_per_source)
-
-        Enum.reduce(evict_keys, acc, fn key, queue ->
-          remove_source_tag(queue, key, tag)
-        end)
+        evict_over_cap_pex(acc, keys_for_source, tag, clients, src)
       end
+    end)
+  end
+
+  defp evict_over_cap_pex(queue, keys_for_source, tag, clients, src) do
+    evict_keys =
+      keys_for_source
+      |> sort_keys_for_eviction(queue, clients, src)
+      |> Enum.take(length(keys_for_source) - @max_pex_per_source)
+
+    Enum.reduce(evict_keys, queue, fn key, acc ->
+      remove_source_tag(acc, key, tag)
     end)
   end
 

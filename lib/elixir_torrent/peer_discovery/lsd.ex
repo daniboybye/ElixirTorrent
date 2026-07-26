@@ -197,19 +197,7 @@ defmodule PeerDiscovery.LSD do
 
         acc =
           Enum.reduce(header_lines, %{hashes: [], port: nil, cookie: nil}, fn line, a ->
-            case line do
-              "" ->
-                a
-
-              _ ->
-                case String.split(line, ":", parts: 2) do
-                  [name, value] ->
-                    apply_header(a, String.downcase(String.trim(name)), String.trim(value))
-
-                  _ ->
-                    a
-                end
-            end
+            parse_lsd_header_line(a, line)
           end)
 
         if is_integer(acc.port) and acc.hashes != [] do
@@ -224,6 +212,19 @@ defmodule PeerDiscovery.LSD do
   end
 
   def parse_message(_), do: :error
+
+  @spec parse_lsd_header_line(map(), String.t()) :: map()
+  defp parse_lsd_header_line(acc, ""), do: acc
+
+  defp parse_lsd_header_line(acc, line) do
+    case String.split(line, ":", parts: 2) do
+      [name, value] ->
+        apply_header(acc, String.downcase(String.trim(name)), String.trim(value))
+
+      _ ->
+        acc
+    end
+  end
 
   @doc false
   @spec decode_packet(binary(), :inet.ip_address(), binary()) ::

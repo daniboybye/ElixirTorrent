@@ -1,4 +1,8 @@
 defmodule AllowedFast do
+  @moduledoc """
+  BEP 6 allowed-fast piece set: up to `@k` indices a peer may request while choked.
+  """
+
   # denote the final number of pieces in the allowed fast set
   @k 10
 

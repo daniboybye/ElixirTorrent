@@ -5,6 +5,7 @@ defmodule Peer.Holepunch do
 
   require Logger
 
+  alias Acceptor.Connection.Handshakes
   alias Peer.LTEP.Session
   alias Peer.UtHolepunch
 
@@ -55,7 +56,7 @@ defmodule Peer.Holepunch do
     # rendezvous (or an inbound request relayed for another peer). Re-applying
     # the rendezvous cooldown here would suppress the simultaneous uTP open.
     Task.start(fn ->
-      case Acceptor.Connection.Handshakes.dial_utp_and_handshake(peer, hash) do
+      case Handshakes.dial_utp_and_handshake(peer, hash) do
         :ok ->
           Logger.info(
             "[holepunch] punch_ok hash=#{Torrent.hex_encoded_hash(hash)} endpoint=#{inspect({ip, port})}"
@@ -245,7 +246,7 @@ defmodule Peer.Holepunch do
   @spec connectable_target?(:inet.ip_address(), :inet.port_number()) :: boolean()
   defp connectable_target?(ip, port) do
     peer = %Peer{ip: ip, port: port}
-    Acceptor.Connection.Handshakes.connectable_peer?(peer)
+    Handshakes.connectable_peer?(peer)
   end
 
   @spec encode_rendezvous(:inet.ip_address(), :inet.port_number()) :: binary() | nil

@@ -3,6 +3,7 @@ defmodule Magnet.Fetcher do
 
   require Logger
 
+  alias __MODULE__.ConnectionLimit
   alias DHT.Config, as: DHTConfig
 
   @max_peers 60
@@ -70,23 +71,29 @@ defmodule Magnet.Fetcher do
           {:error, {:already_fetching, pid}}
 
         [] ->
-          child_spec = %{
-            id: registry_key,
-            start: {Magnet.Fetcher.Session, :start_link, [{magnet, caller, ref}]},
-            restart: :temporary
-          }
-
-          case DynamicSupervisor.start_child(Magnet.Fetcher.Supervisor, child_spec) do
-            {:ok, _pid} ->
-              {:ok, ref}
-
-            {:error, {:already_started, pid}} ->
-              {:error, {:already_fetching, pid}}
-
-            {:error, _} = error ->
-              error
-          end
+          start_fetch_session(magnet, caller, ref, registry_key)
       end
+    end
+  end
+
+  @spec start_fetch_session(Magnet.t(), pid(), reference(), term()) ::
+          {:ok, reference()} | {:error, term()}
+  defp start_fetch_session(magnet, caller, ref, registry_key) do
+    child_spec = %{
+      id: registry_key,
+      start: {Magnet.Fetcher.Session, :start_link, [{magnet, caller, ref}]},
+      restart: :temporary
+    }
+
+    case DynamicSupervisor.start_child(Magnet.Fetcher.Supervisor, child_spec) do
+      {:ok, _pid} ->
+        {:ok, ref}
+
+      {:error, {:already_started, pid}} ->
+        {:error, {:already_fetching, pid}}
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -549,20 +556,22 @@ defmodule Magnet.Fetcher do
         :ets.insert(@dht_bg_table, {hash, :pending})
         hash_hex = Torrent.hex_encoded_hash(hash)
 
-        Task.start(fn ->
-          peers = dht_peers_deep_retry(hash)
-
-          if peers != [] do
-            Logger.info(
-              "[magnet_fetch] dht_background_peers hash=#{hash_hex} count=#{length(peers)}"
-            )
-          end
-
-          :ets.insert(@dht_bg_table, {hash, {:done, peers}})
-        end)
+        Task.start(fn -> run_dht_background_lookup(hash, hash_hex) end)
 
         :ok
     end
+  end
+
+  @spec run_dht_background_lookup(Torrent.hash(), String.t()) :: :ok
+  defp run_dht_background_lookup(hash, hash_hex) do
+    peers = dht_peers_deep_retry(hash)
+
+    if peers != [] do
+      Logger.info("[magnet_fetch] dht_background_peers hash=#{hash_hex} count=#{length(peers)}")
+    end
+
+    :ets.insert(@dht_bg_table, {hash, {:done, peers}})
+    :ok
   end
 
   @doc false
@@ -720,7 +729,7 @@ defmodule Magnet.Fetcher do
     peer_batch = peers |> shuffle() |> Enum.take(@max_peers)
     slots = min(length(peer_batch), @max_connections)
 
-    :ok = Magnet.Fetcher.ConnectionLimit.acquire(slots)
+    :ok = ConnectionLimit.acquire(slots)
 
     result =
       try do
@@ -743,7 +752,7 @@ defmodule Magnet.Fetcher do
             {:cont, acc}
         end)
       after
-        Magnet.Fetcher.ConnectionLimit.release(slots)
+        ConnectionLimit.release(slots)
       end
 
     case result do
@@ -917,27 +926,36 @@ defmodule Magnet.Fetcher do
     connections
     |> shuffle()
     |> Enum.reduce_while({:error, :all_rejected, nil}, fn conn, acc ->
-      case Magnet.Connection.request_piece(conn, piece_index) do
-        {:ok, data, total_size} ->
-          if valid_piece_size?(data, total_size, piece_index, expected_total_size) do
-            {:halt, {:ok, {piece_index, data, total_size}}}
-          else
-            reason = {:metadata_size_mismatch, total_size, expected_total_size}
-            {:cont, {:error, :all_rejected, reason}}
-          end
-
-        {:reject, ^piece_index} ->
-          {:cont, acc}
-
-        {:error, reason} ->
-          acc = {:error, :all_rejected, reason}
-
-          if retryable_piece_error?(reason),
-            do: {:cont, acc},
-            else: {:halt, {:error, reason}}
-      end
+      reduce_piece_attempt(conn, piece_index, expected_total_size, acc)
     end)
     |> finalize_piece_attempt()
+  end
+
+  @spec reduce_piece_attempt(
+          Magnet.Connection.t(),
+          non_neg_integer(),
+          pos_integer() | nil,
+          {:error, :all_rejected, term() | nil}
+        ) ::
+          {:cont, {:error, :all_rejected, term() | nil}}
+          | {:halt, {:ok, {non_neg_integer(), binary(), pos_integer()}} | {:error, term()}}
+  defp reduce_piece_attempt(conn, piece_index, expected_total_size, acc) do
+    case Magnet.Connection.request_piece(conn, piece_index) do
+      {:ok, data, total_size} ->
+        if valid_piece_size?(data, total_size, piece_index, expected_total_size) do
+          {:halt, {:ok, {piece_index, data, total_size}}}
+        else
+          reason = {:metadata_size_mismatch, total_size, expected_total_size}
+          {:cont, {:error, :all_rejected, reason}}
+        end
+
+      {:reject, ^piece_index} ->
+        {:cont, acc}
+
+      {:error, reason} ->
+        acc = {:error, :all_rejected, reason}
+        if retryable_piece_error?(reason), do: {:cont, acc}, else: {:halt, {:error, reason}}
+    end
   end
 
   @spec valid_piece_size?(binary(), pos_integer(), non_neg_integer(), pos_integer() | nil) ::

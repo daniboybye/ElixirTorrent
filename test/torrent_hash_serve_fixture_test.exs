@@ -2,7 +2,7 @@ defmodule Torrent.HashServeFixtureTest do
   use ExUnit.Case, async: false
 
   alias Peer.HashWire
-  alias Torrent.{HashServe, Merkle}
+  alias Torrent.{FileHandle, HashServe, Merkle, Model}
 
   @timeout 5_000
 
@@ -19,8 +19,8 @@ defmodule Torrent.HashServeFixtureTest do
 
     torrent = fixture |> Torrent.parse_file!() |> Map.put(:download_dir, dir)
     :ok = Torrent.PiecesStatistic.init(torrent)
-    {:ok, model} = Torrent.Model.start_link(torrent)
-    {:ok, store} = Torrent.FileHandle.Store.start_link(torrent.hash)
+    {:ok, model} = Model.start_link(torrent)
+    {:ok, store} = FileHandle.Store.start_link(torrent.hash)
 
     {:ok, hash_sup} =
       Task.Supervisor.start_link(

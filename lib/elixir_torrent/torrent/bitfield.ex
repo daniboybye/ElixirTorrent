@@ -1,4 +1,8 @@
 defmodule Torrent.Bitfield do
+  @moduledoc """
+  BEP 3 bitfield allocation and piece-index get/set helpers.
+  """
+
   @spec make(pos_integer()) :: binary()
   def make(count) do
     count

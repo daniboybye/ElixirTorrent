@@ -1,4 +1,8 @@
 defmodule Tracker.Error do
+  @moduledoc """
+  Structured tracker failure (reason plus optional `Retry-After` hint).
+  """
+
   @enforce_keys [:reason]
   defstruct [:reason, :retry_in]
 

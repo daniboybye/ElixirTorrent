@@ -96,9 +96,8 @@ defmodule PeerHashIntegrationTest do
   end
 
   defp recv_framed(server, timeout) do
-    with {:ok, <<len::32>>} <- :gen_tcp.recv(server, 4, timeout),
-         {:ok, body} <- :gen_tcp.recv(server, len, timeout) do
-      {:ok, body}
+    with {:ok, <<len::32>>} <- :gen_tcp.recv(server, 4, timeout) do
+      :gen_tcp.recv(server, len, timeout)
     end
   end
 

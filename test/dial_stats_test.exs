@@ -1,8 +1,8 @@
 defmodule Peer.DialStatsTest do
   use ExUnit.Case, async: false
 
-  alias Peer.DialStats
   alias Acceptor.Connection.Handshakes
+  alias Peer.DialStats
 
   setup do
     {:ok, _} = Application.ensure_all_started(:elixir_torrent)

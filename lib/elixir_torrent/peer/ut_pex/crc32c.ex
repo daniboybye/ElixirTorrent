@@ -12,15 +12,17 @@ defmodule Peer.UtPex.CRC32C do
     |> Enum.reduce(0xFFFFFFFF, fn byte, crc ->
       crc = Bitwise.bxor(crc, byte)
 
-      Enum.reduce(0..7, crc, fn _, c ->
-        if Bitwise.band(c, 1) == 1 do
-          Bitwise.bxor(Bitwise.bsr(c, 1), @poly)
-        else
-          Bitwise.bsr(c, 1)
-        end
-      end)
+      Enum.reduce(0..7, crc, fn _, c -> crc_shift_step(c) end)
     end)
     |> Bitwise.bxor(0xFFFFFFFF)
     |> Bitwise.band(0xFFFFFFFF)
+  end
+
+  defp crc_shift_step(c) do
+    if Bitwise.band(c, 1) == 1 do
+      Bitwise.bxor(Bitwise.bsr(c, 1), @poly)
+    else
+      Bitwise.bsr(c, 1)
+    end
   end
 end

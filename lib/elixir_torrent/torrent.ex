@@ -1,4 +1,8 @@
 defmodule Torrent do
+  @moduledoc """
+  Per-torrent supervisor tree: model, swarm, downloads, file handles, and discovery hooks.
+  """
+
   use Supervisor, type: :supervisor, restart: :transient
   use Via
 
@@ -105,13 +109,13 @@ defmodule Torrent do
 
   @compile {:inline, empty: 0, started: 0, completed: 0, stopped: 0, event_to_string: 1}
 
-  def started(), do: @started
+  def started, do: @started
 
-  def empty(), do: @empty
+  def empty, do: @empty
 
-  def completed(), do: @completed
+  def completed, do: @completed
 
-  def stopped(), do: @stopped
+  def stopped, do: @stopped
 
   @spec event_to_string(0..3) :: String.t() | nil
   def event_to_string(@empty), do: nil

@@ -69,16 +69,16 @@ defmodule UTP.Connection do
           {:ok, socket_ref()} | {:error, term()}
   def start_client(udp_socket, ip, port, opts \\ []) do
     recv_conn_id = Keyword.get(opts, :conn_id, :rand.uniform(65_534))
-    send_conn_id = rem(recv_conn_id + 1, 65536)
+    send_conn_id = rem(recv_conn_id + 1, 65_536)
     start_link(udp_socket, ip, port, :client, :syn_sent, recv_conn_id, send_conn_id, 1)
   end
 
-  @spec start_server(port(), :inet.ip_address(), :inet.port_number(), 0..65535) ::
+  @spec start_server(port(), :inet.ip_address(), :inet.port_number(), 0..65_535) ::
           {:ok, socket_ref()} | {:error, term()}
   def start_server(udp_socket, ip, port, syn_conn_id) do
-    recv_conn_id = rem(syn_conn_id + 1, 65536)
+    recv_conn_id = rem(syn_conn_id + 1, 65_536)
     send_conn_id = syn_conn_id
-    seq_nr = :rand.uniform(65535)
+    seq_nr = :rand.uniform(65_535)
     start_link(udp_socket, ip, port, :server, :syn_recv, recv_conn_id, send_conn_id, seq_nr)
   end
 
@@ -134,12 +134,10 @@ defmodule UTP.Connection do
 
   @spec await_connected(socket_ref(), timeout()) :: :ok | {:error, term()}
   def await_connected({:utp, pid}, timeout \\ 5_000) do
-    try do
-      :ok = GenServer.call(pid, :await_connected, timeout + 500)
-      :ok
-    catch
-      :exit, _ -> {:error, :timeout}
-    end
+    :ok = GenServer.call(pid, :await_connected, timeout + 500)
+    :ok
+  catch
+    :exit, _ -> {:error, :timeout}
   end
 
   defp start_link(udp_socket, ip, port, role, phase, recv_conn_id, send_conn_id, seq_nr) do
@@ -304,73 +302,79 @@ defmodule UTP.Connection do
   def handle_info(:stop_zombie, state), do: {:stop, :normal, state}
 
   defp handle_inbound(state, header, payload, extensions) do
-    unless valid_conn_id?(state, header) do
-      state
+    if valid_conn_id?(state, header) do
+      handle_inbound_valid(state, header, payload, extensions)
     else
-      now_us = :os.system_time(:microsecond)
-      reply_micro = max(now_us - header.timestamp, 0)
-
-      state =
-        %{
-          state
-          | reply_micro: reply_micro,
-            activity: %{
-              state.activity
-              | last_recv_ms: now_ms(),
-                idle_probe_count: 0
-            },
-            peer_wnd: header.wnd_size
-        }
-
-      state =
-        if state.phase == :connected do
-          put_led(state, LEDBAT.record_delay(state.led, header.timestamp_difference))
-        else
-          state
-        end
-
-      # Update dup_acks BEFORE process_acks so the 3rd dup (dup_acks:=3) can
-      # trigger fast-retransmit inside process_acks. The old order incremented
-      # after, meaning we needed 4 duplicates to fire.
-      state =
-        if header.ack_nr == state.last_peer_ack do
-          %{state | dup_acks: state.dup_acks + 1}
-        else
-          %{state | dup_acks: 0, last_peer_ack: header.ack_nr}
-        end
-
-      state = process_acks(state, header, extensions)
-
-      case header.type do
-        @st_reset ->
-          shutdown(state, :reset)
-
-        @st_state ->
-          handle_state_packet(state, header)
-
-        @st_data ->
-          handle_data_packet(state, header, payload)
-
-        @st_fin ->
-          handle_fin_packet(state, header, payload)
-
-        @st_syn ->
-          cond do
-            state.role == :server and state.phase == :syn_recv ->
-              handle_syn_server(state, header)
-
-            state.role == :client and state.phase == :syn_sent ->
-              handle_state_packet(state, header)
-
-            true ->
-              state
-          end
-
-        _ ->
-          state
-      end
+      state
     end
   end
+
+  defp handle_inbound_valid(state, header, payload, extensions) do
+    now_us = :os.system_time(:microsecond)
+    reply_micro = max(now_us - header.timestamp, 0)
+
+    state =
+      %{
+        state
+        | reply_micro: reply_micro,
+          activity: %{
+            state.activity
+            | last_recv_ms: now_ms(),
+              idle_probe_count: 0
+          },
+          peer_wnd: header.wnd_size
+      }
+
+    state =
+      if state.phase == :connected do
+        put_led(state, LEDBAT.record_delay(state.led, header.timestamp_difference))
+      else
+        state
+      end
+
+    # Update dup_acks BEFORE process_acks so the 3rd dup (dup_acks:=3) can
+    # trigger fast-retransmit inside process_acks. The old order incremented
+    # after, meaning we needed 4 duplicates to fire.
+    state =
+      if header.ack_nr == state.last_peer_ack do
+        %{state | dup_acks: state.dup_acks + 1}
+      else
+        %{state | dup_acks: 0, last_peer_ack: header.ack_nr}
+      end
+
+    state = process_acks(state, header, extensions)
+    dispatch_inbound_type(state, header, payload)
+  end
+
+  defp dispatch_inbound_type(state, header, payload) do
+    case header.type do
+      @st_reset ->
+        shutdown(state, :reset)
+
+      @st_state ->
+        handle_state_packet(state, header)
+
+      @st_data ->
+        handle_data_packet(state, header, payload)
+
+      @st_fin ->
+        handle_fin_packet(state, header, payload)
+
+      @st_syn ->
+        handle_inbound_syn(state, header)
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_inbound_syn(%{role: :server, phase: :syn_recv} = state, header),
+    do: handle_syn_server(state, header)
+
+  defp handle_inbound_syn(%{role: :client, phase: :syn_sent} = state, header),
+    do: handle_state_packet(state, header)
+
+  defp handle_inbound_syn(state, _header), do: state
 
   defp handle_syn_server(state, header) do
     state
@@ -442,7 +446,7 @@ defmodule UTP.Connection do
         |> deliver_payload(payload)
         |> Map.put(:recv_next, Packet.seq_add(seq, 1))
         |> Map.put(:ack_nr, seq)
-        |> then(fn s -> if type == @st_fin, do: Map.put(s, :eof_seq, seq), else: s end)
+        |> maybe_put_fin_eof(type, seq)
         |> drain_oob()
         |> maybe_close_on_eof()
         |> send_state_ack()
@@ -466,25 +470,32 @@ defmodule UTP.Connection do
     end
   end
 
+  defp maybe_put_fin_eof(state, @st_fin, seq), do: Map.put(state, :eof_seq, seq)
+  defp maybe_put_fin_eof(state, _type, _seq), do: state
+
   defp drain_oob(state) do
-    Enum.reduce(1..256, state, fn _, acc ->
-      case Map.get(acc.recv_oob, acc.recv_next) do
-        {payload, type} ->
-          acc =
-            acc
-            |> Map.put(:recv_oob, Map.delete(acc.recv_oob, acc.recv_next))
-            |> deliver_payload(payload)
-            |> Map.put(:ack_nr, acc.recv_next)
-            |> Map.put(:recv_next, Packet.seq_add(acc.recv_next, 1))
-            |> then(fn s -> if type == @st_fin, do: Map.put(s, :eof_seq, s.ack_nr), else: s end)
-
-          acc
-
-        nil ->
-          acc
-      end
-    end)
+    Enum.reduce(1..256, state, fn _, acc -> drain_oob_step(acc) end)
   end
+
+  defp drain_oob_step(acc) do
+    case Map.get(acc.recv_oob, acc.recv_next) do
+      {payload, type} ->
+        acc
+        |> Map.put(:recv_oob, Map.delete(acc.recv_oob, acc.recv_next))
+        |> deliver_payload(payload)
+        |> Map.put(:ack_nr, acc.recv_next)
+        |> Map.put(:recv_next, Packet.seq_add(acc.recv_next, 1))
+        |> maybe_put_fin_eof_at_ack(type)
+
+      nil ->
+        acc
+    end
+  end
+
+  defp maybe_put_fin_eof_at_ack(state, @st_fin),
+    do: Map.put(state, :eof_seq, state.ack_nr)
+
+  defp maybe_put_fin_eof_at_ack(state, _type), do: state
 
   defp deliver_payload(state, payload) when payload == <<>>, do: state
 
@@ -682,51 +693,7 @@ defmodule UTP.Connection do
 
     case send_udp_direct(state.udp_socket, state.peer_ip, state.peer_port, wire) do
       :ok ->
-        if type == @st_data and byte_size(payload) > 0 do
-          Logger.debug(
-            "[utp] sent_data peer=#{inspect({state.peer_ip, state.peer_port})} seq=#{seq} bytes=#{byte_size(payload)} ack=#{state.ack_nr}"
-          )
-        end
-
-        bytes = byte_size(payload)
-
-        unacked =
-          if type in [@st_data, @st_fin] do
-            # Preserve the retransmit count across re-sends of the same seq so
-            # check_timeouts' give-up (tx_count >= 10) actually fires. The old
-            # code hard-coded tx_count=1 here, making retransmit_loss's manual
-            # bump dead and the give-up branch unreachable.
-            tx_count =
-              case Map.get(state.unacked, seq) do
-                {_, _, _, prev, _} -> prev + 1
-                nil -> 1
-              end
-
-            Map.put(state.unacked, seq, {type, payload, now_ms(), tx_count, bytes})
-          else
-            state.unacked
-          end
-
-        cur_window = if bytes > 0, do: state.cur_window + bytes, else: state.cur_window
-
-        seq_nr =
-          if increment? do
-            Packet.seq_add(seq, 1)
-          else
-            state.seq_nr
-          end
-
-        %{
-          state
-          | unacked: unacked,
-            cur_window: cur_window,
-            seq_nr: seq_nr,
-            activity: %{
-              state.activity
-              | last_send_ms: now_ms(),
-                idle_probe_count: 0
-            }
-        }
+        apply_transmit_ok(state, type, payload, seq, increment?)
 
       {:error, reason} ->
         Logger.debug(
@@ -734,6 +701,57 @@ defmodule UTP.Connection do
         )
 
         shutdown(state, reason)
+    end
+  end
+
+  defp apply_transmit_ok(state, type, payload, seq, increment?) do
+    if type == @st_data and byte_size(payload) > 0 do
+      Logger.debug(
+        "[utp] sent_data peer=#{inspect({state.peer_ip, state.peer_port})} seq=#{seq} bytes=#{byte_size(payload)} ack=#{state.ack_nr}"
+      )
+    end
+
+    bytes = byte_size(payload)
+    unacked = update_unacked(state, type, payload, seq, bytes)
+    cur_window = if bytes > 0, do: state.cur_window + bytes, else: state.cur_window
+
+    seq_nr =
+      if increment? do
+        Packet.seq_add(seq, 1)
+      else
+        state.seq_nr
+      end
+
+    %{
+      state
+      | unacked: unacked,
+        cur_window: cur_window,
+        seq_nr: seq_nr,
+        activity: %{
+          state.activity
+          | last_send_ms: now_ms(),
+            idle_probe_count: 0
+        }
+    }
+  end
+
+  defp update_unacked(state, type, payload, seq, bytes) do
+    if type in [@st_data, @st_fin] do
+      # Preserve the retransmit count across re-sends of the same seq so
+      # check_timeouts' give-up (tx_count >= 10) actually fires. The old
+      # code hard-coded tx_count=1 here, making retransmit_loss's manual
+      # bump dead and the give-up branch unreachable.
+      tx_count = next_tx_count(state.unacked, seq)
+      Map.put(state.unacked, seq, {type, payload, now_ms(), tx_count, bytes})
+    else
+      state.unacked
+    end
+  end
+
+  defp next_tx_count(unacked, seq) do
+    case Map.get(unacked, seq) do
+      {_, _, _, prev, _} -> prev + 1
+      nil -> 1
     end
   end
 
@@ -776,36 +794,44 @@ defmodule UTP.Connection do
       end)
 
     state =
-      cond do
-        give_up != nil ->
+      case {give_up, timed_out} do
+        {seq, _} when not is_nil(seq) ->
           Logger.warning(
-            "[utp] give_up seq=#{give_up} peer=#{inspect({state.peer_ip, state.peer_port})}"
+            "[utp] give_up seq=#{seq} peer=#{inspect({state.peer_ip, state.peer_port})}"
           )
 
           shutdown(state, :too_many_retransmits)
 
-        timed_out == [] ->
+        {_, []} ->
           state
 
-        true ->
-          state =
-            state
-            |> Map.put(:timeout_ms, min(state.timeout_ms * 2, 60_000))
-            |> Map.put(:timeout_count, state.timeout_count + 1)
-            |> put_led(LEDBAT.on_timeout(state.led))
-
-          Enum.reduce(timed_out, state, fn seq, acc ->
-            case Map.get(acc.unacked, seq) do
-              nil ->
-                acc
-
-              {type, payload, _sent_ms, _tx_count, _bytes} ->
-                transmit(acc, type, payload, seq, false)
-            end
-          end)
+        {_, _} ->
+          retransmit_timed_out(state, timed_out)
       end
 
     check_idle_timeout(state, now)
+  end
+
+  defp retransmit_timed_out(state, timed_out) do
+    state =
+      state
+      |> Map.put(:timeout_ms, min(state.timeout_ms * 2, 60_000))
+      |> Map.put(:timeout_count, state.timeout_count + 1)
+      |> put_led(LEDBAT.on_timeout(state.led))
+
+    Enum.reduce(timed_out, state, fn seq, acc ->
+      retransmit_unacked_seq(acc, seq)
+    end)
+  end
+
+  defp retransmit_unacked_seq(acc, seq) do
+    case Map.get(acc.unacked, seq) do
+      nil ->
+        acc
+
+      {type, payload, _sent_ms, _tx_count, _bytes} ->
+        transmit(acc, type, payload, seq, false)
+    end
   end
 
   # BEP 29 resets the socket timeout counter on every send or receive and
@@ -830,26 +856,32 @@ defmodule UTP.Connection do
         )
       end
 
-    if (state.phase == :connected and stalled?) && map_size(state.unacked) == 0 &&
-         idle_for >= probe_timeout do
-      if state.activity.idle_probe_count >= @max_idle_probes do
-        Logger.warning(
-          "[utp] idle_timeout peer=#{inspect({state.peer_ip, state.peer_port})} probes=#{state.activity.idle_probe_count}"
-        )
-
-        shutdown(state, :idle_timeout)
-      else
-        probe_count = state.activity.idle_probe_count
-
-        state
-        |> put_led(LEDBAT.on_timeout(state.led))
-        |> send_state_ack()
-        |> then(fn state ->
-          %{state | activity: %{state.activity | idle_probe_count: probe_count + 1}}
-        end)
-      end
+    if idle_probe_due?(state, stalled?, idle_for, probe_timeout) do
+      apply_idle_probe(state)
     else
       state
+    end
+  end
+
+  defp idle_probe_due?(state, stalled?, idle_for, probe_timeout) do
+    state.phase == :connected and stalled? and map_size(state.unacked) == 0 and
+      idle_for >= probe_timeout
+  end
+
+  defp apply_idle_probe(state) do
+    if state.activity.idle_probe_count >= @max_idle_probes do
+      Logger.warning(
+        "[utp] idle_timeout peer=#{inspect({state.peer_ip, state.peer_port})} probes=#{state.activity.idle_probe_count}"
+      )
+
+      shutdown(state, :idle_timeout)
+    else
+      probe_count = state.activity.idle_probe_count
+
+      state
+      |> put_led(LEDBAT.on_timeout(state.led))
+      |> send_state_ack()
+      |> Map.update!(:activity, fn activity -> %{activity | idle_probe_count: probe_count + 1} end)
     end
   end
 
@@ -969,22 +1001,26 @@ defmodule UTP.Connection do
 
         bitmask =
           for byte_index <- 0..(byte_count - 1), into: <<>> do
-            byte =
-              Enum.reduce(0..7, 0, fn bit_index, acc ->
-                offset = byte_index * 8 + bit_index
-
-                if MapSet.member?(offsets, offset) do
-                  Bitwise.bor(acc, Bitwise.bsl(1, bit_index))
-                else
-                  acc
-                end
-              end)
-
-            <<byte>>
+            sack_bitmask_byte(offsets, byte_index)
           end
 
         [{:selective_ack, bitmask}]
     end
+  end
+
+  defp sack_bitmask_byte(offsets, byte_index) do
+    byte =
+      Enum.reduce(0..7, 0, fn bit_index, acc ->
+        offset = byte_index * 8 + bit_index
+
+        if MapSet.member?(offsets, offset) do
+          Bitwise.bor(acc, Bitwise.bsl(1, bit_index))
+        else
+          acc
+        end
+      end)
+
+    <<byte>>
   end
 
   defp put_led(state, led), do: %{state | led: led}

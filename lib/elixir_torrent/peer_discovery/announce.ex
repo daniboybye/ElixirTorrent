@@ -1,4 +1,8 @@
 defmodule PeerDiscovery.Announce do
+  @moduledoc """
+  GenServer scheduling HTTP/UDP tracker announces, scrapes, and DHT peer merges per torrent.
+  """
+
   @enforce_keys [:torrent_pid, :hash]
   defstruct torrent_pid: nil,
             hash: nil,
@@ -48,6 +52,8 @@ defmodule PeerDiscovery.Announce do
 
   import Process, only: [send_after: 3]
 
+  alias Acceptor.Connection.Handshakes
+  alias Peer.UtPex.Outbound
   alias PeerDiscovery.Requests
   alias Torrent.{Model, Swarm}
   require Logger
@@ -217,7 +223,7 @@ defmodule PeerDiscovery.Announce do
 
   @doc false
   @spec under_target_tier_fanout() :: pos_integer()
-  def under_target_tier_fanout(), do: @under_target_tier_fanout
+  def under_target_tier_fanout, do: @under_target_tier_fanout
 
   @doc false
   @spec tier_batches_active?(%__MODULE__{}) :: boolean()
@@ -293,33 +299,7 @@ defmodule PeerDiscovery.Announce do
       send(self(), :offer_seed_peers)
     end
 
-    cond do
-      tiers != [] ->
-        {state, first_tier, first_status} = resolve_announcable_tier(state, 0)
-
-        Logger.info(
-          "[peer_discovery] first_announce_scheduled hash=#{Torrent.hex_encoded_hash(torrent.hash)} tier=#{first_tier} trackers=#{length(Enum.at(tiers, first_tier) || [])}"
-        )
-
-        if first_status == :live do
-          send(self(), {:parallel_announce, first_tier})
-        end
-
-        if dht_allowed?(state) do
-          send(self(), :dht_lookup)
-        end
-
-      dht_allowed?(state) ->
-        Logger.info(
-          "[peer_discovery] first_announce_scheduled hash=#{Torrent.hex_encoded_hash(torrent.hash)} tier=none dht_only=true"
-        )
-
-        send(self(), :dht_lookup)
-
-      true ->
-        :ok
-    end
-
+    schedule_first_announces(state, tiers)
     if pex_allowed?(state), do: schedule_pex(self(), @pex_interval_ms)
     send_after(self(), :peer_refresh_tick, @peer_refresh_tick_ms)
 
@@ -328,6 +308,50 @@ defmodule PeerDiscovery.Announce do
     end
 
     {:ok, state}
+  end
+
+  @spec schedule_first_announces(%__MODULE__{}, [[String.t()]]) :: :ok
+  defp schedule_first_announces(%__MODULE__{} = state, tiers) do
+    cond do
+      tiers != [] ->
+        {state, first_tier, first_status} = resolve_announcable_tier(state, 0)
+
+        Logger.info(
+          "[peer_discovery] first_announce_scheduled hash=#{Torrent.hex_encoded_hash(state.hash)} tier=#{first_tier} trackers=#{length(Enum.at(tiers, first_tier) || [])}"
+        )
+
+        case first_status do
+          :live -> send(self(), {:parallel_announce, first_tier})
+          :ring_exhausted -> schedule_exhausted_retry(state, first_tier)
+        end
+
+        if dht_allowed?(state), do: send(self(), :dht_lookup)
+
+      dht_allowed?(state) ->
+        Logger.info(
+          "[peer_discovery] first_announce_scheduled hash=#{Torrent.hex_encoded_hash(state.hash)} tier=none dht_only=true"
+        )
+
+        send(self(), :dht_lookup)
+
+      true ->
+        :ok
+    end
+
+    :ok
+  end
+
+  @spec spawn_dht_hash_lookups(%__MODULE__{}, module(), non_neg_integer()) :: %__MODULE__{}
+  defp spawn_dht_hash_lookups(state, dht_module, now_ms) do
+    state =
+      Enum.reduce(dht_hashes(state), %{state | dht_round_peers: []}, fn dht_hash, acc ->
+        %Task{ref: ref} =
+          Task.Supervisor.async_nolink(Requests, dht_module, :get_peers, [dht_hash])
+
+        put_in(acc, [Access.key!(:requests), ref], {:dht, dht_hash})
+      end)
+
+    %{state | last_dht_lookup_ms: now_ms}
   end
 
   def handle_call(:get, _, state),
@@ -449,16 +473,9 @@ defmodule PeerDiscovery.Announce do
 
           :ok ->
             dht_module = state.dht_module
-
-            state =
-              Enum.reduce(dht_hashes(state), %{state | dht_round_peers: []}, fn dht_hash, acc ->
-                %Task{ref: ref} =
-                  Task.Supervisor.async_nolink(Requests, dht_module, :get_peers, [dht_hash])
-
-                put_in(acc, [Access.key!(:requests), ref], {:dht, dht_hash})
-              end)
-
-            {:noreply, %{state | last_dht_lookup_ms: now}}
+            now_ms = now
+            state = spawn_dht_hash_lookups(state, dht_module, now_ms)
+            {:noreply, state}
         end
     end
   end
@@ -674,25 +691,28 @@ defmodule PeerDiscovery.Announce do
     else
       {state, tier_index, resolve_status} = resolve_announcable_tier(state, start_tier)
 
-      cond do
-        resolve_status == :ring_exhausted ->
-          state
-
-        true ->
-          case Enum.fetch(state.tiers, tier_index) do
-            {:ok, tier} when tier != [] ->
-              start_parallel_tier(state, tier_index, tier)
-
-            {:ok, []} ->
-              next = next_tier_index(state.tiers, tier_index)
-              schedule_parallel_announce(state, next, dead_tier_advance_sec(state, tier_index))
-              state
-
-            :error ->
-              send(self(), {:parallel_announce, 0})
-              state
-          end
+      if resolve_status == :ring_exhausted do
+        schedule_exhausted_retry(state, tier_index)
+      else
+        start_announcable_tier(state, tier_index)
       end
+    end
+  end
+
+  @spec start_announcable_tier(%__MODULE__{}, non_neg_integer()) :: %__MODULE__{}
+  defp start_announcable_tier(%__MODULE__{tiers: tiers} = state, tier_index) do
+    case Enum.fetch(tiers, tier_index) do
+      {:ok, tier} when tier != [] ->
+        start_parallel_tier(state, tier_index, tier)
+
+      {:ok, []} ->
+        next = next_tier_index(tiers, tier_index)
+        schedule_parallel_announce(state, next, dead_tier_advance_sec(state, tier_index))
+        state
+
+      :error ->
+        send(self(), {:parallel_announce, 0})
+        state
     end
   end
 
@@ -711,30 +731,44 @@ defmodule PeerDiscovery.Announce do
 
       case tiers_to_start do
         [] ->
-          {_state, tier_index, status} = resolve_announcable_tier(state, start_tier)
-
-          if status == :ring_exhausted do
-            schedule_parallel_announce(
-              state,
-              tier_index,
-              dead_tier_advance_sec(state, start_tier)
-            )
-          end
-
-          {:noreply, state}
+          {:noreply, maybe_schedule_exhausted_fanout(state, start_tier)}
 
         started ->
           high_tier = started |> Enum.map(&elem(&1, 0)) |> Enum.max()
-
-          state =
-            Enum.reduce(started, %{state | fanout_high_tier: high_tier}, fn {tier_index, tier},
-                                                                            acc ->
-              start_parallel_tier(acc, tier_index, tier)
-            end)
-
+          state = apply_fanout_tier_starts(state, started, high_tier)
           {:noreply, state}
       end
     end
+  end
+
+  @spec maybe_schedule_exhausted_fanout(%__MODULE__{}, non_neg_integer()) :: %__MODULE__{}
+  defp maybe_schedule_exhausted_fanout(state, start_tier) do
+    {_state, tier_index, status} = resolve_announcable_tier(state, start_tier)
+
+    if status == :ring_exhausted do
+      schedule_exhausted_retry(state, tier_index)
+    end
+
+    state
+  end
+
+  @spec schedule_exhausted_retry(%__MODULE__{}, non_neg_integer()) :: %__MODULE__{}
+  defp schedule_exhausted_retry(state, tier_index) do
+    interval = parallel_tier_reschedule_sec(state, Tracker.default_interval())
+    schedule_parallel_announce(state, tier_index, interval)
+    state
+  end
+
+  @spec apply_fanout_tier_starts(
+          %__MODULE__{},
+          [{non_neg_integer(), [String.t()]}],
+          non_neg_integer()
+        ) ::
+          %__MODULE__{}
+  defp apply_fanout_tier_starts(state, started, high_tier) do
+    Enum.reduce(started, %{state | fanout_high_tier: high_tier}, fn {tier_index, tier}, acc ->
+      start_parallel_tier(acc, tier_index, tier)
+    end)
   end
 
   @spec collect_fanout_tiers(%__MODULE__{}, non_neg_integer(), pos_integer()) ::
@@ -809,67 +843,95 @@ defmodule PeerDiscovery.Announce do
 
       do_collect_fanout_tiers(state, next, max_count, hops + 1, now_ms, tier_count, selected, acc)
     else
-      {state, resolved_index, status} = resolve_announcable_tier(state, tier_index)
+      ctx = %{
+        max_count: max_count,
+        hops: hops,
+        now_ms: now_ms,
+        tier_count: tier_count,
+        selected: selected,
+        acc: acc
+      }
 
-      cond do
-        status == :ring_exhausted and acc == [] ->
-          {state, []}
+      resolve_fanout_tier(state, tiers, tier_index, ctx)
+    end
+  end
 
-        status == :ring_exhausted ->
-          {state, Enum.reverse(acc)}
+  @spec resolve_fanout_tier(%__MODULE__{}, [[String.t()]], non_neg_integer(), map()) ::
+          {%__MODULE__{}, [{non_neg_integer(), [String.t()]}]}
+  defp resolve_fanout_tier(state, tiers, tier_index, ctx) do
+    {state, resolved_index, status} = resolve_announcable_tier(state, tier_index)
 
-        Map.has_key?(batches, resolved_index) or MapSet.member?(selected, resolved_index) ->
-          next = next_tier_index(tiers, resolved_index)
+    cond do
+      status == :ring_exhausted and ctx.acc == [] ->
+        {state, []}
 
-          do_collect_fanout_tiers(
-            state,
-            next,
-            max_count,
-            hops + 1,
-            now_ms,
-            tier_count,
-            selected,
-            acc
-          )
+      status == :ring_exhausted ->
+        {state, Enum.reverse(ctx.acc)}
 
-        true ->
-          case Enum.fetch(tiers, resolved_index) do
-            {:ok, tier} ->
-              alive = announcable_trackers_in_tier(state, tier, now_ms)
+      Map.has_key?(state.tier_batches, resolved_index) or
+          MapSet.member?(ctx.selected, resolved_index) ->
+        next = next_tier_index(tiers, resolved_index)
 
-              if alive != [] do
-                next = next_tier_index(tiers, resolved_index)
-                selected = MapSet.put(selected, resolved_index)
+        do_collect_fanout_tiers(
+          state,
+          next,
+          ctx.max_count,
+          ctx.hops + 1,
+          ctx.now_ms,
+          ctx.tier_count,
+          ctx.selected,
+          ctx.acc
+        )
 
-                do_collect_fanout_tiers(
-                  state,
-                  next,
-                  max_count,
-                  hops + 1,
-                  now_ms,
-                  tier_count,
-                  selected,
-                  [{resolved_index, tier} | acc]
-                )
-              else
-                next = next_tier_index(tiers, resolved_index)
+      true ->
+        fanout_fetch_tier(state, tiers, resolved_index, ctx)
+    end
+  end
 
-                do_collect_fanout_tiers(
-                  state,
-                  next,
-                  max_count,
-                  hops + 1,
-                  now_ms,
-                  tier_count,
-                  selected,
-                  acc
-                )
-              end
+  @spec fanout_fetch_tier(%__MODULE__{}, [[String.t()]], non_neg_integer(), map()) ::
+          {%__MODULE__{}, [{non_neg_integer(), [String.t()]}]}
+  defp fanout_fetch_tier(state, tiers, resolved_index, ctx) do
+    case Enum.fetch(tiers, resolved_index) do
+      {:ok, tier} -> fanout_add_tier(state, tiers, resolved_index, tier, ctx)
+      :error -> {state, Enum.reverse(ctx.acc)}
+    end
+  end
 
-            :error ->
-              {state, Enum.reverse(acc)}
-          end
-      end
+  @spec fanout_add_tier(
+          %__MODULE__{},
+          [[String.t()]],
+          non_neg_integer(),
+          [String.t()],
+          map()
+        ) :: {%__MODULE__{}, [{non_neg_integer(), [String.t()]}]}
+  defp fanout_add_tier(state, tiers, resolved_index, tier, ctx) do
+    alive = announcable_trackers_in_tier(state, tier, ctx.now_ms)
+    next = next_tier_index(tiers, resolved_index)
+
+    if alive != [] do
+      selected = MapSet.put(ctx.selected, resolved_index)
+
+      do_collect_fanout_tiers(
+        state,
+        next,
+        ctx.max_count,
+        ctx.hops + 1,
+        ctx.now_ms,
+        ctx.tier_count,
+        selected,
+        [{resolved_index, tier} | ctx.acc]
+      )
+    else
+      do_collect_fanout_tiers(
+        state,
+        next,
+        ctx.max_count,
+        ctx.hops + 1,
+        ctx.now_ms,
+        ctx.tier_count,
+        ctx.selected,
+        ctx.acc
+      )
     end
   end
 
@@ -1220,7 +1282,6 @@ defmodule PeerDiscovery.Announce do
         {Map.put(state, :tier_index, next), next, :live}
 
       hops + 1 >= tier_count ->
-        schedule_parallel_announce(state, next, dead_tier_advance_sec(state, tier_index))
         {state, tier_index, :ring_exhausted}
 
       true ->
@@ -1241,8 +1302,9 @@ defmodule PeerDiscovery.Announce do
   defp announcable_trackers_in_tier(%__MODULE__{} = state, tier, now_ms) do
     tier
     |> Enum.reject(&MapSet.member?(state.disabled, &1))
-    |> Enum.filter(&tracker_retry_ready?(state, &1, now_ms))
-    |> Enum.filter(&tracker_alive?(state, &1, now_ms))
+    |> Enum.filter(fn url ->
+      tracker_retry_ready?(state, url, now_ms) and tracker_alive?(state, url, now_ms)
+    end)
   end
 
   @spec tracker_retry_ready?(%__MODULE__{}, String.t(), integer()) :: boolean()
@@ -1307,7 +1369,7 @@ defmodule PeerDiscovery.Announce do
         live = Peer.UtPex.snapshot_map(hash)
 
         {current, _drained} =
-          Peer.UtPex.Outbound.prepare_current(hash, live,
+          Outbound.prepare_current(hash, live,
             supplement_recent?: true,
             drain_recent?: true
           )
@@ -1442,7 +1504,7 @@ defmodule PeerDiscovery.Announce do
     merged =
       (tracker_peers ++ dht_peers ++ dht_round_peers ++ seed_peers)
       |> Enum.uniq_by(&{&1.ip, &1.port})
-      |> Enum.reject(&Acceptor.Connection.Handshakes.local_endpoint?(&1.ip, &1.port, listen_port))
+      |> Enum.reject(&Handshakes.local_endpoint?(&1.ip, &1.port, listen_port))
 
     if merged != [] do
       Logger.debug(
@@ -1588,8 +1650,9 @@ defmodule PeerDiscovery.Announce do
       tiers
       |> List.flatten()
       |> Enum.uniq()
-      |> Enum.reject(&MapSet.member?(disabled, &1))
-      |> Enum.reject(&scrape_unsupported?(state, &1))
+      |> Enum.reject(fn url ->
+        MapSet.member?(disabled, url) or scrape_unsupported?(state, url)
+      end)
 
     if urls == [] do
       state
