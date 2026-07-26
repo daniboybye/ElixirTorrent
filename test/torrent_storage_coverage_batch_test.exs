@@ -237,6 +237,7 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
     end
 
+    @tag race_group: :uploader
     test "peer teardown during completion quietly cancels the upload" do
       piece0 = random_piece()
       {torrent, _} = build_tiny_torrent([piece0])
@@ -266,6 +267,7 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
     end
 
+    @tag race_group: :uploader
     test "unexpected callback exits remain visible" do
       piece0 = random_piece()
       {torrent, _} = build_tiny_torrent([piece0])
@@ -293,6 +295,7 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
     end
 
+    @tag race_group: :uploader
     test "cancel terminates an in-flight upload task registered in Registry" do
       piece0 = random_piece()
       {torrent, _} = build_tiny_torrent([piece0])

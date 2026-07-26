@@ -51,6 +51,43 @@ defmodule Magnet.FetcherTest do
     refute_receive {:magnet_fetch, ^ref, _}, 1_000
   end
 
+  @tag race_group: :network
+  test "caller death detaches without orphaning the persistent fetch session" do
+    magnet = %Magnet{
+      hash: <<15::160>>,
+      trackers: [],
+      x_pe_peers: [%Peer{ip: {127, 0, 0, 1}, port: 1}],
+      display_name: nil
+    }
+
+    previous = Application.get_env(:elixir_torrent, :dht, [])
+    {caller, caller_monitor, caller_release} = TestSupport.Sync.spawn_blocked()
+
+    on_exit(fn ->
+      Magnet.Fetcher.cancel(magnet.hash)
+      Application.put_env(:elixir_torrent, :dht, previous)
+    end)
+
+    Application.put_env(:elixir_torrent, :dht, enabled: false)
+
+    assert {:ok, _ref} = Magnet.Fetcher.run(magnet, caller)
+    [{session, _}] = Registry.lookup(Registry, {:magnet_fetch, magnet.hash})
+    session_monitor = Process.monitor(session)
+    1 = :erlang.trace(session, true, [:receive])
+
+    TestSupport.Sync.release(caller, caller_release)
+    TestSupport.Sync.await_down(caller_monitor, caller)
+
+    assert_receive {:trace, ^session, :receive, {:DOWN, _, :process, ^caller, _}}, 2_000
+    _ = :erlang.trace(session, false, [:receive])
+
+    assert %{caller: nil} = TestSupport.Sync.sync(session)
+    refute_received {:DOWN, ^session_monitor, :process, ^session, _}
+
+    assert :ok = Magnet.Fetcher.cancel(magnet.hash)
+    assert_receive {:DOWN, ^session_monitor, :process, ^session, _}, 2_000
+  end
+
   test "round_backoff_ms increases with cap" do
     assert Magnet.Fetcher.round_backoff_ms(1) == 30_000
     assert Magnet.Fetcher.round_backoff_ms(2) == 35_000
