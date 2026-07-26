@@ -109,11 +109,19 @@ defmodule TrackerHTTPDecodeTest do
       p1 = %Peer{ip: {1, 2, 3, 4}, port: 6881}
       p2 = %Peer{ip: {5, 6, 7, 8}, port: 6882}
 
-      a = %Response{interval: 1_800, complete: 3, incomplete: 7, peers: [p1]}
+      a = %Response{
+        interval: 1_800,
+        min_interval: 1_800,
+        complete: 3,
+        incomplete: 7,
+        peers: [p1]
+      }
+
       b = %Response{interval: 900, complete: 10, incomplete: 2, peers: [p1, p2]}
 
       assert %Response{
                interval: 900,
+               min_interval: 1_800,
                complete: 10,
                incomplete: 7,
                peers: merged
@@ -121,6 +129,34 @@ defmodule TrackerHTTPDecodeTest do
 
       assert length(merged) == 2
       assert MapSet.new(merged) == MapSet.new([p1, p2])
+    end
+
+    test "takes the strictest minimum interval independent of response order" do
+      responses = [
+        %Response{interval: 1_800, min_interval: nil, complete: 1, incomplete: 1, peers: []},
+        %Response{interval: 900, min_interval: 120, complete: 1, incomplete: 1, peers: []},
+        %Response{
+          interval: 1_200,
+          min_interval: 1_800,
+          complete: 1,
+          incomplete: 1,
+          peers: []
+        }
+      ]
+
+      assert %Response{interval: 900, min_interval: 1_800} =
+               Tracker.merge_http_announces_for_test(responses)
+
+      assert %Response{interval: 900, min_interval: 1_800} =
+               Tracker.merge_http_announces_for_test(Enum.reverse(responses))
+    end
+
+    test "keeps nil minimum interval when no response declares a floor" do
+      a = %Response{interval: 1_800, complete: 1, incomplete: 1, peers: []}
+      b = %Response{interval: 900, complete: 1, incomplete: 1, peers: []}
+
+      assert %Response{interval: 900, min_interval: nil} =
+               Tracker.merge_http_announces_for_test([a, b])
     end
 
     test "returns first error when every announce failed" do

@@ -785,12 +785,20 @@ defmodule Tracker do
 
     %Response{
       interval: min(a.interval, b.interval),
+      min_interval: merge_min_interval(a.min_interval, b.min_interval),
       complete: max(a.complete, b.complete),
       incomplete: max(a.incomplete, b.incomplete),
       external_ip: a.external_ip || b.external_ip,
       peers: peers
     }
   end
+
+  @spec merge_min_interval(non_neg_integer() | nil, non_neg_integer() | nil) ::
+          non_neg_integer() | nil
+  defp merge_min_interval(nil, nil), do: nil
+  defp merge_min_interval(nil, value), do: value
+  defp merge_min_interval(value, nil), do: value
+  defp merge_min_interval(left, right), do: max(left, right)
 
   @doc """
   BEP 15 § Connect — obtain a connection_id with exponential backoff retransmission.
