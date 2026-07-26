@@ -33,12 +33,20 @@ defmodule Torrent.Uploader do
 
         {:ok, block} = FileHandle.read(hash, index, begin, length)
 
-        case callback.(block) do
+        case deliver_callback(callback, block) do
           :cancelled -> :ok
           _ -> Model.uploaded_subpiece(hash, length)
         end
       end
     )
+  end
+
+  @spec deliver_callback((iodata() -> any()), iodata()) :: any()
+  defp deliver_callback(callback, block) do
+    callback.(block)
+  catch
+    :exit, :noproc -> :cancelled
+    :exit, {:noproc, _call} -> :cancelled
   end
 
   @spec cancel(

@@ -232,6 +232,62 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
     end
 
+    test "peer teardown during completion quietly cancels the upload" do
+      piece0 = random_piece()
+      {torrent, _} = build_tiny_torrent([piece0])
+      hash = torrent.hash
+      {controller, controller_ref} = spawn_monitor(fn -> :ok end)
+      parent = self()
+      release = make_ref()
+
+      assert_receive {:DOWN, ^controller_ref, :process, ^controller, :normal}, 1_000
+
+      with_storage_stack(torrent, fn _ ->
+        write_piece!(hash, 0, piece0)
+        start_uploader_supervisor(hash)
+
+        assert {:ok, task_pid} =
+                 Uploader.request(hash, @peer_a, 0, 0, 128, fn block ->
+                   send(parent, {:upload_callback_ready, self()})
+                   receive do: (^release -> :ok)
+                   GenServer.call(controller, {:complete_upload, 0, 0, 128, block})
+                 end)
+
+        assert_receive {:upload_callback_ready, ^task_pid}, 2_000
+        task_ref = Process.monitor(task_pid)
+        send(task_pid, release)
+        assert_receive {:DOWN, ^task_ref, :process, ^task_pid, :normal}, 2_000
+        assert Model.get(hash, :uploaded) == 0
+      end)
+    end
+
+    test "unexpected callback exits remain visible" do
+      piece0 = random_piece()
+      {torrent, _} = build_tiny_torrent([piece0])
+      hash = torrent.hash
+      parent = self()
+      release = make_ref()
+
+      with_storage_stack(torrent, fn _ ->
+        write_piece!(hash, 0, piece0)
+        start_uploader_supervisor(hash)
+
+        assert {:ok, task_pid} =
+                 Uploader.request(hash, @peer_a, 0, 0, 64, fn _block ->
+                   send(parent, {:failing_callback_ready, self()})
+                   receive do: (^release -> :ok)
+                   exit(:upload_callback_failure)
+                 end)
+
+        assert_receive {:failing_callback_ready, ^task_pid}, 2_000
+        task_ref = Process.monitor(task_pid)
+        send(task_pid, release)
+
+        assert_receive {:DOWN, ^task_ref, :process, ^task_pid, :upload_callback_failure}, 2_000
+        assert Model.get(hash, :uploaded) == 0
+      end)
+    end
+
     test "cancel terminates an in-flight upload task registered in Registry" do
       piece0 = random_piece()
       {torrent, _} = build_tiny_torrent([piece0])
