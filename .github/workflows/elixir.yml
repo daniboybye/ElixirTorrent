@@ -55,7 +55,9 @@ jobs:
         run: mix format --check-formatted
 
       - name: Compile without warnings
-        run: mix compile --warnings-as-errors
+        run: |
+          mix compile --warnings-as-errors
+          MIX_ENV=test mix compile --warnings-as-errors
 
       - name: Run Dialyzer
         run: mix dialyzer
@@ -64,4 +66,4 @@ jobs:
         run: mix credo --strict --all
 
       - name: Run tests
-        run: timeout 60s mix test
+        run: timeout 60s mix test --no-compile

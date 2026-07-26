@@ -132,6 +132,31 @@ defmodule Peer.ConnectionManagerTest do
     assert map_size(state.queue) == 2
   end
 
+  test "stopping the manager terminates its active dial batch" do
+    hash = :crypto.strong_rand_bytes(20)
+    name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
+    {:ok, manager_pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: name)
+    test_pid = self()
+
+    {:ok, dial_pid} =
+      Task.start(fn ->
+        send(test_pid, :dial_task_started)
+        Process.sleep(:infinity)
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(manager_pid), do: GenServer.stop(manager_pid, :normal, 1_000)
+      if Process.alive?(dial_pid), do: Process.exit(dial_pid, :kill)
+    end)
+
+    assert_receive :dial_task_started, 1_000
+    :sys.replace_state(manager_pid, &%{&1 | dialing?: true, dial_task: dial_pid})
+
+    ref = Process.monitor(dial_pid)
+    assert :ok = GenServer.stop(manager_pid, :normal, 1_000)
+    assert_receive {:DOWN, ^ref, :process, ^dial_pid, :shutdown}, 1_000
+  end
+
   describe "source-aware candidate retention (PEX item 5)" do
     alias Peer.ConnectionManager.Queue, as: DialQueue
 

@@ -117,7 +117,7 @@ defmodule Peer.ConnectionManager do
   def init(hash) do
     send_after(self(), :tick, @normal_interval_ms)
     # nil = never snubbed; monotonic ms can be negative so 0 is not a safe sentinel.
-    {:ok, %{hash: hash, queue: %{}, dialing?: false, last_snub_ms: nil}}
+    {:ok, %{hash: hash, queue: %{}, dialing?: false, dial_task: nil, last_snub_ms: nil}}
   end
 
   @impl true
@@ -179,11 +179,19 @@ defmodule Peer.ConnectionManager do
     connected = Swarm.count(hash)
     record_failures(hash, results, connected)
 
-    state = %{state | queue: queue, dialing?: false}
+    state = %{state | queue: queue, dialing?: false, dial_task: nil}
     maybe_replenish_discovery(state, connected)
 
     maybe_dial(state, connected)
   end
+
+  @impl true
+  def terminate(_reason, %{dial_task: pid}) when is_pid(pid) do
+    if Process.alive?(pid), do: Process.exit(pid, :shutdown)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
 
   defp handle_tick(state, hash, connected) do
     cond do
@@ -283,12 +291,13 @@ defmodule Peer.ConnectionManager do
       selected_keys = Enum.map(peers, fn p -> {p.ip, p.port} end)
       parent = self()
 
-      Task.start(fn ->
-        results = Handshakes.dial_peers(peers, hash)
-        send(parent, {:dial_done, selected_keys, results})
-      end)
+      {:ok, dial_task} =
+        Task.start(fn ->
+          results = Handshakes.dial_peers(peers, hash)
+          send(parent, {:dial_done, selected_keys, results})
+        end)
 
-      {:noreply, %{state | dialing?: true}}
+      {:noreply, %{state | dialing?: true, dial_task: dial_task}}
     end
   end
 

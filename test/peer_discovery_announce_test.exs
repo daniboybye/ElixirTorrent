@@ -188,8 +188,8 @@ defmodule PeerDiscoveryAnnounceTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(announce_pid), do: GenServer.stop(announce_pid, :normal, 1_000)
-      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+      safe_stop(announce_pid, 1_000)
+      safe_stop(model_pid, 5_000)
     end)
 
     queries =
@@ -283,7 +283,7 @@ defmodule PeerDiscoveryAnnounceTest do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
     on_exit(fn ->
-      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+      safe_stop(model_pid, 5_000)
     end)
 
     state =
@@ -333,7 +333,7 @@ defmodule PeerDiscoveryAnnounceTest do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
     on_exit(fn ->
-      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+      safe_stop(model_pid, 5_000)
     end)
 
     state =
@@ -397,7 +397,7 @@ defmodule PeerDiscoveryAnnounceTest do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
     on_exit(fn ->
-      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+      safe_stop(model_pid, 5_000)
     end)
 
     :rand.seed(:exsss, seed)
@@ -443,7 +443,7 @@ defmodule PeerDiscoveryAnnounceTest do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
     on_exit(fn ->
-      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+      safe_stop(model_pid, 5_000)
     end)
 
     state =
@@ -519,7 +519,7 @@ defmodule PeerDiscoveryAnnounceTest do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
     on_exit(fn ->
-      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+      safe_stop(model_pid, 5_000)
     end)
 
     {:ok, pid} = GenServer.start_link(PeerDiscovery.Announce, [self(), torrent], name: name)
@@ -527,7 +527,7 @@ defmodule PeerDiscoveryAnnounceTest do
     before = :sys.get_state(pid)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+      safe_stop(pid, 1_000)
     end)
 
     GenServer.cast(pid, :connecting_to_peers)
@@ -605,7 +605,7 @@ defmodule PeerDiscoveryAnnounceTest do
       {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
       on_exit(fn ->
-        if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+        safe_stop(model_pid, 5_000)
       end)
 
       :ok = PeerDiscovery.SeedPeers.put(hash, [seed])
@@ -614,7 +614,7 @@ defmodule PeerDiscoveryAnnounceTest do
       {:ok, pid} = GenServer.start_link(PeerDiscovery.Announce, [self(), torrent], name: name)
 
       on_exit(fn ->
-        if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+        safe_stop(pid, 1_000)
       end)
 
       Process.sleep(20)
@@ -905,7 +905,7 @@ defmodule PeerDiscoveryAnnounceTest do
       {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
       on_exit(fn ->
-        if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+        safe_stop(model_pid, 5_000)
       end)
 
       state =
@@ -1081,7 +1081,7 @@ defmodule PeerDiscoveryAnnounceTest do
       {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
       on_exit(fn ->
-        if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+        safe_stop(model_pid, 5_000)
       end)
 
       start_swarm_with_connected(hash, 80)
@@ -1217,5 +1217,12 @@ defmodule PeerDiscoveryAnnounceTest do
     assert Announce.expected_tracker_failure_reason?({:nxdomain, ~c"dead.example"})
     refute Announce.expected_tracker_failure_reason?(:bad_response)
     refute Announce.expected_tracker_failure_reason?(:invalid_bencode)
+  end
+
+  defp safe_stop(pid, timeout) do
+    GenServer.stop(pid, :normal, timeout)
+  catch
+    :exit, :noproc -> :ok
+    :exit, {:noproc, _call} -> :ok
   end
 end
