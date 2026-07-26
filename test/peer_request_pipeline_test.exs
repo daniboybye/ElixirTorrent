@@ -424,11 +424,7 @@ defmodule PeerRequestPipelineTest do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
     on_exit(fn ->
-      try do
-        if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
-      catch
-        :exit, _ -> :ok
-      end
+      TestSupport.Sync.safe_stop(model_pid, 5_000)
     end)
 
     :ok = Torrent.PiecesStatistic.init(torrent)
@@ -488,9 +484,7 @@ defmodule PeerRequestPipelineTest do
   end
 
   defp stop_piece(pid) do
-    if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
-  catch
-    :exit, _ -> :ok
+    TestSupport.Sync.safe_stop(pid, 1_000)
   end
 end
 

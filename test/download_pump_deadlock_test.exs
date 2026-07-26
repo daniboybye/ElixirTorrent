@@ -36,7 +36,7 @@ defmodule DownloadPumpDeadlockTest do
 
       on_exit(fn ->
         try do
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+          TestSupport.Sync.safe_stop(pid, 1_000)
         catch
           :exit, _ -> :ok
         end
@@ -62,7 +62,7 @@ defmodule DownloadPumpDeadlockTest do
 
       on_exit(fn ->
         try do
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+          TestSupport.Sync.safe_stop(pid, 1_000)
         catch
           :exit, _ -> :ok
         end
@@ -107,7 +107,7 @@ defmodule DownloadPumpDeadlockTest do
 
       on_exit(fn ->
         try do
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+          TestSupport.Sync.safe_stop(pid, 1_000)
         catch
           :exit, _ -> :ok
         end
@@ -183,18 +183,14 @@ defmodule DownloadPumpDeadlockTest do
     with_model(torrent, fn _ ->
       {:ok, pid} = GenServer.start(Torrent.Controller, hash)
 
-      on_exit(fn ->
-        try do
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 500)
-        catch
-          :exit, _ -> :ok
-        end
-      end)
-
-      send(pid, :reconcile_pump)
-      send(pid, :reconcile_pump)
-      TestSupport.Sync.sync(pid)
-      assert Process.alive?(pid)
+      try do
+        send(pid, :reconcile_pump)
+        send(pid, :reconcile_pump)
+        TestSupport.Sync.sync(pid)
+        assert Process.alive?(pid)
+      after
+        TestSupport.Sync.safe_stop(pid, 500)
+      end
     end)
   end
 
@@ -276,7 +272,7 @@ defmodule DownloadPumpDeadlockTest do
 
     on_exit(fn ->
       try do
-        if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+        TestSupport.Sync.safe_stop(model_pid, 5_000)
       catch
         :exit, _ -> :ok
       end
@@ -308,14 +304,14 @@ defmodule DownloadPumpDeadlockTest do
 
   defp cleanup_workers(piece_pid, peer_pid) do
     try do
-      if Process.alive?(piece_pid), do: GenServer.stop(piece_pid, :normal, 1_000)
+      TestSupport.Sync.safe_stop(piece_pid, 1_000)
     catch
       :exit, _ -> :ok
     end
 
     if peer_pid do
       try do
-        if Process.alive?(peer_pid), do: GenServer.stop(peer_pid, :normal, 1_000)
+        TestSupport.Sync.safe_stop(peer_pid, 1_000)
       catch
         :exit, _ -> :ok
       end

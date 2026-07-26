@@ -51,11 +51,12 @@ defmodule TestSupport.Sync do
     try do
       fun.()
     after
-      resume_if_alive(pid)
+      safe_resume(pid)
     end
   end
 
-  defp resume_if_alive(pid) do
+  @spec safe_resume(pid()) :: :ok
+  def safe_resume(pid) do
     :sys.resume(pid)
   catch
     :exit, :noproc -> :ok

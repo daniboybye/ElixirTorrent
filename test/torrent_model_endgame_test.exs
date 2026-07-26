@@ -69,8 +69,6 @@ defmodule Torrent.ModelEndgameTest do
   end
 
   defp stop_model(pid) do
-    if Process.alive?(pid), do: GenServer.stop(pid, :normal, 5_000)
-  catch
-    :exit, _ -> :ok
+    TestSupport.Sync.safe_stop(pid, 5_000)
   end
 end

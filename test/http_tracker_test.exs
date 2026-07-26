@@ -94,7 +94,7 @@ defmodule HTTPTrackerTest do
     {:ok, pid} = Torrent.Model.start_link(torrent)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid)
+      TestSupport.Sync.safe_stop(pid)
       Torrent.Session.delete(torrent.hash)
     end)
   end

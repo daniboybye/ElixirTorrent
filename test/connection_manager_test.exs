@@ -93,7 +93,7 @@ defmodule Peer.ConnectionManagerTest do
     {:ok, pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: name)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+      TestSupport.Sync.safe_stop(pid, 1_000)
     end)
 
     endpoint = {10, 0, 0, 1}
@@ -119,7 +119,7 @@ defmodule Peer.ConnectionManagerTest do
     {:ok, pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: name)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+      TestSupport.Sync.safe_stop(pid, 1_000)
     end)
 
     peers = [
@@ -143,8 +143,8 @@ defmodule Peer.ConnectionManagerTest do
     {dial_pid, _dial_mon, _dial_release} = TestSupport.Sync.spawn_blocked()
 
     on_exit(fn ->
-      if Process.alive?(manager_pid), do: GenServer.stop(manager_pid, :normal, 1_000)
-      if Process.alive?(dial_pid), do: Process.exit(dial_pid, :kill)
+      TestSupport.Sync.safe_stop(manager_pid, 1_000)
+      Process.exit(dial_pid, :kill)
     end)
 
     :sys.replace_state(manager_pid, &%{&1 | dialing?: true, dial_task: dial_pid})
@@ -162,7 +162,7 @@ defmodule Peer.ConnectionManagerTest do
     test "discovery ownership survives a remote PEX drop" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_isolated_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       ep = %Peer{ip: pub4(1), port: 9001}
       supplier = <<1::160>>
@@ -178,7 +178,7 @@ defmodule Peer.ConnectionManagerTest do
     test "two PEX suppliers — drop from one leaves the other's tag" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_isolated_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       ep = %Peer{ip: pub4(2), port: 9002}
       a = <<2::160>>
@@ -211,7 +211,7 @@ defmodule Peer.ConnectionManagerTest do
     test "sole PEX source drop removes endpoint from queue" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_isolated_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       ep = %Peer{ip: pub4(3), port: 9003}
       supplier = <<4::160>>
@@ -316,13 +316,7 @@ defmodule Peer.ConnectionManagerTest do
     end
 
     defp safe_stop(pid) when is_pid(pid) do
-      if Process.alive?(pid) do
-        try do
-          GenServer.stop(pid, :normal, 1_000)
-        catch
-          :exit, _ -> :ok
-        end
-      end
+      TestSupport.Sync.safe_stop(pid, 1_000)
     end
 
     defp setup_escalation_scenario(connected, opts \\ []) do

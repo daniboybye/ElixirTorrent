@@ -113,7 +113,7 @@ defmodule PeerHashIntegrationTest do
     end
 
     try do
-      if Process.alive?(sender_pid), do: GenServer.stop(sender_pid, :normal, 500)
+      TestSupport.Sync.safe_stop(sender_pid, 500)
     catch
       :exit, _ -> :ok
     end

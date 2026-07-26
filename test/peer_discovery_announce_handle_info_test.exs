@@ -21,14 +21,14 @@ defmodule PeerDiscoveryAnnounceHandleInfoTest do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
     on_exit(fn ->
-      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+      TestSupport.Sync.safe_stop(model_pid, 5_000)
     end)
 
     name = {:via, Registry, {Registry, {hash, PeerDiscovery.Announce}}}
     {:ok, pid} = GenServer.start_link(Announce, [self(), torrent], name: name)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+      TestSupport.Sync.safe_stop(pid, 1_000)
     end)
 
     {pid, hash}

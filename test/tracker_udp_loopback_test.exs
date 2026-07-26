@@ -20,7 +20,7 @@ defmodule TrackerUDPLoopbackTest do
       {port, server_pid} = start_bep15_server(announce_peers: peers)
 
       on_exit(fn ->
-        if Process.alive?(server_pid), do: Process.exit(server_pid, :kill)
+        Process.exit(server_pid, :kill)
       end)
 
       stats = [uploaded: 0, downloaded: 0, left: 16_384, event: Torrent.started()]
@@ -41,7 +41,7 @@ defmodule TrackerUDPLoopbackTest do
       {port, server_pid} = start_bep15_server(scrape_stats: {10, 20, 30})
 
       on_exit(fn ->
-        if Process.alive?(server_pid), do: Process.exit(server_pid, :kill)
+        Process.exit(server_pid, :kill)
       end)
 
       {:ok, socket} =
@@ -57,7 +57,7 @@ defmodule TrackerUDPLoopbackTest do
       {port, server_pid} = start_bep15_server(scrape_stats: {1, 2, 3})
 
       on_exit(fn ->
-        if Process.alive?(server_pid), do: Process.exit(server_pid, :kill)
+        Process.exit(server_pid, :kill)
       end)
 
       assert %{seeders: 1, leechers: 3, completed: 2} =
@@ -73,7 +73,7 @@ defmodule TrackerUDPLoopbackTest do
         )
 
       on_exit(fn ->
-        if Process.alive?(server_pid), do: Process.exit(server_pid, :kill)
+        Process.exit(server_pid, :kill)
       end)
 
       Application.put_env(:elixir_torrent, :udp_backoff_ms, fn _attempt -> 20 end)
@@ -92,7 +92,7 @@ defmodule TrackerUDPLoopbackTest do
       {port, server_pid} = start_connection_id_retry_server(:expired, self())
 
       on_exit(fn ->
-        if Process.alive?(server_pid), do: Process.exit(server_pid, :kill)
+        Process.exit(server_pid, :kill)
       end)
 
       Application.put_env(:elixir_torrent, :udp_backoff_ms, fn _attempt -> 20 end)
@@ -118,7 +118,7 @@ defmodule TrackerUDPLoopbackTest do
       {port, server_pid} = start_connection_id_retry_server(:valid, self())
 
       on_exit(fn ->
-        if Process.alive?(server_pid), do: Process.exit(server_pid, :kill)
+        Process.exit(server_pid, :kill)
       end)
 
       Application.put_env(:elixir_torrent, :udp_backoff_ms, fn _attempt -> 20 end)
@@ -153,7 +153,7 @@ defmodule TrackerUDPLoopbackTest do
         )
 
       on_exit(fn ->
-        if Process.alive?(server_pid), do: Process.exit(server_pid, :kill)
+        Process.exit(server_pid, :kill)
       end)
 
       result =
@@ -388,7 +388,7 @@ defmodule TrackerUDPLoopbackTest do
         value -> :persistent_term.put(key, value)
       end
 
-      if cache_pid && Process.alive?(cache_pid), do: :sys.resume(cache_pid)
+      if cache_pid, do: TestSupport.Sync.safe_resume(cache_pid)
     end
   end
 end

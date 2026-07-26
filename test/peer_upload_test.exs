@@ -33,7 +33,7 @@ defmodule PeerUploadTest do
       # GenServer.stop on an already-dying process raises an exit, not an
       # exception — rescue never caught it.
       try do
-        if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+        TestSupport.Sync.safe_stop(model_pid, 5_000)
       catch
         :exit, _ -> :ok
       end
@@ -108,7 +108,7 @@ defmodule PeerUploadTest do
 
       on_exit(fn ->
         try do
-          if Process.alive?(sender_pid), do: GenServer.stop(sender_pid, :normal, 1_000)
+          TestSupport.Sync.safe_stop(sender_pid, 1_000)
         catch
           :exit, _ -> :ok
         end

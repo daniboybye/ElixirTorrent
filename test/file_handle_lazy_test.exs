@@ -87,13 +87,13 @@ defmodule FileHandleLazyTest do
 
     on_exit(fn ->
       try do
-        if Process.alive?(fh), do: Supervisor.stop(fh, :normal, 5_000)
+        TestSupport.Sync.safe_stop(fh, 5_000)
       catch
         :exit, _ -> :ok
       end
 
       try do
-        if Process.alive?(model), do: GenServer.stop(model, :normal, 5_000)
+        TestSupport.Sync.safe_stop(model, 5_000)
       catch
         :exit, _ -> :ok
       end

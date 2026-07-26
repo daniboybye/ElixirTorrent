@@ -403,7 +403,7 @@ defmodule TrackerHTTPDecodeTest do
       end)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: Process.exit(pid, :kill)
+      Process.exit(pid, :kill)
       :gen_tcp.close(listen)
     end)
 

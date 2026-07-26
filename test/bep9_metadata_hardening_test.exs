@@ -270,13 +270,7 @@ defmodule Bep9MetadataHardeningTest do
   end
 
   defp stop_quietly(pid) do
-    if is_pid(pid) and Process.alive?(pid) do
-      try do
-        GenServer.stop(pid, :normal, 500)
-      catch
-        :exit, _ -> :ok
-      end
-    end
+    if is_pid(pid), do: TestSupport.Sync.safe_stop(pid, 500)
   end
 end
 

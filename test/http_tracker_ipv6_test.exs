@@ -148,7 +148,7 @@ defmodule HTTPTrackerIPv6Test do
         value -> :persistent_term.put(key, value)
       end
 
-      if cache_pid && Process.alive?(cache_pid), do: :sys.resume(cache_pid)
+      if cache_pid, do: TestSupport.Sync.safe_resume(cache_pid)
     end
   end
 end

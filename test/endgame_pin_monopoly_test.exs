@@ -96,13 +96,16 @@ defmodule EndgamePinMonopolyTest do
           )
 
         {:ok, controller} = GenServer.start(Torrent.Controller, hash)
-        on_exit(fn -> safe_stop(controller) end)
 
-        send(controller, :reconcile_pump)
-        TestSupport.Sync.sync(controller)
+        try do
+          send(controller, :reconcile_pump)
+          TestSupport.Sync.sync(controller)
 
-        # Endgame reconcile must have attempted piece 1, not only the monopoly index 0.
-        assert Peer.Controller.download_piece(key) in [0, 1]
+          # Endgame reconcile must have attempted piece 1, not only the monopoly index 0.
+          assert Peer.Controller.download_piece(key) in [0, 1]
+        after
+          safe_stop(controller)
+        end
       end)
     end
   end
@@ -263,9 +266,7 @@ defmodule EndgamePinMonopolyTest do
   end
 
   defp safe_stop(pid) when is_pid(pid) do
-    if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
-  catch
-    :exit, _ -> :ok
+    TestSupport.Sync.safe_stop(pid, 1_000)
   end
 end
 

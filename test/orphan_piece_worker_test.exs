@@ -83,7 +83,7 @@ defmodule OrphanPieceWorkerTest do
       assert Process.alive?(pid)
 
       on_exit(fn ->
-        if Process.alive?(pid), do: GenServer.stop(pid, :normal, 500)
+        TestSupport.Sync.safe_stop(pid, 500)
       end)
     end)
   end
@@ -109,15 +109,15 @@ defmodule OrphanPieceWorkerTest do
 
       {:ok, controller} = GenServer.start(Torrent.Controller, hash)
 
-      on_exit(fn ->
-        if Process.alive?(controller), do: GenServer.stop(controller, :normal, 500)
-      end)
+      try do
+        send(controller, :reconcile_pump)
 
-      send(controller, :reconcile_pump)
-
-      assert_receive :dealt, 1_000
-      assert_receive {:DOWN, ^piece_ref, :process, ^piece_pid, {:shutdown, :idle_orphan}}, 1_000
-      refute Downloads.piece_active?(hash, 0)
+        assert_receive :dealt, 1_000
+        assert_receive {:DOWN, ^piece_ref, :process, ^piece_pid, {:shutdown, :idle_orphan}}, 1_000
+        refute Downloads.piece_active?(hash, 0)
+      after
+        TestSupport.Sync.safe_stop(controller, 500)
+      end
     end)
   end
 
@@ -140,7 +140,7 @@ defmodule OrphanPieceWorkerTest do
 
     on_exit(fn ->
       try do
-        if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+        TestSupport.Sync.safe_stop(model_pid, 5_000)
       catch
         :exit, _ -> :ok
       end

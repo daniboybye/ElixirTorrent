@@ -192,7 +192,7 @@ defmodule Peer.HashCorrelationIntegrationTest do
     on_exit(fn ->
       for pid <- [model, store, hash_sup] do
         try do
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 2_000)
+          TestSupport.Sync.safe_stop(pid, 2_000)
         catch
           :exit, _ -> :ok
         end
@@ -213,8 +213,6 @@ defmodule Peer.HashCorrelationIntegrationTest do
   end
 
   defp cleanup_stub(stub) do
-    if Process.alive?(stub), do: GenServer.stop(stub, :normal, 500)
-  catch
-    :exit, _ -> :ok
+    TestSupport.Sync.safe_stop(stub, 500)
   end
 end

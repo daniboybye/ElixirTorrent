@@ -21,13 +21,13 @@ defmodule PeerDiscoveryTest do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
     on_exit(fn ->
-      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+      TestSupport.Sync.safe_stop(model_pid, 5_000)
     end)
 
     {:ok, pid} = GenServer.start_link(PeerDiscovery.Announce, [self(), torrent], name: name)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+      TestSupport.Sync.safe_stop(pid, 1_000)
     end)
 
     assert :ok = PeerDiscovery.ensure_announce(hash)
@@ -53,13 +53,13 @@ defmodule PeerDiscoveryTest do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
     on_exit(fn ->
-      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+      TestSupport.Sync.safe_stop(model_pid, 5_000)
     end)
 
     {:ok, pid} = GenServer.start_link(PeerDiscovery.Announce, [self(), torrent], name: name)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+      TestSupport.Sync.safe_stop(pid, 1_000)
     end)
 
     _ = :sys.get_state(pid)
@@ -82,13 +82,13 @@ defmodule PeerDiscoveryTest do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
     on_exit(fn ->
-      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+      TestSupport.Sync.safe_stop(model_pid, 5_000)
     end)
 
     {:ok, pid} = GenServer.start_link(PeerDiscovery.Announce, [self(), torrent], name: name)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+      TestSupport.Sync.safe_stop(pid, 1_000)
     end)
 
     :ok = PeerDiscovery.connecting_to_peers(hash)
@@ -115,13 +115,13 @@ defmodule PeerDiscoveryTest do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
 
     on_exit(fn ->
-      if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+      TestSupport.Sync.safe_stop(model_pid, 5_000)
     end)
 
     {:ok, pid} = GenServer.start_link(PeerDiscovery.Announce, [self(), torrent], name: name)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+      TestSupport.Sync.safe_stop(pid, 1_000)
     end)
 
     assert :ok = PeerDiscovery.stopped_announce(hash)
@@ -149,7 +149,7 @@ defmodule PeerDiscoveryTest do
         :gen_tcp.close(listen)
       end)
 
-    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+    on_exit(fn -> Process.exit(pid, :kill) end)
     {port, pid}
   end
 end

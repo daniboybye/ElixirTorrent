@@ -187,11 +187,7 @@ defmodule Peer.HashTransferTest do
         )
 
       on_exit(fn ->
-        try do
-          if Process.alive?(sup), do: Supervisor.stop(sup, :normal, 500)
-        catch
-          :exit, _ -> :ok
-        end
+        TestSupport.Sync.safe_stop(sup, 500)
       end)
 
       blockers =
@@ -282,11 +278,7 @@ defmodule Peer.HashTransferTest do
     {:ok, stub} = HashTransferSentStub.start_link(key, self())
 
     on_exit(fn ->
-      try do
-        if Process.alive?(stub), do: GenServer.stop(stub, :normal, 500)
-      catch
-        :exit, _ -> :ok
-      end
+      TestSupport.Sync.safe_stop(stub, 500)
     end)
 
     fun.(key)
@@ -335,11 +327,7 @@ defmodule Peer.HashTransferTest do
 
     on_exit(fn ->
       for pid <- [model] do
-        try do
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 2_000)
-        catch
-          :exit, _ -> :ok
-        end
+        TestSupport.Sync.safe_stop(pid, 2_000)
       end
     end)
 

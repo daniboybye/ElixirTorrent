@@ -344,7 +344,7 @@ defmodule UTPCorrectnessTest do
     end
 
     assert Process.alive?(pid)
-    GenServer.stop(pid, :normal)
+    TestSupport.Sync.safe_stop(pid)
     :gen_udp.close(peer_udp)
     :gen_udp.close(udp)
   end

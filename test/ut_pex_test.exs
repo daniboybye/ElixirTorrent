@@ -635,7 +635,7 @@ defmodule Peer.UtPexTest do
     test "ingest with pex_source tags offers and applies scoped drops" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       supplier = <<6::160>>
       keep = {pub4(10), 7010}
@@ -657,7 +657,7 @@ defmodule Peer.UtPexTest do
     test "source-owned initial ingest reaches the bounded queue before retention" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       supplier = <<16::160>>
 
@@ -685,7 +685,7 @@ defmodule Peer.UtPexTest do
     test "ingest without pex_source still uses discovery offer path" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       ep = {pub4(12), 7012}
       assert {:ok, _, _} = UtPex.ingest(hash, UtPex.encode([ep], []))
@@ -698,7 +698,7 @@ defmodule Peer.UtPexTest do
     test "one PEX delta revokes old source-owned contacts before offering new ones" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       supplier = <<7::160>>
       old = {pub4(13), 7013}
@@ -720,7 +720,7 @@ defmodule Peer.UtPexTest do
     test "controller uses its remote peer id as the PEX ownership source" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       supplier = <<8::160>>
       endpoint = {pub4(15), 7015}
@@ -1121,7 +1121,7 @@ defmodule Peer.UtPexTest do
     test "controller routing rejects excess inbound PEX before ingest mutates queue" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_pex_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       ep = {pub4(40), 7040}
       supplier = <<9::160>>
@@ -1159,7 +1159,7 @@ defmodule Peer.UtPexTest do
     test "malformed inbound PEX consumes the connection rate window" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_pex_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       state = %State{
         hash: hash,

@@ -36,17 +36,16 @@ defmodule TorrentStorageCoverageBatchTest do
       hash = torrent.hash
 
       with_storage_stack(torrent, fn _ ->
-        {:ok, controller} = Torrent.Controller.start_link(hash)
-        on_exit(fn -> safe_stop(controller) end)
+        with_controller(hash, fn controller ->
+          {:ok, resume} = Resume.start_link({hash, :skip})
+          ref = Process.monitor(resume)
+          assert_receive {:DOWN, ^ref, :process, ^resume, :normal}, 2_000
 
-        {:ok, resume} = Resume.start_link({hash, :skip})
-        ref = Process.monitor(resume)
-        assert_receive {:DOWN, ^ref, :process, ^resume, :normal}, 2_000
-
-        send(controller, :reconcile_pump)
-        TestSupport.Sync.sync(controller)
-        assert Process.alive?(controller)
-        assert Model.get(hash, :left) == 2 * @piece_len
+          send(controller, :reconcile_pump)
+          TestSupport.Sync.sync(controller)
+          assert Process.alive?(controller)
+          assert Model.get(hash, :left) == 2 * @piece_len
+        end)
       end)
     end
 
@@ -69,17 +68,17 @@ defmodule TorrentStorageCoverageBatchTest do
 
       with_storage_stack(torrent, fn _ ->
         write_piece!(hash, 0, piece0)
-        {:ok, controller} = Torrent.Controller.start_link(hash)
-        on_exit(fn -> safe_stop(controller) end)
 
-        {:ok, resume} = Resume.start_link({hash, :verify_saved})
-        ref = Process.monitor(resume)
-        assert_receive {:DOWN, ^ref, :process, ^resume, :normal}, 5_000
+        with_controller(hash, fn _controller ->
+          {:ok, resume} = Resume.start_link({hash, :verify_saved})
+          ref = Process.monitor(resume)
+          assert_receive {:DOWN, ^ref, :process, ^resume, :normal}, 5_000
 
-        assert Torrent.have?(hash, 0)
-        refute Torrent.have?(hash, 1)
-        assert Model.get(hash, :downloaded) == @piece_len
-        assert Model.get(hash, :left) == @piece_len
+          assert Torrent.have?(hash, 0)
+          refute Torrent.have?(hash, 1)
+          assert Model.get(hash, :downloaded) == @piece_len
+          assert Model.get(hash, :left) == @piece_len
+        end)
       end)
     end
 
@@ -105,16 +104,16 @@ defmodule TorrentStorageCoverageBatchTest do
         write_piece!(hash, 0, piece0)
         # piece 1 left sparse — hash check must fail and clear bit 1
 
-        {:ok, _} = Torrent.Controller.start_link(hash)
+        with_controller(hash, fn _controller ->
+          {:ok, resume} = Resume.start_link({hash, :verify_saved})
+          ref = Process.monitor(resume)
+          assert_receive {:DOWN, ^ref, :process, ^resume, :normal}, 5_000
 
-        {:ok, resume} = Resume.start_link({hash, :verify_saved})
-        ref = Process.monitor(resume)
-        assert_receive {:DOWN, ^ref, :process, ^resume, :normal}, 5_000
-
-        assert Torrent.have?(hash, 0)
-        refute Torrent.have?(hash, 1)
-        assert Model.get(hash, :downloaded) == @piece_len
-        assert Model.get(hash, :left) == @piece_len
+          assert Torrent.have?(hash, 0)
+          refute Torrent.have?(hash, 1)
+          assert Model.get(hash, :downloaded) == @piece_len
+          assert Model.get(hash, :left) == @piece_len
+        end)
       end)
     end
 
@@ -134,16 +133,16 @@ defmodule TorrentStorageCoverageBatchTest do
       with_storage_stack(torrent, fn _ ->
         write_piece!(hash, 1, piece1)
 
-        {:ok, _} = Torrent.Controller.start_link(hash)
+        with_controller(hash, fn _controller ->
+          {:ok, resume} = Resume.start_link({hash, :full_scan})
+          ref = Process.monitor(resume)
+          assert_receive {:DOWN, ^ref, :process, ^resume, :normal}, 5_000
 
-        {:ok, resume} = Resume.start_link({hash, :full_scan})
-        ref = Process.monitor(resume)
-        assert_receive {:DOWN, ^ref, :process, ^resume, :normal}, 5_000
-
-        refute Torrent.have?(hash, 0)
-        assert Torrent.have?(hash, 1)
-        assert Model.get(hash, :downloaded) == @piece_len
-        assert Model.get(hash, :left) == @piece_len
+          refute Torrent.have?(hash, 0)
+          assert Torrent.have?(hash, 1)
+          assert Model.get(hash, :downloaded) == @piece_len
+          assert Model.get(hash, :left) == @piece_len
+        end)
       end)
     end
 
@@ -171,19 +170,19 @@ defmodule TorrentStorageCoverageBatchTest do
         write_piece!(hash, 0, piece0)
         write_piece!(hash, 1, piece1)
 
-        {:ok, _} = Torrent.Controller.start_link(hash)
+        with_controller(hash, fn _controller ->
+          {:ok, resume} = Resume.start_link({hash, :verify_saved})
+          ref = Process.monitor(resume)
+          assert_receive {:DOWN, ^ref, :process, ^resume, :normal}, 5_000
 
-        {:ok, resume} = Resume.start_link({hash, :verify_saved})
-        ref = Process.monitor(resume)
-        assert_receive {:DOWN, ^ref, :process, ^resume, :normal}, 5_000
-
-        assert Model.downloaded?(hash)
-        assert Model.get(hash, :peer_status) == :seed
-        assert Model.get(hash, :event) == Torrent.empty()
-        assert {:ok, session} = Session.load(hash)
-        assert session.left == 0
-        assert Bitfield.have?(session.bitfield, 0)
-        assert Bitfield.have?(session.bitfield, 1)
+          assert Model.downloaded?(hash)
+          assert Model.get(hash, :peer_status) == :seed
+          assert Model.get(hash, :event) == Torrent.empty()
+          assert {:ok, session} = Session.load(hash)
+          assert session.left == 0
+          assert Bitfield.have?(session.bitfield, 0)
+          assert Bitfield.have?(session.bitfield, 1)
+        end)
       end)
     end
   end
@@ -676,15 +675,14 @@ defmodule TorrentStorageCoverageBatchTest do
       torrent = sample_torrent(hash, 3)
 
       with_model(torrent, fn _ ->
-        {:ok, pid} = GenServer.start(Torrent.Controller, hash)
-        on_exit(fn -> safe_stop(pid) end)
-
-        send(pid, :resume_ready)
-        TestSupport.Sync.sync(pid)
-        send(pid, :reconcile_pump)
-        send(pid, {:next_piece, :random})
-        TestSupport.Sync.sync(pid)
-        assert Process.alive?(pid)
+        with_controller(hash, fn pid ->
+          send(pid, :resume_ready)
+          TestSupport.Sync.sync(pid)
+          send(pid, :reconcile_pump)
+          send(pid, {:next_piece, :random})
+          TestSupport.Sync.sync(pid)
+          assert Process.alive?(pid)
+        end)
       end)
     end
 
@@ -711,14 +709,13 @@ defmodule TorrentStorageCoverageBatchTest do
         TestSupport.Sync.sync(piece0_pid)
         assert Downloads.piece_active?(hash, 0)
 
-        {:ok, pid} = GenServer.start(Torrent.Controller, hash)
-        on_exit(fn -> safe_stop(pid) end)
+        with_controller(hash, fn pid ->
+          send(pid, {:next_piece, :random})
+          TestSupport.Sync.sync(pid)
 
-        send(pid, {:next_piece, :random})
-        TestSupport.Sync.sync(pid)
-
-        assert Model.get(hash, :peer_status) == :seed
-        refute Downloads.piece_active?(hash, 0)
+          assert Model.get(hash, :peer_status) == :seed
+          refute Downloads.piece_active?(hash, 0)
+        end)
       end)
     end
 
@@ -728,13 +725,13 @@ defmodule TorrentStorageCoverageBatchTest do
 
       with_model(torrent, fn _ ->
         start_swarm(hash)
-        {:ok, pid} = GenServer.start(Torrent.Controller, hash)
-        on_exit(fn -> safe_stop(pid) end)
 
-        send(pid, :unchoke)
-        send(pid, :reset_rank)
-        TestSupport.Sync.sync(pid)
-        assert Process.alive?(pid)
+        with_controller(hash, fn pid ->
+          send(pid, :unchoke)
+          send(pid, :reset_rank)
+          TestSupport.Sync.sync(pid)
+          assert Process.alive?(pid)
+        end)
       end)
     end
 
@@ -754,22 +751,21 @@ defmodule TorrentStorageCoverageBatchTest do
           stale: false
         )
 
-        {:ok, pid} = GenServer.start(Torrent.Controller, hash)
-        on_exit(fn -> safe_stop(pid) end)
+        with_controller(hash, fn pid ->
+          reached? =
+            Enum.reduce_while(1..12, false, fn _, _ ->
+              send(pid, :reconcile_pump)
+              TestSupport.Sync.sync(pid)
 
-        reached? =
-          Enum.reduce_while(1..12, false, fn _, _ ->
-            send(pid, :reconcile_pump)
-            TestSupport.Sync.sync(pid)
+              if Downloads.active_indices(hash) != [] do
+                {:halt, true}
+              else
+                {:cont, false}
+              end
+            end)
 
-            if Downloads.active_indices(hash) != [] do
-              {:halt, true}
-            else
-              {:cont, false}
-            end
-          end)
-
-        assert reached?
+          assert reached?
+        end)
       end)
     end
   end
@@ -1017,6 +1013,17 @@ defmodule TorrentStorageCoverageBatchTest do
     fun.(torrent.hash)
   end
 
+  defp with_controller(hash, fun) do
+    {:ok, pid} = Torrent.Controller.start_link(hash)
+    Process.unlink(pid)
+
+    try do
+      fun.(pid)
+    after
+      safe_stop(pid)
+    end
+  end
+
   defp with_storage_stack(torrent, fun) do
     with_model(torrent, fn hash ->
       {:ok, fh_pid} = Torrent.FileHandle.start_link(hash)
@@ -1063,7 +1070,7 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
 
     on_exit(fn ->
-      if Process.alive?(server), do: Process.exit(server, :kill)
+      Process.exit(server, :kill)
       :gen_tcp.close(listen)
     end)
 
@@ -1084,7 +1091,7 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
 
     on_exit(fn ->
-      if Process.alive?(server), do: Process.exit(server, :kill)
+      Process.exit(server, :kill)
       :gen_tcp.close(listen)
     end)
 
@@ -1356,9 +1363,7 @@ defmodule TorrentStorageCoverageBatchTest do
   end
 
   defp safe_stop(pid) when is_pid(pid) do
-    if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
-  catch
-    :exit, _ -> :ok
+    TestSupport.Sync.safe_stop(pid, 1_000)
   end
 end
 

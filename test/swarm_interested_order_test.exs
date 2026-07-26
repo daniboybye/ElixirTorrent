@@ -198,9 +198,7 @@ defmodule SwarmInterestedOrderTest do
   end
 
   defp safe_stop(pid) when is_pid(pid) do
-    if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
-  catch
-    :exit, _ -> :ok
+    TestSupport.Sync.safe_stop(pid, 1_000)
   end
 end
 

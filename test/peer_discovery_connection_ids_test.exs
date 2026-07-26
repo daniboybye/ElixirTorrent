@@ -19,7 +19,7 @@ defmodule PeerDiscoveryConnectionIdsTest do
 
     on_exit(fn ->
       :gen_udp.close(socket)
-      if Process.alive?(server_pid), do: Process.exit(server_pid, :kill)
+      Process.exit(server_pid, :kill)
     end)
 
     assert {:ok, @connection_id} =
@@ -38,7 +38,7 @@ defmodule PeerDiscoveryConnectionIdsTest do
 
     on_exit(fn ->
       :gen_udp.close(socket)
-      if Process.alive?(server_pid), do: Process.exit(server_pid, :kill)
+      Process.exit(server_pid, :kill)
     end)
 
     assert {:ok, @connection_id} =

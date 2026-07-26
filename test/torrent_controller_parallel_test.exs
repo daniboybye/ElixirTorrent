@@ -60,8 +60,7 @@ defmodule TorrentControllerParallelTest do
     @pieces_count 12
 
     test "does not grow active pieces beyond 2 with one unchoked peer" do
-      hash = setup_pump_scenario(unchoked: 1, choked: 1)
-      controller_pid = start_controller(hash)
+      {hash, controller_pid} = setup_pump_scenario(unchoked: 1, choked: 1)
 
       drive_pump(controller_pid, hash, fn h ->
         active = Downloads.active_indices(h)
@@ -72,8 +71,7 @@ defmodule TorrentControllerParallelTest do
     end
 
     test "allows up to 12 active pieces with many unchoked peers" do
-      hash = setup_pump_scenario(unchoked: 8, choked: 0)
-      controller_pid = start_controller(hash)
+      {hash, controller_pid} = setup_pump_scenario(unchoked: 8, choked: 0)
 
       drive_pump(controller_pid, hash, fn h -> length(Downloads.active_indices(h)) >= 8 end)
 
@@ -154,32 +152,27 @@ defmodule TorrentControllerParallelTest do
       end
 
     add_mock_peers(hash, unchoked_configs ++ choked_configs)
+    {:ok, controller_pid} = GenServer.start(Torrent.Controller, hash)
 
     on_exit(fn ->
-      safe_stop(model_pid)
+      # The controller may have queued another piece-pump message. Stop it
+      # before the Model and Downloads processes that service that message.
+      safe_stop(controller_pid)
+
+      case GenServer.whereis(downloads_via(hash)) do
+        nil -> :ok
+        pid -> safe_stop(pid)
+      end
 
       case GenServer.whereis(swarm_via(hash)) do
         nil -> :ok
         pid -> safe_stop(pid)
       end
 
-      case GenServer.whereis(downloads_via(hash)) do
-        nil -> :ok
-        pid -> safe_stop(pid)
-      end
+      safe_stop(model_pid)
     end)
 
-    hash
-  end
-
-  defp start_controller(hash) do
-    {:ok, pid} = GenServer.start(Torrent.Controller, hash)
-
-    on_exit(fn ->
-      safe_stop(pid)
-    end)
-
-    pid
+    {hash, controller_pid}
   end
 
   defp drive_pump(controller_pid, hash, predicate, max_rounds \\ 24) do
@@ -235,9 +228,7 @@ defmodule TorrentControllerParallelTest do
   end
 
   defp safe_stop(pid) when is_pid(pid) do
-    if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
-  catch
-    :exit, _ -> :ok
+    TestSupport.Sync.safe_stop(pid, 1_000)
   end
 end
 

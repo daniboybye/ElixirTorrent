@@ -47,7 +47,7 @@ defmodule Magnet.PexTest do
       refute Extension in Extensions.for_magnet(hash)
 
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       assert Extension in Extensions.for_magnet(hash)
     end
@@ -55,7 +55,7 @@ defmodule Magnet.PexTest do
     test "for_magnet omits ut_pex when consume_pex is disabled" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       Application.put_env(:elixir_torrent, :magnet_connection, consume_pex: false)
 
@@ -66,7 +66,7 @@ defmodule Magnet.PexTest do
       hash = :crypto.strong_rand_bytes(20)
       _model = start_private_model(hash)
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       refute Extension in Extensions.for_magnet(hash)
     end
@@ -79,7 +79,7 @@ defmodule Magnet.PexTest do
       pex_peer = %Peer{ip: pub4(40), port: 9040}
 
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       conn = base_conn(hash, supplier)
 
@@ -97,7 +97,7 @@ defmodule Magnet.PexTest do
       hash = :crypto.strong_rand_bytes(20)
       _model = start_private_model(hash)
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       conn = base_conn(hash, <<21::160>>)
       _ = Magnet.Connection.route_inbound_pex_for_test(conn, UtPex.encode([{pub4(44), 9044}], []))
@@ -111,7 +111,7 @@ defmodule Magnet.PexTest do
       pex_peer = %Peer{ip: pub4(41), port: 9041}
 
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       conn = base_conn(hash, supplier)
       payload = UtPex.encode([{pex_peer.ip, pex_peer.port}], [])
@@ -128,7 +128,7 @@ defmodule Magnet.PexTest do
       supplier = <<13::160>>
 
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       conn = base_conn(hash, supplier)
       conn = Magnet.Connection.route_inbound_pex_for_test(conn, "not-bencode")
@@ -150,7 +150,7 @@ defmodule Magnet.PexTest do
       supplier_b = <<15::160>>
 
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       conn_a = base_conn(hash, supplier_a)
       conn_b = base_conn(hash, supplier_b)
@@ -193,7 +193,7 @@ defmodule Magnet.PexTest do
       pex_ep = {pub4(60), 9060}
 
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       {:ok, listen} =
         :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
@@ -236,7 +236,7 @@ defmodule Magnet.PexTest do
       pex_ep = {pub4(61), 9061}
 
       pid = start_manager(hash)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000) end)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
 
       {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
       ip = {127, 0, 0, 1}

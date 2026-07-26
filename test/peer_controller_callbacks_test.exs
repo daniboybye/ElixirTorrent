@@ -261,8 +261,6 @@ defmodule PeerControllerCallbacksTest do
   end
 
   defp stop_quietly(pid) do
-    if is_pid(pid) and Process.alive?(pid), do: GenServer.stop(pid, :normal, 500)
-  catch
-    :exit, _ -> :ok
+    if is_pid(pid), do: TestSupport.Sync.safe_stop(pid, 500)
   end
 end

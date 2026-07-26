@@ -486,7 +486,7 @@ defmodule PeerControllerStateTest do
 
     on_exit(fn ->
       try do
-        if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
+        TestSupport.Sync.safe_stop(model_pid, 5_000)
       catch
         :exit, _ -> :ok
       end
@@ -505,7 +505,7 @@ defmodule PeerControllerStateTest do
 
     on_exit(fn ->
       try do
-        if Process.alive?(stub), do: GenServer.stop(stub, :normal, 500)
+        TestSupport.Sync.safe_stop(stub, 500)
       catch
         :exit, _ -> :ok
       end
@@ -535,9 +535,7 @@ defmodule PeerControllerStateTest do
   end
 
   defp stop_quietly(pid) do
-    if is_pid(pid) and Process.alive?(pid), do: GenServer.stop(pid, :normal, 500)
-  catch
-    :exit, _ -> :ok
+    if is_pid(pid), do: TestSupport.Sync.safe_stop(pid, 500)
   end
 
   defp stop_worker(pid), do: stop_quietly(pid)
