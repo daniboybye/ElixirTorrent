@@ -68,7 +68,7 @@ defmodule Peer.SenderInactiveRecvTest do
     assert <<20, 1, _payload::binary>> = body
 
     on_exit(fn ->
-      if Process.alive?(sender_pid), do: GenServer.stop(sender_pid, :normal, 1_000)
+      TestSupport.Sync.safe_stop(sender_pid, 1_000)
       Connection.close(utp)
       :gen_udp.close(udp)
     end)
@@ -121,39 +121,39 @@ defmodule Peer.SenderInactiveRecvTest do
     }
 
     send(pid, {:utp_packet, data_header, passive_part, []})
-    assert_eventually(fn -> :sys.get_state(pid).recv_buffer == passive_part end)
+    assert %UTP.Connection{recv_buffer: ^passive_part} = TestSupport.Sync.sync(pid)
 
     assert {:ok, sender_pid} = Peer.Sender.start_link([hash, id, utp])
     assert :ok = Peer.Transport.controlling_process(utp, sender_pid)
     assert :ok = Peer.Sender.activate(key)
 
-    assert_eventually(fn ->
-      :sys.get_state(sender_pid).utp_held_bytes == byte_size(passive_part)
-    end)
+    assert %Peer.Sender{utp_held_bytes: held} = TestSupport.Sync.sync(sender_pid)
+    assert held == byte_size(passive_part)
 
-    assert :sys.get_state(pid).active_recv_bytes == byte_size(passive_part)
+    assert %UTP.Connection{active_recv_bytes: ^held} = TestSupport.Sync.sync(pid)
 
     active_header = %{data_header | seq_nr: Packet.seq_add(peer_seq, 1)}
     send(pid, {:utp_packet, active_header, active_part, []})
+    TestSupport.Sync.sync(pid)
+    TestSupport.Sync.sync(sender_pid)
 
-    assert_eventually(fn ->
-      :sys.get_state(sender_pid).utp_held_bytes == byte_size(wire)
-    end)
-
-    assert :sys.get_state(pid).active_recv_bytes == byte_size(wire)
+    wire_size = byte_size(wire)
+    assert %Peer.Sender{utp_held_bytes: ^wire_size} = TestSupport.Sync.sync(sender_pid)
+    assert %UTP.Connection{active_recv_bytes: ^wire_size} = TestSupport.Sync.sync(pid)
 
     assert :ok = Peer.Sender.deactivate(key)
     assert {:ok, ^wire} = Peer.Sender.socket_recv(key, byte_size(wire), 1_000)
-    assert :sys.get_state(sender_pid).utp_held_bytes == 0
-    assert_eventually(fn -> :sys.get_state(pid).active_recv_bytes == 0 end)
+    assert %Peer.Sender{utp_held_bytes: 0} = TestSupport.Sync.sync(sender_pid)
+    assert %UTP.Connection{active_recv_bytes: 0} = TestSupport.Sync.sync(pid)
 
     on_exit(fn ->
-      if Process.alive?(sender_pid), do: GenServer.stop(sender_pid, :normal, 1_000)
+      TestSupport.Sync.safe_stop(sender_pid, 1_000)
       Connection.close(utp)
       :gen_udp.close(udp)
     end)
   end
 
+  @tag race_group: :protocol
   test "swarm request_piece receives ut_metadata data after Sender deactivate" do
     hash = :crypto.strong_rand_bytes(20)
     id = <<8::160>>
@@ -205,12 +205,26 @@ defmodule Peer.SenderInactiveRecvTest do
     piece_data = :binary.copy(<<0xAB>>, total_size)
     response_wire = ut_metadata_data_wire(0, total_size, piece_data)
 
+    parent = self()
+    release = make_ref()
+
     task =
       Task.async(fn ->
+        send(parent, {:metadata_request_ready, self()})
+        receive do: (^release -> :ok)
         Magnet.Connection.request_piece(conn, 0)
       end)
 
-    Process.sleep(50)
+    assert_receive {:metadata_request_ready, task_pid}, 2_000
+    assert task.pid == task_pid
+    1 = :erlang.trace(task.pid, true, [:send])
+    send(task.pid, release)
+
+    assert_receive {:trace, ^task_pid, :send, {:"$gen_call", _, {:socket_recv, _, _}},
+                    ^sender_pid},
+                   2_000
+
+    _ = :erlang.trace(task.pid, false, [:send])
 
     data_header = %Packet{
       type: Packet.st_data(),
@@ -229,7 +243,7 @@ defmodule Peer.SenderInactiveRecvTest do
     assert {:ok, ^piece_data, ^total_size} = Task.await(task, 5_000)
 
     on_exit(fn ->
-      if Process.alive?(sender_pid), do: GenServer.stop(sender_pid, :normal, 1_000)
+      TestSupport.Sync.safe_stop(sender_pid, 1_000)
       Connection.close(utp)
       :gen_udp.close(udp)
     end)
@@ -238,17 +252,5 @@ defmodule Peer.SenderInactiveRecvTest do
   defp ut_metadata_data_wire(piece, total_size, data) do
     payload = Magnet.UtMetadata.encode_data(piece, total_size, data)
     Peer.LTEP.extended_message_wire(1, payload)
-  end
-
-  defp assert_eventually(fun, attempts \\ 100)
-  defp assert_eventually(fun, 0), do: assert(fun.())
-
-  defp assert_eventually(fun, attempts) do
-    if fun.() do
-      :ok
-    else
-      Process.sleep(1)
-      assert_eventually(fun, attempts - 1)
-    end
   end
 end

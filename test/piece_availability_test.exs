@@ -21,16 +21,9 @@ defmodule PieceAvailabilityTest do
   defp with_model(hash, last_index, fun) do
     torrent = sample_torrent(hash, last_index)
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
+    Process.unlink(model_pid)
 
-    on_exit(fn ->
-      # The model is linked to the test process and may already be shutting
-      # down when this callback runs; stopping a dying process exits.
-      try do
-        if Process.alive?(model_pid), do: GenServer.stop(model_pid, :normal, 5_000)
-      catch
-        :exit, _ -> :ok
-      end
-    end)
+    on_exit(fn -> TestSupport.Sync.safe_stop(model_pid, 5_000) end)
 
     :ok = Torrent.PiecesStatistic.init(torrent)
     fun.(torrent)
@@ -87,24 +80,22 @@ defmodule PieceAvailabilityTest do
 
     with_model(hash, 3, fn _torrent ->
       {:ok, pid} =
-        GenServer.start_link(
+        GenServer.start(
           Peer.Controller,
           [hash, id, nil, Peer.reserved()],
           name: {:via, Registry, {Registry, {key, Peer.Controller}}}
         )
 
       on_exit(fn ->
-        # The controller traps exits and shuts down gracefully when its link
-        # parent (the test process) exits — racing this explicit stop.
         try do
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+          TestSupport.Sync.safe_stop(pid, 1_000)
         catch
           :exit, _ -> :ok
         end
       end)
 
       :ok = Peer.Controller.handle_have_all(key)
-      Process.sleep(20)
+      TestSupport.Sync.sync(pid)
 
       assert Peer.Controller.has_all?(key)
       assert Peer.Controller.has_index?(key, 1)

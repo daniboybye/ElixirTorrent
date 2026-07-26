@@ -412,7 +412,7 @@ defmodule UTPCorrectnessTest do
     {:ok, pid} = GenServer.start(UTP.Connection, state)
     :sys.replace_state(pid, fn _ -> state end)
     send(pid, {:utp_packet, header, <<>>, extensions})
-    Process.sleep(20)
+    TestSupport.Sync.sync(pid)
     result = :sys.get_state(pid)
     GenServer.stop(pid, :normal)
     :gen_udp.close(peer_udp)

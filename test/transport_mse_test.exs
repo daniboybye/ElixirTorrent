@@ -3,6 +3,8 @@ defmodule Peer.TransportMSETest do
 
   alias Peer.{MSE, Transport}
 
+  @tag race_group: :protocol
+
   # Two RC4 ciphers keyed identically per direction, as after a real handshake.
   defp cipher_pair do
     s = :crypto.strong_rand_bytes(96)
@@ -31,12 +33,19 @@ defmodule Peer.TransportMSETest do
     {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listen)
     parent = self()
+    close_gate = make_ref()
 
-    spawn_link(fn ->
-      {:ok, s} = :gen_tcp.accept(listen, 2_000)
-      send(parent, {:server_sock, s})
-      Process.sleep(2_000)
-    end)
+    server_pid =
+      spawn_link(fn ->
+        {:ok, s} = :gen_tcp.accept(listen, 2_000)
+        send(parent, {:server_sock, s})
+
+        receive do
+          ^close_gate -> :ok
+        end
+
+        :gen_tcp.close(s)
+      end)
 
     {:ok, client} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 2_000)
 
@@ -64,6 +73,7 @@ defmodule Peer.TransportMSETest do
     :ok = Transport.send(b_sock, reply)
     assert {:ok, ^reply} = Transport.recv(a_sock, byte_size(reply), 2_000)
 
+    send(server_pid, close_gate)
     :gen_tcp.close(client)
     :gen_tcp.close(listen)
   end

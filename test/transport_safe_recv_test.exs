@@ -25,17 +25,17 @@ defmodule TransportSafeRecvTest do
   end
 
   test "safe_peername on dead uTP owner returns error without raising" do
-    dead = spawn(fn -> Process.sleep(:infinity) end)
-    Process.exit(dead, :kill)
-    refute Process.alive?(dead)
+    {dead, monitor, release} = TestSupport.Sync.spawn_blocked()
+    TestSupport.Sync.release(dead, release)
+    TestSupport.Sync.await_down(monitor, dead)
 
     assert {:error, :closed} = Transport.safe_peername({:utp, dead})
   end
 
   test "safe_send on dead uTP owner returns error without raising" do
-    dead = spawn(fn -> Process.sleep(:infinity) end)
-    Process.exit(dead, :kill)
-    refute Process.alive?(dead)
+    {dead, monitor, release} = TestSupport.Sync.spawn_blocked()
+    TestSupport.Sync.release(dead, release)
+    TestSupport.Sync.await_down(monitor, dead)
 
     assert {:error, :closed} = Transport.safe_send({:utp, dead}, "data")
   end

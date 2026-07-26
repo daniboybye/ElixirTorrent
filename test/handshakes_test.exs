@@ -136,7 +136,7 @@ defmodule HandshakesTest do
       for _ <- 1..12 do
         spec = %{
           id: :dummy_peer,
-          start: {Task, :start_link, [fn -> Process.sleep(:infinity) end]},
+          start: {HandshakesTest.SwarmStub, :start_link, [[]]},
           restart: :temporary
         }
 
@@ -151,5 +151,19 @@ defmodule HandshakesTest do
       selected = Handshakes.select_peers_to_dial(peers, hash, 40)
       assert length(selected) == 40
     end
+  end
+end
+
+defmodule HandshakesTest.SwarmStub do
+  @moduledoc false
+
+  def start_link(_arg) do
+    Task.start_link(fn ->
+      release = make_ref()
+
+      receive do
+        ^release -> :ok
+      end
+    end)
   end
 end

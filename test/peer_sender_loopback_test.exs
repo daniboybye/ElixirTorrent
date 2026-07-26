@@ -15,18 +15,16 @@ defmodule PeerSenderLoopbackTest do
   end
 
   describe "inbound wire framing and dispatch (active TCP)" do
+    @tag race_group: :protocol
     test "incomplete length prefix waits for remainder then dispatches" do
       {client, server, listen, key, sender_pid} = start_sender_pair()
 
       on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
 
-      # Only the 4-byte length prefix (body not yet arrived).
+      # Two kernel deliveries (prefix then body) must not dispatch until the frame is complete.
       assert :ok = :gen_tcp.send(server, <<0, 0, 0, 1>>)
-      Process.sleep(20)
-      assert Process.alive?(sender_pid)
       refute_received {:controller, _, _}
-
-      assert :ok = :gen_tcp.send(server, frame_payload(<<0>>))
+      assert :ok = :gen_tcp.send(server, <<0>>)
       assert_receive {:controller, :handle_choke, []}, @timeout
     end
 
@@ -134,8 +132,7 @@ defmodule PeerSenderLoopbackTest do
       on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
 
       assert :ok = :gen_tcp.send(server, frame_payload(<<18, 0, 0>>))
-      Process.sleep(20)
-      assert Process.alive?(sender_pid)
+      TestSupport.Sync.sync(sender_pid)
       refute_received {:controller, _, _}
 
       assert :ok = :gen_tcp.send(server, frame_payload(<<0>>))
@@ -295,7 +292,6 @@ defmodule PeerSenderLoopbackTest do
 
       assert :ok = Peer.Sender.deactivate(key)
       assert :ok = :gen_tcp.send(server, frame_payload(<<1>>))
-      Process.sleep(20)
 
       assert {:ok, <<1::32>>} = Peer.Sender.socket_recv(key, 4, @timeout)
       assert {:ok, <<1>>} = Peer.Sender.socket_recv(key, 1, @timeout)
@@ -311,7 +307,6 @@ defmodule PeerSenderLoopbackTest do
 
       assert :ok = Peer.Sender.deactivate(key)
       assert :ok = :gen_tcp.send(server, frame_payload(<<2>>))
-      Process.sleep(20)
 
       assert {:ok, <<0, 0, 0, 1>>} = Peer.Sender.socket_recv(key, 4, @timeout)
       assert {:ok, <<2>>} = Peer.Sender.socket_recv(key, 1, @timeout)
@@ -418,11 +413,7 @@ defmodule PeerSenderLoopbackTest do
     end
 
     for pid <- [sender_pid, ControllerCapture.whereis(key)] do
-      try do
-        if is_pid(pid) and Process.alive?(pid), do: GenServer.stop(pid, :normal, 500)
-      catch
-        :exit, _ -> :ok
-      end
+      TestSupport.Sync.safe_stop(pid, 500)
     end
 
     flush_exit_messages()

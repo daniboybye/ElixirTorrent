@@ -21,6 +21,7 @@ defmodule UTPZombieTest do
     :ok
   end
 
+  @tag race_group: :protocol
   test "peer ST_RESET tears down the GenServer" do
     {:ok, udp} = :gen_udp.open(0, [:binary, active: false])
     ip = {127, 0, 0, 1}
@@ -98,10 +99,7 @@ defmodule UTPZombieTest do
 
     send(pid, {:utp_packet, reset, <<>>, []})
 
-    # Wait long enough for shutdown to complete but before the linger stop fires.
-    Process.sleep(100)
-
-    state = :sys.get_state(pid)
+    state = TestSupport.Sync.sync(pid)
     assert state.closed == true
     assert state.phase == :closed
     assert state.timer_ref == nil
