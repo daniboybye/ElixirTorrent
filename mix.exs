@@ -67,7 +67,9 @@ defmodule ElixirTorrent.MixProject do
     [
       quality: ["compile --warnings-as-errors", "dialyzer", "credo --strict --all"],
       "test.stress": ["cmd scripts/test-stress.sh"],
-      "test.races": ["cmd scripts/test-races.sh"]
+      "test.races": ["cmd scripts/test-races.sh"],
+      "test.properties": ["cmd scripts/test-properties.sh"],
+      "test.state-machines": ["cmd scripts/test-state-machines.sh"]
     ]
   end
 
