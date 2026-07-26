@@ -53,23 +53,38 @@ defmodule Acceptor.Connection.Handshakes do
   alias Peer.MSE.Handshake
 
   def recv(socket) do
+    case recv_task(socket) do
+      {:ok, _pid} -> :ok
+      {:error, _reason} -> :ok
+    end
+  end
+
+  @doc false
+  @spec recv_task(Peer.Transport.socket()) :: {:ok, pid()} | {:error, term()}
+  def recv_task(socket) do
     case start_task(fn -> do_recv(socket) end) do
       {:ok, pid} ->
         case safe_controlling_process(socket, pid) do
-          :ok -> :ok
-          _ -> safe_close(socket)
+          :ok -> {:ok, pid}
+          error -> close_task_socket(socket, pid, error)
         end
 
       {:ok, pid, _} ->
         case safe_controlling_process(socket, pid) do
-          :ok -> :ok
-          _ -> safe_close(socket)
+          :ok -> {:ok, pid}
+          error -> close_task_socket(socket, pid, error)
         end
 
-      _ ->
+      error ->
         safe_close(socket)
-        :ok
+        {:error, error}
     end
+  end
+
+  defp close_task_socket(socket, pid, error) do
+    safe_close(socket)
+    Process.exit(pid, :shutdown)
+    {:error, error}
   end
 
   @doc false

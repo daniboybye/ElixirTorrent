@@ -45,7 +45,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
             send(test_pid, {:loopback_accepted, self()})
-            assert :ok = Handshakes.recv(accepted)
+            assert :ok = recv_inbound(accepted)
           end)
 
         {:ok, client} = connect_loopback(ip, port)
@@ -53,7 +53,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
         assert :ok = :gen_tcp.send(client, bt_handshake(hash, remote_id))
         assert {:ok, reply} = :gen_tcp.recv(client, 68, @timeout)
         assert <<19, "BitTorrent protocol"::binary, _::binary>> = reply
-        await_inbound_handshake_tasks()
+        assert :ok = Task.await(accept_task, @timeout)
         await_peer_protocol(hash, remote_id)
         :gen_tcp.close(client)
         :gen_tcp.close(listen)
@@ -68,14 +68,17 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
       with_torrent_stack(hash, fn _hash ->
         {:ok, listen, port, ip} = listen_on_loopback()
+        test_pid = self()
 
         accept_task =
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
-            assert :ok = Handshakes.recv(accepted)
+            send(test_pid, {:loopback_accepted, self()})
+            assert :ok = recv_inbound(accepted)
           end)
 
         {:ok, client} = connect_loopback(ip, port)
+        await_loopback_accept(accept_task)
         assert :ok = :gen_tcp.send(client, bt_handshake(hash, remote_id, ltep_reserved))
 
         assert {:ok, <<19, "BitTorrent protocol"::binary, _::binary>>} =
@@ -89,7 +92,6 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
         # wait for the optional LTEP negotiation or tear the peer down.
         assert :ok = :gen_tcp.send(client, <<1::32, 1>>)
         assert :ok = Task.await(accept_task, @timeout)
-        await_inbound_handshake_tasks()
         await_peer_protocol(hash, remote_id)
         state = await_peer_unchoked(hash, remote_id)
 
@@ -109,20 +111,23 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
       with_torrent_stack(hash, fn _hash ->
         {:ok, listen, port, ip} = listen_on_loopback()
+        test_pid = self()
 
         accept_task =
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
-            assert :ok = Handshakes.recv(accepted)
+            send(test_pid, {:loopback_accepted, self()})
+            assert :ok = recv_inbound(accepted)
           end)
 
         {:ok, client} = connect_loopback(ip, port)
+        await_loopback_accept(accept_task)
         assert :ok = :gen_tcp.send(client, bt_handshake(hash, remote_id, ltep_reserved))
         assert {:ok, _base_reply} = :gen_tcp.recv(client, 68, @timeout)
         assert {:ok, <<len::32>>} = :gen_tcp.recv(client, 4, @timeout)
         assert {:ok, <<20, 0, _local_handshake::binary>>} = :gen_tcp.recv(client, len, @timeout)
 
-        await_inbound_handshake_tasks()
+        assert :ok = Task.await(accept_task, @timeout)
         drain_client_wire(client)
 
         initial = Bento.encode!(%{"m" => %{"ut_metadata" => 7}})
@@ -175,7 +180,6 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
         assert %Peer.Controller.State{} = state
         assert Process.alive?(controller_pid(hash, remote_id))
 
-        assert :ok = Task.await(accept_task, @timeout)
         :gen_tcp.close(client)
         :gen_tcp.close(listen)
       end)
@@ -193,7 +197,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
             send(test_pid, {:loopback_accepted, self()})
-            assert :ok = Handshakes.recv(accepted)
+            assert :ok = recv_inbound(accepted)
           end)
 
         {:ok, client} = connect_loopback(ip, port)
@@ -220,7 +224,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
             send(test_pid, {:loopback_accepted, self()})
-            assert :ok = Handshakes.recv(accepted)
+            assert :ok = recv_inbound(accepted)
           end)
 
         {:ok, client} = connect_loopback(ip, port)
@@ -245,7 +249,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
             send(test_pid, :truncated_handshake_accepted)
-            assert :ok = Handshakes.recv(accepted)
+            assert :ok = recv_inbound(accepted, allow_handoff_error: true)
           end)
 
         {:ok, client} = connect_loopback(ip, port)
@@ -269,7 +273,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
             send(test_pid, {:loopback_accepted, self()})
-            assert :ok = Handshakes.recv(accepted)
+            assert :ok = recv_inbound(accepted)
           end)
 
         {:ok, client} = connect_loopback(ip, port)
@@ -280,7 +284,6 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
                  :gen_tcp.recv(client, 68, @timeout)
 
         assert :ok = Task.await(accept_task, @timeout)
-        await_inbound_handshake_tasks()
         await_peer_protocol(hash, Peer.id())
         :gen_tcp.close(client)
         :gen_tcp.close(listen)
@@ -312,6 +315,8 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
             assert {:ok, <<19, "BitTorrent protocol"::binary, _::binary>>} =
                      :gen_tcp.recv(sock, 68, @timeout)
 
+            assert {:ok, <<wire_len::32>>} = :gen_tcp.recv(sock, 4, @timeout)
+            assert {:ok, _wire_body} = :gen_tcp.recv(sock, wire_len, @timeout)
             send(parent, {:live_acceptor_handshake_complete, self()})
             receive do: (^close_gate -> :ok)
             :gen_tcp.close(sock)
@@ -319,7 +324,6 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
         assert_receive {:live_acceptor_handshake_complete, connector_pid}, @timeout
         assert connector.pid == connector_pid
-        await_inbound_handshake_tasks()
         await_peer_protocol(hash, remote_id)
         await_swarm_count(hash, 1)
         send(connector.pid, close_gate)
@@ -342,17 +346,16 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
           Task.async(fn ->
             {:ok, accepted} = :gen_tcp.accept(listen, @timeout)
             send(test_pid, {:loopback_accepted, self()})
-            assert :ok = Handshakes.recv(accepted)
+            assert :ok = recv_inbound(accepted)
           end)
 
         {:ok, sock} = connect_loopback(ip, port)
         await_loopback_accept(accept_task)
         assert {:ok, %{mode: :rc4}} = Peer.MSE.Handshake.initiate(sock, hash, ia, @timeout)
-        await_inbound_handshake_tasks()
+        assert :ok = Task.await(accept_task, @timeout + 2_000)
         await_peer_protocol(hash, remote_id)
         :gen_tcp.close(sock)
 
-        assert :ok = Task.await(accept_task, @timeout + 2_000)
         :gen_tcp.close(listen)
       end)
     end
@@ -1584,22 +1587,15 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
     end
   end
 
-  defp await_inbound_handshake_tasks(timeout \\ @timeout) do
-    case Task.Supervisor.children(Acceptor.Connection.Handshakes) do
-      [] ->
+  defp recv_inbound(socket, opts \\ []) do
+    case Handshakes.recv_task(socket) do
+      {:ok, pid} ->
+        monitor = Process.monitor(pid)
+        assert_receive {:DOWN, ^monitor, :process, ^pid, _}, @timeout
         :ok
 
-      children ->
-        refs =
-          for pid <- children do
-            {pid, Process.monitor(pid)}
-          end
-
-        Enum.each(refs, fn {pid, ref} ->
-          assert_receive {:DOWN, ^ref, :process, ^pid, _}, timeout
-        end)
-
-        await_inbound_handshake_tasks(timeout)
+      {:error, _reason} = error ->
+        if Keyword.get(opts, :allow_handoff_error, false), do: :ok, else: flunk(inspect(error))
     end
   end
 
