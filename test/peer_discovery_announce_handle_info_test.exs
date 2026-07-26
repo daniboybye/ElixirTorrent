@@ -50,8 +50,6 @@ defmodule PeerDiscoveryAnnounceHandleInfoTest do
        {Torrent.started(), %Response{peers: [peer], interval: 600, complete: 1, incomplete: 2}}}
     )
 
-    Process.sleep(30)
-
     state = :sys.get_state(pid)
     assert state.peers[announce] == [peer]
     refute Map.has_key?(state.requests, ref)
@@ -67,7 +65,6 @@ defmodule PeerDiscoveryAnnounceHandleInfoTest do
     end)
 
     send(pid, {ref, {:ok, peers}})
-    Process.sleep(30)
 
     state = :sys.get_state(pid)
     assert state.dht_peers == peers
@@ -83,7 +80,6 @@ defmodule PeerDiscoveryAnnounceHandleInfoTest do
     end)
 
     send(pid, {ref, %{seeders: 1, leechers: 2, completed: 3}})
-    Process.sleep(30)
 
     state = :sys.get_state(pid)
     assert %{^announce => entry} = state.scrape_stats
@@ -106,7 +102,6 @@ defmodule PeerDiscoveryAnnounceHandleInfoTest do
     end)
 
     send(pid, {ref, %Error{reason: "Overloaded", retry_in: "120"}})
-    Process.sleep(30)
 
     state = :sys.get_state(pid)
     assert state.requests == %{}
@@ -127,7 +122,6 @@ defmodule PeerDiscoveryAnnounceHandleInfoTest do
     end)
 
     send(pid, {ref, %Error{reason: {:dns, "dead.example", :nxdomain}, retry_in: "never"}})
-    Process.sleep(30)
 
     state = :sys.get_state(pid)
     assert MapSet.member?(state.disabled, announce)
@@ -139,7 +133,7 @@ defmodule PeerDiscoveryAnnounceHandleInfoTest do
     GenServer.cast(pid, :maybe_refresh_peers)
     GenServer.cast(pid, :replenish_candidates)
     :ok = PeerDiscovery.replenish_candidates(hash)
-    Process.sleep(20)
+    _ = :sys.get_state(pid)
     assert Process.alive?(pid)
   end
 

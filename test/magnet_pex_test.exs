@@ -228,6 +228,7 @@ defmodule Magnet.PexTest do
   end
 
   describe "swarm path with deactivated Sender" do
+    @tag race_group: :protocol
     test "ut_pex on wire during request_piece queues source-tagged peers" do
       hash = :crypto.strong_rand_bytes(20)
       remote_id = <<16::160>>
@@ -294,8 +295,26 @@ defmodule Magnet.PexTest do
 
       response_wire = ut_metadata_data_wire(0, 128, :binary.copy(<<0xCD>>, 128))
 
-      task = Task.async(fn -> Magnet.Connection.request_piece(conn, 0) end)
-      Process.sleep(30)
+      parent = self()
+      release = make_ref()
+
+      task =
+        Task.async(fn ->
+          send(parent, {:metadata_request_ready, self()})
+          receive do: (^release -> :ok)
+          Magnet.Connection.request_piece(conn, 0)
+        end)
+
+      assert_receive {:metadata_request_ready, task_pid}, 2_000
+      assert task.pid == task_pid
+      1 = :erlang.trace(task.pid, true, [:send])
+      send(task.pid, release)
+
+      assert_receive {:trace, ^task_pid, :send, {:"$gen_call", _, {:socket_recv, _, _}},
+                      ^sender_pid},
+                     2_000
+
+      _ = :erlang.trace(task.pid, false, [:send])
 
       data_header = %UTP.Packet{
         type: UTP.Packet.st_data(),
@@ -318,7 +337,7 @@ defmodule Magnet.PexTest do
       assert MapSet.member?(entry.sources, {:pex, remote_id})
 
       on_exit(fn ->
-        if Process.alive?(sender_pid), do: GenServer.stop(sender_pid, :normal, 1_000)
+        TestSupport.Sync.safe_stop(sender_pid, 1_000)
         UTP.Connection.close(utp)
         :gen_udp.close(udp)
       end)

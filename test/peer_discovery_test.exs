@@ -62,7 +62,7 @@ defmodule PeerDiscoveryTest do
       if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
     end)
 
-    Process.sleep(20)
+    _ = :sys.get_state(pid)
     assert is_list(PeerDiscovery.get(hash))
     assert PeerDiscovery.Announce.private?(hash)
   end

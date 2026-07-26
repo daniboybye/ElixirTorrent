@@ -150,7 +150,8 @@ defmodule Magnet.FetcherTest do
     Application.put_env(:elixir_torrent, :dht, enabled: true)
 
     assert :ok = Magnet.Fetcher.announce_dht_for_metadata(hash)
-    assert eventually(fn -> dht_announce_lookup?(hash) end)
+    _ = :sys.get_state(DHT)
+    assert dht_announce_lookup?(hash)
   end
 
   test "discover_and_merge_peers announces to DHT before get_peers when enabled" do
@@ -171,9 +172,40 @@ defmodule Magnet.FetcherTest do
       display_name: nil
     }
 
-    task = Task.async(fn -> Magnet.Fetcher.discover_and_merge_peers(magnet, [], %{}) end)
+    on_exit(fn ->
+      try do
+        :sys.resume(DHT)
+      catch
+        :exit, _ -> :ok
+      end
+    end)
 
-    assert eventually(fn -> dht_announce_lookup?(hash) end, 200)
+    dht_pid = GenServer.whereis(DHT)
+    assert is_pid(dht_pid)
+    parent = self()
+    release = make_ref()
+    :ok = :sys.suspend(DHT)
+
+    task =
+      Task.async(fn ->
+        send(parent, {:discovery_ready, self()})
+        receive do: (^release -> :ok)
+        Magnet.Fetcher.discover_and_merge_peers(magnet, [], %{})
+      end)
+
+    assert_receive {:discovery_ready, task_pid}, 2_000
+    assert task.pid == task_pid
+    1 = :erlang.trace(task.pid, true, [:send, :set_on_spawn])
+    send(task.pid, release)
+
+    assert_receive {:trace, dht_sender, :send, {:"$gen_call", _, _}, ^dht_pid}, 2_000
+    _ = :erlang.trace(task.pid, false, [:send, :set_on_spawn])
+    _ = :erlang.trace(dht_sender, false, [:send])
+
+    # DHT suspended: the quick-retry task has queued its announce before the
+    # blocked get_peers call observed above.
+    assert Process.info(dht_pid, :message_queue_len) >= 2
+    :ok = :sys.resume(DHT)
     Task.shutdown(task, :brutal_kill)
   end
 
@@ -246,18 +278,12 @@ defmodule Magnet.FetcherTest do
 
     assert {:ok, ref} = Magnet.Fetcher.run(magnet, self())
     assert_receive {:magnet_fetch_progress, ^ref, _progress}, 5_000
+    [{session_pid, _}] = Registry.lookup(Registry, {:magnet_fetch, magnet.hash})
+    mon = Process.monitor(session_pid)
     assert :ok = Magnet.Fetcher.cancel(magnet.hash)
     assert_receive {:magnet_fetch, ^ref, {:error, :cancelled}}, 5_000
-    assert eventually(fn -> Registry.lookup(Registry, {:magnet_fetch, magnet.hash}) == [] end)
-  end
-
-  defp eventually(fun, attempts \\ 50) do
-    if fun.() or attempts <= 0 do
-      fun.()
-    else
-      Process.sleep(10)
-      eventually(fun, attempts - 1)
-    end
+    assert_receive {:DOWN, ^mon, :process, ^session_pid, _}, 5_000
+    assert Registry.lookup(Registry, {:magnet_fetch, magnet.hash}) == []
   end
 
   defp safe_ets_delete(table, key) do

@@ -504,6 +504,7 @@ defmodule PeerDiscoveryAnnounceTest do
     assert :ok = Announce.dht_lookup_allowed?(state, now + 15_000)
   end
 
+  @tag race_group: :network
   test "connecting_to_peers dials only and does not start tracker announce" do
     hash = <<9::160>>
     name = {:via, Registry, {Registry, {hash, PeerDiscovery.Announce}}}
@@ -523,7 +524,6 @@ defmodule PeerDiscoveryAnnounceTest do
     end)
 
     {:ok, pid} = GenServer.start_link(PeerDiscovery.Announce, [self(), torrent], name: name)
-    Process.sleep(20)
     before = :sys.get_state(pid)
 
     on_exit(fn ->
@@ -531,7 +531,6 @@ defmodule PeerDiscoveryAnnounceTest do
     end)
 
     GenServer.cast(pid, :connecting_to_peers)
-    Process.sleep(50)
     after_state = :sys.get_state(pid)
 
     assert after_state.last_tracker_announce_ms == before.last_tracker_announce_ms
@@ -617,7 +616,7 @@ defmodule PeerDiscoveryAnnounceTest do
         safe_stop(pid, 1_000)
       end)
 
-      Process.sleep(20)
+      _ = :sys.get_state(pid)
       state = :sys.get_state(pid)
 
       assert state.seed_peers == [seed]
@@ -647,7 +646,7 @@ defmodule PeerDiscoveryAnnounceTest do
     for _ <- List.duplicate(:dummy, max(n - current, 0)) do
       spec = %{
         id: :dummy_peer,
-        start: {Task, :start_link, [fn -> Process.sleep(:infinity) end]},
+        start: {PeerDiscoveryAnnounceTest.SwarmStub, :start_link, [[]]},
         restart: :temporary
       }
 
@@ -1224,5 +1223,19 @@ defmodule PeerDiscoveryAnnounceTest do
   catch
     :exit, :noproc -> :ok
     :exit, {:noproc, _call} -> :ok
+  end
+end
+
+defmodule PeerDiscoveryAnnounceTest.SwarmStub do
+  @moduledoc false
+
+  def start_link(_arg) do
+    Task.start_link(fn ->
+      release = make_ref()
+
+      receive do
+        ^release -> :ok
+      end
+    end)
   end
 end

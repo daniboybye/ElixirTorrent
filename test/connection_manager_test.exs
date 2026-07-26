@@ -17,6 +17,8 @@ end
 defmodule Peer.DialBackoffFilterTest do
   use ExUnit.Case, async: false
 
+  @moduletag race_group: :dial
+
   setup do
     {:ok, _} = Application.ensure_all_started(:elixir_torrent)
     :ok
@@ -27,7 +29,7 @@ defmodule Peer.DialBackoffFilterTest do
     peer = %Peer{ip: {1, 2, 3, 4}, port: 6881}
 
     :ok = Peer.DialBackoff.record(hash, peer.ip, peer.port, :timeout)
-    Process.sleep(20)
+    _ = :sys.get_state(Peer.DialBackoff)
 
     assert Peer.DialBackoff.filter([peer], hash) == []
     assert Peer.DialBackoff.blocked?(hash, peer.ip, peer.port)
@@ -40,7 +42,7 @@ defmodule Peer.DialBackoffFilterTest do
     blocked_v4 = %Peer{ip: {8, 8, 8, 8}, port: 6881}
 
     :ok = Peer.DialBackoff.record(hash, blocked_v4.ip, blocked_v4.port, :timeout)
-    Process.sleep(20)
+    _ = :sys.get_state(Peer.DialBackoff)
 
     result = Peer.DialBackoff.filter([fresh_v6, blocked_v4], hash, 2)
 
@@ -132,24 +134,19 @@ defmodule Peer.ConnectionManagerTest do
     assert map_size(state.queue) == 2
   end
 
+  @tag race_group: :dial
   test "stopping the manager terminates its active dial batch" do
     hash = :crypto.strong_rand_bytes(20)
     name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
     {:ok, manager_pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: name)
-    test_pid = self()
 
-    {:ok, dial_pid} =
-      Task.start(fn ->
-        send(test_pid, :dial_task_started)
-        Process.sleep(:infinity)
-      end)
+    {dial_pid, _dial_mon, _dial_release} = TestSupport.Sync.spawn_blocked()
 
     on_exit(fn ->
       if Process.alive?(manager_pid), do: GenServer.stop(manager_pid, :normal, 1_000)
       if Process.alive?(dial_pid), do: Process.exit(dial_pid, :kill)
     end)
 
-    assert_receive :dial_task_started, 1_000
     :sys.replace_state(manager_pid, &%{&1 | dialing?: true, dial_task: dial_pid})
 
     ref = Process.monitor(dial_pid)
@@ -262,7 +259,7 @@ defmodule Peer.ConnectionManagerTest do
       for _ <- 1..max(n - current, 0) do
         spec = %{
           id: :dummy_peer,
-          start: {Task, :start_link, [fn -> Process.sleep(:infinity) end]},
+          start: {Peer.ConnectionManagerTest.SwarmStub, :start_link, [[]]},
           restart: :temporary
         }
 
@@ -776,6 +773,20 @@ defmodule Peer.ConnectionManagerTest do
 
       assert evicted_after_second == @snub_evict_batch
     end
+  end
+end
+
+defmodule Peer.ConnectionManagerTest.SwarmStub do
+  @moduledoc false
+
+  def start_link(_arg) do
+    Task.start_link(fn ->
+      release = make_ref()
+
+      receive do
+        ^release -> :ok
+      end
+    end)
   end
 end
 

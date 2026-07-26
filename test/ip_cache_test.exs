@@ -33,7 +33,7 @@ defmodule AcceptorIpCacheTest do
 
     :persistent_term.erase(key)
     send(pid, :refresh)
-    Process.sleep(50)
+    _ = :sys.get_state(pid)
 
     cached = :persistent_term.get(key)
     assert cached == Acceptor.compute_all_global_ips()
