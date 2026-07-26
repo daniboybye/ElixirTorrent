@@ -20,13 +20,21 @@ defmodule PieceAvailabilityTest do
 
   defp with_model(hash, last_index, fun) do
     torrent = sample_torrent(hash, last_index)
-    {:ok, model_pid} = Torrent.Model.start_link(torrent)
-    Process.unlink(model_pid)
 
-    on_exit(fn -> TestSupport.Sync.safe_stop(model_pid, 5_000) end)
+    {:ok, model_pid} =
+      GenServer.start(
+        Torrent.Model,
+        torrent,
+        name: {:via, Registry, {Registry, {hash, Torrent.Model}}}
+      )
 
     :ok = Torrent.PiecesStatistic.init(torrent)
-    fun.(torrent)
+
+    try do
+      fun.(torrent)
+    after
+      TestSupport.Sync.safe_stop(model_pid, 5_000)
+    end
   end
 
   defp base_state(hash, pieces_count, overrides \\ []) do
@@ -86,19 +94,15 @@ defmodule PieceAvailabilityTest do
           name: {:via, Registry, {Registry, {key, Peer.Controller}}}
         )
 
-      on_exit(fn ->
-        try do
-          TestSupport.Sync.safe_stop(pid, 1_000)
-        catch
-          :exit, _ -> :ok
-        end
-      end)
+      try do
+        :ok = Peer.Controller.handle_have_all(key)
+        TestSupport.Sync.sync(pid)
 
-      :ok = Peer.Controller.handle_have_all(key)
-      TestSupport.Sync.sync(pid)
-
-      assert Peer.Controller.has_all?(key)
-      assert Peer.Controller.has_index?(key, 1)
+        assert Peer.Controller.has_all?(key)
+        assert Peer.Controller.has_index?(key, 1)
+      after
+        TestSupport.Sync.safe_stop(pid, 1_000)
+      end
     end)
   end
 
@@ -131,5 +135,24 @@ defmodule PieceAvailabilityTest do
     state = base_state(hash, 1)
 
     assert %State{} = State.handle_request(state, 0, 0, 16_384)
+  end
+
+  @tag race_group: :pipeline
+  test "bootstrap stop terminates the dynamic child without restarting it" do
+    hash = :crypto.strong_rand_bytes(20)
+    magnet = %Magnet{hash: hash, trackers: [], display_name: "metadata-stub"}
+
+    assert :ok = Magnet.Bootstrap.ensure(magnet)
+    [{pid, _}] = Registry.lookup(Registry, {:magnet_bootstrap, hash})
+    monitor = Process.monitor(pid)
+
+    assert :ok = Magnet.Bootstrap.stop(hash)
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :shutdown}, 2_000
+    TestSupport.Sync.sync(Magnet.Bootstrap.Supervisor)
+    TestSupport.Sync.sync(Registry.PIDPartition0)
+
+    refute Magnet.Bootstrap.active?(hash)
+    assert Registry.lookup(Registry, {:magnet_bootstrap, hash}) == []
+    assert Process.whereis(Registry) != nil
   end
 end

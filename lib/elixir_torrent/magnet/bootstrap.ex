@@ -42,8 +42,14 @@ defmodule Magnet.Bootstrap do
   @spec stop(Torrent.hash()) :: :ok
   def stop(hash) when is_binary(hash) do
     case GenServer.whereis(via_name(hash)) do
-      nil -> :ok
-      pid -> Supervisor.stop(pid, :normal)
+      nil ->
+        :ok
+
+      pid ->
+        case DynamicSupervisor.terminate_child(Magnet.Bootstrap.Supervisor, pid) do
+          :ok -> :ok
+          {:error, :not_found} -> :ok
+        end
     end
   catch
     :exit, _ -> :ok
