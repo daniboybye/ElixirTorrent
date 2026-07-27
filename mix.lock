@@ -23,7 +23,7 @@
   "nimble_parsec": {:hex, :nimble_parsec, "1.4.2", "8efba0122db06df95bfaa78f791344a89352ba04baedd3849593bfce4d0dc1c6", [:mix], [], "hexpm", "4b21398942dda052b403bbe1da991ccd03a053668d147d53fb8c4e0efe09c973"},
   "parse_trans": {:hex, :parse_trans, "3.4.2", "c352ddc1a0d5e54f9b1654d45f9c432eef76f9cea371c55ddff769ef688fdb74", [:rebar3], [], "hexpm", "4c25347de3b7c35732d32e69ab43d1ceee0beae3f3b3ade1b59cbd3dd224d9ca"},
   "propcheck": {:hex, :propcheck, "1.5.0", "df6f554a97eba4f92c3e4bc7758c8480e8bc401188af32cfe09641e81d8a55ba", [:mix], [{:libgraph, "~> 0.13", [hex: :libgraph, repo: "hexpm", optional: false]}, {:proper, "~> 1.5", [hex: :proper, repo: "hexpm", optional: false]}], "hexpm", "3388aa7909277faed166dfced39fad6ecae3c3be064352d37646be459fc80e09"},
-  "proper": {:hex, :proper, "1.5.0", "4a87ce8b219858e64c9aa015f4f7ed739d0ac3ca6bfd77fa62794617ee784225", [:rebar3], [], "hexpm", "fbf7cf0625e5441a314514f7d8e1eaff52090fcd94ff34b5171ff293d3f9969a"},
+  "proper": {:git, "https://github.com/proper-testing/proper.git", "eaa5eee5319478954e80bc7c16614d507f7842b4", [ref: "eaa5eee5319478954e80bc7c16614d507f7842b4"]},
   "quic": {:hex, :quic, "1.7.1", "1ac5331739e17928a797d5ff103629a9faa91167481c326d7043b323e3bdc3b1", [:rebar3], [], "hexpm", "9b85784f1d78f5c3adfee5f52c3448cac3b03f5f0403d5dc782231c3d3ad709d"},
   "recon": {:hex, :recon, "2.5.6", "9052588e83bfedfd9b72e1034532aee2a5369d9d9343b61aeb7fbce761010741", [:mix, :rebar3], [], "hexpm", "96c6799792d735cc0f0fd0f86267e9d351e63339cbe03df9d162010cefc26bb0"},
   "ssl_verify_fun": {:hex, :ssl_verify_fun, "1.1.7", "354c321cf377240c7b8716899e182ce4890c5938111a1296add3ec74cf1715df", [:make, :mix, :rebar3], [], "hexpm", "fe4c190e8f37401d30167c8c405eda19469f34577987c76dde613e838bbc67f8"},

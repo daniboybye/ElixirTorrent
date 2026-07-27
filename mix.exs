@@ -48,6 +48,12 @@ defmodule ElixirTorrent.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:stream_data, "~> 1.2", only: :test},
       {:propcheck, "~> 1.5", only: :test},
+      # PropEr 1.5.0 predates its OTP 29 warning fixes; keep the upstream fix immutable.
+      {:proper,
+       git: "https://github.com/proper-testing/proper.git",
+       ref: "eaa5eee5319478954e80bc7c16614d507f7842b4",
+       only: :test,
+       override: true},
       {:bento, "~> 1.0.0"},
       {:recon, "~> 2.5.6"},
       {:logger_file_backend, "~> 0.0.14"},
@@ -66,6 +72,7 @@ defmodule ElixirTorrent.MixProject do
   defp aliases do
     [
       quality: ["compile --warnings-as-errors", "dialyzer", "credo --strict --all"],
+      "deps.patch-test": ["cmd elixir scripts/patch-propcheck.exs"],
       "test.stress": ["cmd scripts/test-stress.sh"],
       "test.races": ["cmd scripts/test-races.sh"],
       "test.properties": ["cmd scripts/test-properties.sh"],

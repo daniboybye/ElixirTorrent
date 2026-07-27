@@ -3,6 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+bash scripts/compile-property-deps.sh
 MIX_ENV=test mix compile --warnings-as-errors
 
 run_group() {

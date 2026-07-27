@@ -54,6 +54,9 @@ jobs:
       - name: Check formatting
         run: mix format --check-formatted
 
+      - name: Compile property test dependencies without warnings
+        run: bash scripts/compile-property-deps.sh
+
       - name: Compile without warnings
         run: |
           mix compile --warnings-as-errors
