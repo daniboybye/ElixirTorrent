@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -68,5 +69,13 @@ jobs:
       - name: Run strict Credo
         run: mix credo --strict --all
 
-      - name: Run tests
-        run: timeout 60s mix test --no-compile
+      - name: Run tests and collect coverage
+        run: timeout 60s mix coveralls.json --no-compile
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          disable_search: true
+          fail_ci_if_error: true
+          files: cover/excoveralls.json
+          use_oidc: true

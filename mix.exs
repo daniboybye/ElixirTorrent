@@ -18,10 +18,15 @@ defmodule ElixirTorrent.MixProject do
       deps: deps(),
       escript: escript(),
       aliases: aliases(),
+      test_coverage: [tool: ExCoveralls],
       # Defensive and staged protocol branches intentionally retain fallback
       # clauses that Dialyzer proves unreachable with today's implementations.
       dialyzer: [flags: [:no_match]]
     ]
+  end
+
+  def cli do
+    [preferred_envs: ["coveralls.json": :test]]
   end
 
   defp elixirc_options do
@@ -48,6 +53,7 @@ defmodule ElixirTorrent.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:stream_data, "~> 1.2", only: :test},
       {:propcheck, "~> 1.5", only: :test},
+      {:excoveralls, "~> 0.18.5", only: :test},
       # PropEr 1.5.0 predates its OTP 29 warning fixes; keep the upstream fix immutable.
       {:proper,
        git: "https://github.com/proper-testing/proper.git",
@@ -72,7 +78,10 @@ defmodule ElixirTorrent.MixProject do
   defp aliases do
     [
       quality: ["compile --warnings-as-errors", "dialyzer", "credo --strict --all"],
-      "deps.patch-test": ["cmd elixir scripts/patch-propcheck.exs"],
+      "deps.patch-test": [
+        "cmd elixir scripts/patch-propcheck.exs",
+        "cmd elixir scripts/patch-excoveralls.exs"
+      ],
       "test.stress": ["cmd scripts/test-stress.sh"],
       "test.races": ["cmd scripts/test-races.sh"],
       "test.properties": ["cmd scripts/test-properties.sh"],
