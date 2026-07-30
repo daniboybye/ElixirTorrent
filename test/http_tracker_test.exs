@@ -50,17 +50,46 @@ defmodule HTTPTrackerTest do
       assert announce_query(torrent.hash)["event"] == "stopped"
     end
 
-    test "a session restored from disk does not announce started again" do
+    test "the first restore of a process lifetime announces started again" do
       torrent = sample_torrent()
+      on_exit(fn -> Torrent.Session.delete(torrent.hash) end)
 
-      resumed =
-        Torrent.Session.apply(torrent, %{
-          bitfield: Torrent.Bitfield.make(1),
-          downloaded: 0,
-          left: torrent.left,
-          uploaded: 123,
-          peer_status: nil
-        })
+      # A cold app restart: state comes off disk, but nothing has delivered
+      # `started` for this hash in this BEAM. The tracker's session row for us is
+      # gone (it saw our `stopped`, or timed us out), so BEP 3 wants `started` on
+      # the first announce. Drive the real disk path, save → load → apply, the way
+      # `Torrent.init/1` does at boot.
+      PeerDiscovery.StartedAnnounces.delete(torrent.hash)
+      :ok = Torrent.Session.save(torrent.hash, %{torrent | uploaded: 123})
+      assert {:ok, session} = Torrent.Session.load(torrent.hash)
+
+      resumed = Torrent.Session.apply(torrent, session)
+      assert resumed.uploaded == 123
+      assert resumed.event == Torrent.started()
+
+      start_model(resumed)
+
+      assert announce_query(torrent.hash)["event"] == "started"
+    end
+
+    test "a session restored in-process does not announce started again" do
+      torrent = sample_torrent()
+      PeerDiscovery.StartedAnnounces.delete(torrent.hash)
+
+      # First resume of this process lifetime still owes `started` ...
+      first = Torrent.Session.apply(torrent, sample_session(torrent))
+      assert first.event == Torrent.started()
+
+      # ... and a tracker accepting that announce is what opens the session from
+      # the tracker's point of view (PeerDiscovery.Announce records it there).
+      PeerDiscovery.StartedAnnounces.put(torrent.hash)
+
+      # Second resume with only an in-process reconcile in between — pause then
+      # add again, or a plain re-add of a hash whose `.term` file is still there.
+      # The tracker already holds our session row, so this announce must carry no
+      # event key at all; resending `started` would open a second one.
+      resumed = Torrent.Session.apply(torrent, sample_session(torrent))
+      assert resumed.event == Torrent.empty()
 
       start_model(resumed)
 
@@ -85,6 +114,16 @@ defmodule HTTPTrackerTest do
       last_index: 0,
       last_piece_length: piece_length,
       bitfield: Torrent.Bitfield.make(1),
+      peer_status: nil
+    }
+  end
+
+  defp sample_session(torrent) do
+    %{
+      bitfield: Torrent.Bitfield.make(1),
+      downloaded: 0,
+      left: torrent.left,
+      uploaded: 123,
       peer_status: nil
     }
   end

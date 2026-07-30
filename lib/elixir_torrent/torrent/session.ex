@@ -49,6 +49,11 @@ defmodule Torrent.Session do
 
   @spec delete(Torrent.hash()) :: :ok
   def delete(hash) do
+    # Dropping the persisted session also drops the in-memory `started` record:
+    # removing a torrent ends its tracker session (BEP 3), so a later re-add is a
+    # new one and owes `started` again even within the same BEAM.
+    PeerDiscovery.StartedAnnounces.delete(hash)
+
     case path(hash) do
       file when is_binary(file) ->
         case File.rm(file) do
@@ -69,10 +74,38 @@ defmodule Torrent.Session do
         uploaded: Map.get(session, :uploaded, torrent.uploaded),
         added_at: Map.get(session, :added_at, torrent.added_at),
         peer_status: Map.get(session, :peer_status, torrent.peer_status),
-        # A restored torrent is continuing an existing client session. BEP 3
-        # reserves "started" for the first announce, so its first post-resume
-        # announce is an ordinary event-less announce.
-        event: Torrent.empty()
+        event: resume_event(torrent)
     }
+  end
+
+  # BEP 3 § Tracker HTTP protocol reserves `started` for the first announce a
+  # client makes to the tracker — first announce *of a session*, not once ever per
+  # info hash. `apply/2` runs from `Torrent.init/1` → `resume_mode_for/3`, which
+  # fires on every add of a hash that still has a `.term` file on disk, and that
+  # covers two cases needing opposite answers:
+  #
+  #   * Re-added inside a live BEAM (pause/`stop_and_serialize` then add again, or
+  #     a plain re-add): `started` already reached a tracker this process
+  #     lifetime, so announce event-less and let the tracker keep the session row
+  #     it already holds for us.
+  #
+  #   * Restored after the app actually restarted: from the tracker's point of
+  #     view the old session ended (it saw our `stopped`, or timed the peer out),
+  #     so the first announce owes a fresh `started`. libtorrent, qBittorrent and
+  #     Transmission all behave this way, and private trackers key their
+  #     per-session accounting off that event.
+  #
+  # `PeerDiscovery.StartedAnnounces` is memory-only and never serialized, so it is
+  # empty after a real restart and populated after an in-process one — which is
+  # exactly the distinction, without persisting any extra state.
+  @spec resume_event(Torrent.t()) :: 0..3
+  defp resume_event(%Torrent{hash: hash} = torrent) do
+    if PeerDiscovery.StartedAnnounces.sent?(hash) do
+      Torrent.empty()
+    else
+      # Keeps whatever the caller staged (the struct default is `started`) rather
+      # than hardcoding the event here.
+      torrent.event
+    end
   end
 end

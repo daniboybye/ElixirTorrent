@@ -1,7 +1,7 @@
 defmodule PeerDiscoveryAnnounceHandleInfoTest do
   use ExUnit.Case, async: false
 
-  alias PeerDiscovery.Announce
+  alias PeerDiscovery.{Announce, StartedAnnounces}
   alias Tracker.{Error, Response}
 
   setup do
@@ -53,6 +53,61 @@ defmodule PeerDiscoveryAnnounceHandleInfoTest do
     state = :sys.get_state(pid)
     assert state.peers[announce] == [peer]
     refute Map.has_key?(state.requests, ref)
+  end
+
+  # BEP 3 § Tracker HTTP protocol — `started` is owed once per session, so the
+  # "already sent it" record must be set by a tracker actually accepting the
+  # announce. `Torrent.Session.apply/2` reads that record to decide whether a
+  # resume re-sends `started`.
+  test "handle_info tracker Response with started records the process-lifetime flag" do
+    hash = :crypto.strong_rand_bytes(20)
+    StartedAnnounces.delete(hash)
+    {pid, ^hash} = start_announce!(hash)
+    ref = make_ref()
+    announce = "http://tracker.example/announce"
+    peer = %Peer{ip: {9, 9, 9, 9}, port: 6881}
+
+    :sys.replace_state(pid, fn state ->
+      %{state | requests: %{ref => {announce, 0, 0}}, tier_batches: %{0 => 1}}
+    end)
+
+    refute StartedAnnounces.sent?(hash)
+
+    send(
+      pid,
+      {ref,
+       {Torrent.started(), %Response{peers: [peer], interval: 600, complete: 1, incomplete: 2}}}
+    )
+
+    # Barrier: the Announce process finishes handling the response before this
+    # synchronous state read is served.
+    _ = :sys.get_state(pid)
+
+    assert StartedAnnounces.sent?(hash)
+  end
+
+  test "handle_info tracker Response without started leaves the flag unset" do
+    hash = :crypto.strong_rand_bytes(20)
+    StartedAnnounces.delete(hash)
+    {pid, ^hash} = start_announce!(hash)
+    ref = make_ref()
+    announce = "http://tracker.example/announce"
+    peer = %Peer{ip: {9, 9, 9, 9}, port: 6881}
+
+    :sys.replace_state(pid, fn state ->
+      %{state | requests: %{ref => {announce, 0, 0}}, tier_batches: %{0 => 1}}
+    end)
+
+    # A periodic, event-less announce says nothing about session establishment.
+    send(
+      pid,
+      {ref,
+       {Torrent.empty(), %Response{peers: [peer], interval: 600, complete: 1, incomplete: 2}}}
+    )
+
+    _ = :sys.get_state(pid)
+
+    refute StartedAnnounces.sent?(hash)
   end
 
   test "handle_info DHT get_peers success stores dht_peers" do

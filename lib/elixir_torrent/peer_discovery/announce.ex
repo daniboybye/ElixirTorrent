@@ -54,7 +54,7 @@ defmodule PeerDiscovery.Announce do
 
   alias Acceptor.Connection.Handshakes
   alias Peer.UtPex.Outbound
-  alias PeerDiscovery.Requests
+  alias PeerDiscovery.{Requests, StartedAnnounces}
   alias Torrent.{Model, Swarm}
   require Logger
 
@@ -958,6 +958,16 @@ defmodule PeerDiscovery.Announce do
       |> maybe_stamp_last_tracker_announce(response, now)
 
     log_tracker_success(state.hash, announce, response)
+
+    # BEP 3 § Tracker HTTP protocol — a tracker answered, so if this announce
+    # carried `started` our session is now open from its point of view. Remember
+    # that for this BEAM lifetime only (see `PeerDiscovery.StartedAnnounces`): an
+    # in-process resume must then announce event-less, while a restore after a
+    # real app restart reads an empty table and re-sends `started`. Recorded on
+    # the success path rather than at request-build time, so a `started` that
+    # reached nobody (dead URL, timeout) still counts as owed.
+    if event === Torrent.started(), do: StartedAnnounces.put(state.hash)
+
     Model.update_event(state.hash, event)
 
     if dht_allowed?(state) do

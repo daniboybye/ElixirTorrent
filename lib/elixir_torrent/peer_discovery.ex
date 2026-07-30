@@ -3,7 +3,14 @@ defmodule PeerDiscovery do
   Top-level peer discovery supervisor: tracker announces, DHT, LSD, and seed peers.
   """
 
-  alias __MODULE__.{Announce, AnnouncesSupervisor, ConnectionIds, LSD, SeedPeers}
+  alias __MODULE__.{
+    Announce,
+    AnnouncesSupervisor,
+    ConnectionIds,
+    LSD,
+    SeedPeers,
+    StartedAnnounces
+  }
 
   require Logger
 
@@ -19,6 +26,10 @@ defmodule PeerDiscovery do
       },
       ConnectionIds,
       SeedPeers,
+      # BEP 3 § Tracker HTTP protocol — owns the memory-only table of hashes that
+      # already sent `started` this BEAM lifetime, so a resume knows whether the
+      # tracker still has a session open for us.
+      StartedAnnounces,
       LSD
     ]
 
