@@ -191,7 +191,7 @@ defmodule Torrent.Controller do
           PiecesStatistic.reconcile_stale_statuses(hash, &Downloads.piece_active?(hash, &1))
 
         if cleared > 0 do
-          Logger.info(
+          Logger.debug(
             "[piece_picker] hash=#{Torrent.hex_encoded_hash(hash)} reconcile_stale cleared=#{cleared} active=#{length(active)}"
           )
         end
@@ -255,7 +255,7 @@ defmodule Torrent.Controller do
         :noop
 
       active_count < effective_max and connected > 0 ->
-        Logger.info(
+        Logger.debug(
           "[reconcile_pump] hash=#{Torrent.hex_encoded_hash(hash)} active=#{active_count} max=#{effective_max} unchoked=#{unchoked} peers=#{connected} kick=next_piece"
         )
 
@@ -382,7 +382,7 @@ defmodule Torrent.Controller do
     last = Process.get(key, 0)
 
     if now - last >= @download_waiting_log_interval_sec do
-      Logger.info(
+      Logger.debug(
         "download waiting hash=#{Torrent.hex_encoded_hash(hash)} connected=#{connected} downloaded=#{downloaded} left=#{left} status=#{inspect(status)}"
       )
 

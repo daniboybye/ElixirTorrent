@@ -202,7 +202,7 @@ defmodule Torrent.Swarm do
     {unchoking, choking} = split_unchoke_slots(ranks)
 
     if unchoking != [] or choking != [] do
-      Logger.info(
+      Logger.debug(
         "[peer_upload] hash=#{Torrent.hex_encoded_hash(hash)} unchoke_cycle unchoking=#{length(unchoking)} choking=#{length(choking)} interested=#{length(ranks)}"
       )
     end
@@ -260,7 +260,7 @@ defmodule Torrent.Swarm do
       case start_peer_child(hash, id, reserved, socket) do
         {:ok, _pid} = ok ->
           active = count(hash)
-          Logger.info("peer connected hash=#{Torrent.hex_encoded_hash(hash)} active=#{active}")
+          Logger.debug("peer connected hash=#{Torrent.hex_encoded_hash(hash)} active=#{active}")
           ok
 
         other ->

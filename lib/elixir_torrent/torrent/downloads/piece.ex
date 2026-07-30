@@ -194,16 +194,16 @@ defmodule Torrent.Downloads.Piece do
   defp finish_if_complete(%State{requests: [], waiting: []} = state) do
     hash_hex = Torrent.hex_encoded_hash(state.hash)
 
-    Logger.info(
+    Logger.debug(
       "[piece_download] hash=#{hash_hex} index=#{state.index} blocks_complete verifying"
     )
 
     if FileHandle.check?(state.hash, state.index) do
-      Logger.info("[piece_download] hash=#{hash_hex} index=#{state.index} verified complete")
+      Logger.debug("[piece_download] hash=#{hash_hex} index=#{state.index} verified complete")
       state.downloaded.()
       {:stop, :normal, state}
     else
-      Logger.info("[piece_download] hash=#{hash_hex} index=#{state.index} verify_failed")
+      Logger.warning("[piece_download] hash=#{hash_hex} index=#{state.index} verify_failed")
       fire_dealt(state)
       {:stop, {:shutdown, :wrong_subpiece}, state}
     end

@@ -122,7 +122,7 @@ defmodule Acceptor.Connection.Handshakes do
         {0, %{}, []}
 
       peers_to_dial == [] ->
-        Logger.info(
+        Logger.debug(
           "[peer_dial] hash=#{hash_hex} batch=#{length(peers)} to_dial=0 connected=#{connected} reason=all_filtered"
         )
 
@@ -133,14 +133,14 @@ defmodule Acceptor.Connection.Handshakes do
         # the dial-composition log isn't inverted (it once read v4/v6 backwards).
         {v6, v4} = Enum.split_with(peers_to_dial, &ipv6_peer?/1)
 
-        Logger.info(
+        Logger.debug(
           "[peer_dial] hash=#{hash_hex} to_dial v4=#{length(v4)} v6=#{length(v6)} total=#{length(peers_to_dial)}"
         )
 
         {ok_count, failures, failed_peers, fam_stats} = dial_peers_async(peers_to_dial, hash)
         record_family_stats(hash, fam_stats)
 
-        Logger.info(
+        Logger.debug(
           "[peer_dial] hash=#{hash_hex} batch=#{length(peers)} to_dial=#{length(peers_to_dial)} ok=#{ok_count} failed=#{inspect(failures)} connected=#{Torrent.Swarm.count(hash)}"
         )
 
@@ -526,14 +526,14 @@ defmodule Acceptor.Connection.Handshakes do
   end
 
   defp log_handshake_sent(%Peer{ip: ip, port: port}, :utp) do
-    Logger.info("[peer_dial] utp_handshake_sent endpoint=#{inspect({ip, port})}")
+    Logger.debug("[peer_dial] utp_handshake_sent endpoint=#{inspect({ip, port})}")
     :ok
   end
 
   defp log_handshake_sent(_peer, _transport), do: :ok
 
   defp log_handshake_recv(%Peer{ip: ip, port: port}, :utp) do
-    Logger.info("[peer_dial] utp_handshake_recv endpoint=#{inspect({ip, port})}")
+    Logger.debug("[peer_dial] utp_handshake_recv endpoint=#{inspect({ip, port})}")
     :ok
   end
 
@@ -596,7 +596,7 @@ defmodule Acceptor.Connection.Handshakes do
     case safe_connect(ip, port, opts) do
       {:ok, socket} ->
         :ok = Acceptor.apply_tcp_performance(socket)
-        Logger.info("[peer_dial] connect_won transport=tcp endpoint=#{inspect({ip, port})}")
+        Logger.debug("[peer_dial] connect_won transport=tcp endpoint=#{inspect({ip, port})}")
         {:ok, socket, :tcp}
 
       {:error, _} = error ->
@@ -607,7 +607,7 @@ defmodule Acceptor.Connection.Handshakes do
   defp connect_transport(:utp, ip, port, _opts) do
     case safe_utp_connect(ip, port) do
       {:ok, socket} ->
-        Logger.info("[peer_dial] connect_won transport=utp endpoint=#{inspect({ip, port})}")
+        Logger.debug("[peer_dial] connect_won transport=utp endpoint=#{inspect({ip, port})}")
         {:ok, socket, :utp}
 
       {:error, _} = error ->
@@ -790,7 +790,7 @@ defmodule Acceptor.Connection.Handshakes do
          true <- Torrent.has_hash?(hash),
          :ok <- send_msg(mse_socket, hash),
          :ok <- add_peer(hash, peer_id, reserved, mse_socket, peer_endpoint(nil, mse_socket)) do
-      Logger.info(
+      Logger.debug(
         "[mse] inbound_accepted hash=#{Torrent.hex_encoded_hash(hash)} peer=#{Peer.log_id(peer_id)}"
       )
 
@@ -885,7 +885,7 @@ defmodule Acceptor.Connection.Handshakes do
          :ok <- maybe_set_connection_origin(key, origin),
          :ok <- start_peer_protocol(key),
          :ok <- safe_activate(key) do
-      Logger.info(
+      Logger.debug(
         "[peer_handoff] ok hash=#{Torrent.hex_encoded_hash(hash)} endpoint=#{inspect(endpoint)}"
       )
 

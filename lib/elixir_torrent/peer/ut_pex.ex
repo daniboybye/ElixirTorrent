@@ -154,7 +154,7 @@ defmodule Peer.UtPex do
 
       seed_count = Enum.count(peers, &(&1.seed == true))
 
-      Logger.info(
+      Logger.debug(
         "[ut_pex] ingest hash=#{Torrent.hex_encoded_hash(hash)} added=#{length(peers)} seeds=#{seed_count}"
       )
     end

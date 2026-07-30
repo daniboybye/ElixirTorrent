@@ -38,7 +38,7 @@ defmodule NAT.UPnP do
          :ok <- safe_close(socket),
          {:ok, location} <- parse_location(response),
          {:ok, {control_url, service_type}} <- fetch_control_url(location) do
-      Logger.info("[nat] upnp service=#{service_type} control_url=#{control_url}")
+      Logger.debug("[nat] upnp service=#{service_type} control_url=#{control_url}")
       {:ok, {control_url, service_type}}
     else
       {:error, _} = error -> error

@@ -57,7 +57,7 @@ defmodule NAT.PortMapper do
     gateway = NAT.NATPMP.default_gateway()
     local_ip = Acceptor.primary_ips().inet || Acceptor.ip()
 
-    Logger.info(
+    Logger.debug(
       "[nat] mapping attempt port=#{port} local_ip=#{inspect(local_ip)} gateway=#{inspect(gateway)} skip=#{inspect(MapSet.to_list(dead))}"
     )
 
@@ -77,7 +77,7 @@ defmodule NAT.PortMapper do
         # get manually opened / a NAT-PMP-capable router replaces the current
         # one and the process is restarted).
         all_methods_dead?(dead) ->
-          Logger.info("[nat] all_methods_dead — sleeping until next refresh")
+          Logger.debug("[nat] all_methods_dead — sleeping until next refresh")
           {0, @refresh_ms}
 
         true ->
@@ -86,7 +86,7 @@ defmodule NAT.PortMapper do
       end
 
     if mapped < @min_mapped and not all_methods_dead?(dead) do
-      Logger.info("[nat] retry_scheduled failures=#{failures} delay_ms=#{next_ms}")
+      Logger.debug("[nat] retry_scheduled failures=#{failures} delay_ms=#{next_ms}")
     end
 
     Process.send_after(self(), :map_ports, next_ms)
@@ -158,7 +158,7 @@ defmodule NAT.PortMapper do
         }
 
       {:error, reason} ->
-        Logger.info("[nat] failed via=upnp reason=#{inspect(reason)}")
+        Logger.debug("[nat] failed via=upnp reason=#{inspect(reason)}")
         %{tcp: {:error, reason}, udp: {:error, reason}}
     end
   end
@@ -167,11 +167,11 @@ defmodule NAT.PortMapper do
   defp upnp_external_ip(control_url, service_type) do
     case NAT.UPnP.get_external_ip(control_url, service_type) do
       {:ok, ip} ->
-        Logger.info("[nat] upnp external_ip=#{ip}")
+        Logger.debug("[nat] upnp external_ip=#{ip}")
         ip
 
       {:error, reason} ->
-        Logger.info("[nat] upnp external_ip unavailable reason=#{inspect(reason)}")
+        Logger.debug("[nat] upnp external_ip unavailable reason=#{inspect(reason)}")
         nil
     end
   end
@@ -220,7 +220,7 @@ defmodule NAT.PortMapper do
     n = Map.fetch!(mf_acc, method) + 1
 
     if n >= @method_max_failures do
-      Logger.info("[nat] give_up method=#{method} after=#{n} consecutive failures")
+      Logger.warning("[nat] give_up method=#{method} after=#{n} consecutive failures")
       {Map.put(mf_acc, method, n), MapSet.put(dead_acc, method)}
     else
       {Map.put(mf_acc, method, n), dead_acc}
@@ -237,20 +237,20 @@ defmodule NAT.PortMapper do
   defp map_natpmp(port, proto) do
     case NAT.NATPMP.default_gateway() do
       nil ->
-        Logger.info("[nat] failed proto=#{proto} port=#{port} via=natpmp reason=no_gateway")
+        Logger.debug("[nat] failed proto=#{proto} port=#{port} via=natpmp reason=no_gateway")
         :no_gateway
 
       gateway ->
         case NAT.NATPMP.map_port(gateway, proto, port, @lease_seconds) do
           {:ok, external, lifetime} ->
-            Logger.info(
+            Logger.debug(
               "[nat] mapped proto=#{proto} external_port=#{external} internal_port=#{port} lifetime=#{lifetime}s via=natpmp"
             )
 
             :ok
 
           {:error, reason} ->
-            Logger.info(
+            Logger.debug(
               "[nat] failed proto=#{proto} port=#{port} via=natpmp reason=#{inspect(reason)}"
             )
 
@@ -262,14 +262,14 @@ defmodule NAT.PortMapper do
   defp map_upnp(control_url, service_type, port, proto, external_ip) do
     case NAT.UPnP.add_port_mapping(control_url, service_type, proto, port, @lease_seconds) do
       :ok ->
-        Logger.info(
+        Logger.debug(
           "[nat] mapped proto=#{proto} external_port=#{port} internal_port=#{port} external_ip=#{external_ip || "unknown"} via=upnp"
         )
 
         :ok
 
       {:error, :upnp_rejected} ->
-        Logger.info(
+        Logger.debug(
           "[nat] upnp_rejected proto=#{proto} port=#{port}; deleting stale mapping and retrying"
         )
 
@@ -277,14 +277,14 @@ defmodule NAT.PortMapper do
 
         case NAT.UPnP.add_port_mapping(control_url, service_type, proto, port, @lease_seconds) do
           :ok ->
-            Logger.info(
+            Logger.debug(
               "[nat] mapped proto=#{proto} external_port=#{port} internal_port=#{port} external_ip=#{external_ip || "unknown"} via=upnp after_retry"
             )
 
             :ok
 
           {:error, reason} ->
-            Logger.info(
+            Logger.debug(
               "[nat] failed proto=#{proto} port=#{port} via=upnp reason=#{inspect(reason)} after_retry"
             )
 
@@ -292,7 +292,9 @@ defmodule NAT.PortMapper do
         end
 
       {:error, reason} ->
-        Logger.info("[nat] failed proto=#{proto} port=#{port} via=upnp reason=#{inspect(reason)}")
+        Logger.debug(
+          "[nat] failed proto=#{proto} port=#{port} via=upnp reason=#{inspect(reason)}"
+        )
 
         {:error, reason}
     end
@@ -315,7 +317,7 @@ defmodule NAT.PortMapper do
     mapped = mapped_count(summary)
     active_slots = 4 - Enum.count(dead) * 2
 
-    Logger.info(
+    Logger.debug(
       "[nat] summary port=#{port} mapped=#{mapped}/#{active_slots} natpmp_tcp=#{tag(summary.natpmp_tcp)} natpmp_udp=#{tag(summary.natpmp_udp)} upnp_tcp=#{tag(summary.upnp_tcp)} upnp_udp=#{tag(summary.upnp_udp)}"
     )
   end

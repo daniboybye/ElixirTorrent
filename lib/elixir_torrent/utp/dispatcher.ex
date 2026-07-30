@@ -150,7 +150,7 @@ defmodule UTP.Dispatcher do
   end
 
   def handle_cast({:accept, socket_ref, ip, port}, state) do
-    Logger.info("[utp] inbound accept peer=#{inspect({ip, port})}")
+    Logger.debug("[utp] inbound accept peer=#{inspect({ip, port})}")
 
     _ =
       Task.Supervisor.start_child(Acceptor.Connection.Handshakes, fn ->

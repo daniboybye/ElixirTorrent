@@ -111,7 +111,7 @@ defmodule Magnet.Connection do
       {:error, tcp_reason} ->
         case connect_utp(peer.ip, peer.port) do
           {:ok, socket} ->
-            Logger.info(
+            Logger.debug(
               "[magnet_ut] connect transport=utp endpoint=#{inspect({peer.ip, peer.port})}"
             )
 
@@ -154,7 +154,7 @@ defmodule Magnet.Connection do
 
       log_ltep_ready_swarm(key, conn.ltep, metadata_size)
 
-      Logger.info(
+      Logger.debug(
         "[magnet_ut] metadata_ready transport=swarm endpoint=peer=#{Peer.log_key(key)} unchoked=#{unchoked?}"
       )
 
@@ -172,7 +172,7 @@ defmodule Magnet.Connection do
             _ -> :controller_ready
           end
 
-        Logger.info(
+        Logger.debug(
           "[magnet_ut] open_swarm_fail endpoint=peer=#{Peer.log_key(key)} step=#{step} reason=#{inspect(normalize_peer_error(reason))}"
         )
 
@@ -180,7 +180,7 @@ defmodule Magnet.Connection do
         error
 
       other ->
-        Logger.info(
+        Logger.debug(
           "[magnet_ut] open_swarm_fail endpoint=peer=#{Peer.log_key(key)} step=precondition reason=#{inspect(other)}"
         )
 
@@ -286,14 +286,14 @@ defmodule Magnet.Connection do
 
     cond do
       is_integer(metadata_size) and metadata_size > 0 ->
-        Logger.info(
+        Logger.debug(
           "[magnet_ut] controller_ready transport=swarm endpoint=peer=#{Peer.log_key(key)} metadata_size=#{metadata_size} unchoked=#{inspect(info.unchoked?)}"
         )
 
         {:ok, Map.put(info, :metadata_size, metadata_size)}
 
       metadata_seeder?(info) ->
-        Logger.info(
+        Logger.debug(
           "[magnet_ut] controller_ready transport=swarm endpoint=peer=#{Peer.log_key(key)} metadata_size=unknown seeder=true unchoked=#{inspect(info.unchoked?)}"
         )
 
@@ -302,14 +302,14 @@ defmodule Magnet.Connection do
       Session.peer_supports?(info.ltep, @ut_metadata) ->
         # BEP 9 peers may omit metadata_size in LTEP; probe piece 0 and
         # learn total_size from the data message (download_all_pieces/2 nil clause).
-        Logger.info(
+        Logger.debug(
           "[magnet_ut] controller_ready transport=swarm endpoint=peer=#{Peer.log_key(key)} metadata_size=unknown ut_metadata=true unchoked=#{inspect(info.unchoked?)}"
         )
 
         {:ok, info}
 
       System.monotonic_time(:millisecond) >= deadline ->
-        Logger.info(
+        Logger.debug(
           "[magnet_ut] controller_ready_timeout transport=swarm endpoint=peer=#{Peer.log_key(key)} metadata_size=#{inspect(metadata_size)} unchoked=#{inspect(info.unchoked?)}"
         )
 
@@ -356,7 +356,7 @@ defmodule Magnet.Connection do
     peer_ut = Session.peer_extension_id(ltep, @ut_metadata)
     local_ut = Session.local_extension_id(ltep, @ut_metadata)
 
-    Logger.info(
+    Logger.debug(
       "[magnet_ut] handshake ok transport=#{transport} endpoint=#{inspect({ip, port})} peer_ut_id=#{inspect(peer_ut)} local_ut_id=#{inspect(local_ut)} metadata_size=#{inspect(metadata_size)}"
     )
   end
@@ -365,7 +365,7 @@ defmodule Magnet.Connection do
     peer_ut = Session.peer_extension_id(ltep, @ut_metadata)
     local_ut = Session.local_extension_id(ltep, @ut_metadata)
 
-    Logger.info(
+    Logger.debug(
       "[magnet_ut] handshake ok transport=swarm endpoint=peer=#{Peer.log_key(key)} peer_ut_id=#{inspect(peer_ut)} local_ut_id=#{inspect(local_ut)} metadata_size=#{inspect(metadata_size)}"
     )
   end
@@ -424,7 +424,7 @@ defmodule Magnet.Connection do
            :ok <- io_send(conn, wire) do
         local_ut = Session.local_extension_id(conn.ltep, @ut_metadata)
 
-        Logger.info(
+        Logger.debug(
           "[magnet_ut] wire_tx transport=#{conn.transport} endpoint=#{endpoint(conn)} piece=#{piece_index} peer_ut_id=#{ut_id} local_ut_id=#{inspect(local_ut)} bytes=#{wire_hex(wire)}"
         )
 
@@ -449,7 +449,7 @@ defmodule Magnet.Connection do
           | {:reject, non_neg_integer(), t()}
           | {:error, term()}
   defp send_choked_piece_request(conn, wire, piece_index) do
-    Logger.info(
+    Logger.debug(
       "[magnet_ut] choked_send transport=#{conn.transport} endpoint=#{endpoint(conn)} piece=#{piece_index}"
     )
 
@@ -905,7 +905,7 @@ defmodule Magnet.Connection do
         handle_ut_metadata_data(conn, expected_piece, deadline, data_kw)
 
       {:ok, {:reject, piece: ^expected_piece}} ->
-        Logger.info("[magnet_ut] reject endpoint=#{endpoint(conn)} piece=#{expected_piece}")
+        Logger.debug("[magnet_ut] reject endpoint=#{endpoint(conn)} piece=#{expected_piece}")
         {:reject, expected_piece, conn}
 
       {:ok, {:reject, piece: _other}} ->
@@ -941,7 +941,7 @@ defmodule Magnet.Connection do
         recv_ut_metadata_loop(conn, expected_piece, deadline)
 
       Magnet.UtMetadata.piece_byte_size(total_size, expected_piece) == byte_size(data) ->
-        Logger.info(
+        Logger.debug(
           "[magnet_ut] piece ok endpoint=#{endpoint(conn)} piece=#{expected_piece} bytes=#{byte_size(data)} total_size=#{total_size}"
         )
 
@@ -984,20 +984,20 @@ defmodule Magnet.Connection do
        do: :ok
 
   defp log_ut_metadata_wire_rx(conn, {:standard, message_id, payload}, _, _, _, _) do
-    Logger.info(
+    Logger.debug(
       "[magnet_ut] wire_rx endpoint=#{endpoint(conn)} standard_id=#{message_id} payload_len=#{byte_size(payload)}"
     )
   end
 
   defp log_ut_metadata_wire_rx(conn, ext_id, payload, local_ut_id, peer_ut_id, _) do
-    Logger.info(
+    Logger.debug(
       "[magnet_ut] wire_rx endpoint=#{endpoint(conn)} ext_id=#{ext_id} local_ut_id=#{inspect(local_ut_id)} peer_ut_id=#{inspect(peer_ut_id)} payload_len=#{byte_size(payload)} payload_prefix=#{wire_hex(payload, 64)}"
     )
   end
 
   @spec log_recv_timeout(t(), non_neg_integer()) :: :ok
   defp log_recv_timeout(conn, expected_piece) do
-    Logger.warning("[magnet_ut] recv_timeout endpoint=#{endpoint(conn)} piece=#{expected_piece}")
+    Logger.debug("[magnet_ut] recv_timeout endpoint=#{endpoint(conn)} piece=#{expected_piece}")
   end
 
   @spec wire_hex(binary(), pos_integer()) :: String.t()

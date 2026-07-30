@@ -386,7 +386,7 @@ defmodule UTP.Connection do
   defp handle_state_packet(state, header) do
     cond do
       state.phase == :syn_sent and state.role == :client ->
-        Logger.info(
+        Logger.debug(
           "[utp] connected client peer=#{inspect({state.peer_ip, state.peer_port})} recv_id=#{state.recv_conn_id}"
         )
 
@@ -399,7 +399,7 @@ defmodule UTP.Connection do
         |> notify_connected_waiters()
 
       state.phase == :syn_recv and state.role == :server ->
-        Logger.info(
+        Logger.debug(
           "[utp] connected server peer=#{inspect({state.peer_ip, state.peer_port})} recv_id=#{state.recv_conn_id}"
         )
 
@@ -452,7 +452,7 @@ defmodule UTP.Connection do
         |> send_state_ack()
 
       Packet.seq_after?(seq, state.recv_next) ->
-        Logger.info(
+        Logger.debug(
           "[utp] oob_data peer=#{inspect({state.peer_ip, state.peer_port})} seq=#{seq} expected=#{state.recv_next} bytes=#{byte_size(payload)}"
         )
 
@@ -796,7 +796,7 @@ defmodule UTP.Connection do
     state =
       case {give_up, timed_out} do
         {seq, _} when not is_nil(seq) ->
-          Logger.warning(
+          Logger.debug(
             "[utp] give_up seq=#{seq} peer=#{inspect({state.peer_ip, state.peer_port})}"
           )
 
@@ -870,7 +870,7 @@ defmodule UTP.Connection do
 
   defp apply_idle_probe(state) do
     if state.activity.idle_probe_count >= @max_idle_probes do
-      Logger.warning(
+      Logger.debug(
         "[utp] idle_timeout peer=#{inspect({state.peer_ip, state.peer_port})} probes=#{state.activity.idle_probe_count}"
       )
 

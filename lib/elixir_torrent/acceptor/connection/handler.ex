@@ -36,10 +36,10 @@ defmodule Acceptor.Connection.Handler do
       {:ok, client} ->
         case :inet.peername(client) do
           {:ok, {ip, port}} ->
-            Logger.info("[acceptor] inbound from=#{inspect({ip, port})}")
+            Logger.debug("[acceptor] inbound from=#{inspect({ip, port})}")
 
           _ ->
-            Logger.info("[acceptor] inbound client")
+            Logger.debug("[acceptor] inbound client")
         end
 
         Handshakes.recv(client)

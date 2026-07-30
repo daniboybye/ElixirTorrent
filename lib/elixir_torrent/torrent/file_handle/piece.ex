@@ -346,8 +346,6 @@ defmodule Torrent.FileHandle.Piece do
     hash_hex = Torrent.hex_encoded_hash(torrent_hash)
 
     if res do
-      # A completed download verifying is a real event worth :info; the startup
-      # resume scan re-hashes every on-disk piece and would flood the log.
       log_verify(context, "[piece_verify] hash=#{hash_hex} index=#{index} result=ok", :ok)
 
       Model.downloaded_piece(torrent_hash, index)
@@ -373,7 +371,7 @@ defmodule Torrent.FileHandle.Piece do
     res
   end
 
-  defp log_verify(:download, msg, :ok), do: Logger.info(msg)
+  defp log_verify(:download, msg, :ok), do: Logger.debug(msg)
   defp log_verify(:download, msg, :fail), do: Logger.warning(msg)
   defp log_verify(:resume, msg, _outcome), do: Logger.debug(msg)
 

@@ -279,7 +279,7 @@ defmodule Magnet.Fetcher do
   def fetch_metadata_round(%Magnet{} = magnet, peers, announced_trackers) do
     hash_hex = Torrent.hex_encoded_hash(magnet.hash)
 
-    Logger.info("[magnet_fetch] metadata_start hash=#{hash_hex} peers=#{length(peers)}")
+    Logger.debug("[magnet_fetch] metadata_start hash=#{hash_hex} peers=#{length(peers)}")
 
     _ = Magnet.Bootstrap.ensure(magnet)
     _ = Magnet.Bootstrap.offer_peers(magnet.hash, peers)
@@ -294,7 +294,7 @@ defmodule Magnet.Fetcher do
         error
 
       {:error, swarm_reason} ->
-        Logger.info(
+        Logger.debug(
           "[magnet_fetch] swarm_failed hash=#{hash_hex} reason=#{inspect(swarm_reason)} trying_direct"
         )
 
@@ -404,7 +404,7 @@ defmodule Magnet.Fetcher do
         Task.await(tracker_task, tracker_timeout)
       catch
         :exit, _ ->
-          Logger.warning(
+          Logger.debug(
             "[magnet_fetch] tracker_discovery_timeout hash=#{Torrent.hex_encoded_hash(magnet.hash)} timeout_ms=#{tracker_timeout}"
           )
 
@@ -437,7 +437,7 @@ defmodule Magnet.Fetcher do
       |> Enum.uniq_by(&peer_key/1)
       |> Enum.take(@max_peers)
 
-    Logger.info(
+    Logger.debug(
       "[magnet_fetch] peer_discovery hash=#{Torrent.hex_encoded_hash(magnet.hash)} trackers=#{length(magnet.trackers)} x_pe=#{length(x_pe_peers)} tracker_peers=#{length(tracker_peers)} dht_peers=#{length(dht_peers_list)} unique=#{length(peers)}"
     )
 
@@ -512,7 +512,7 @@ defmodule Magnet.Fetcher do
     deep? = Keyword.get(opts, :deep, false)
     deep_tag = if deep?, do: " deep=true", else: ""
 
-    Logger.info(
+    Logger.debug(
       "[magnet_fetch] dht_peers hash=#{hash_hex} count=#{length(peers)} delay_ms=#{delay_ms}#{deep_tag}"
     )
   end
@@ -567,7 +567,7 @@ defmodule Magnet.Fetcher do
     peers = dht_peers_deep_retry(hash)
 
     if peers != [] do
-      Logger.info("[magnet_fetch] dht_background_peers hash=#{hash_hex} count=#{length(peers)}")
+      Logger.debug("[magnet_fetch] dht_background_peers hash=#{hash_hex} count=#{length(peers)}")
     end
 
     :ets.insert(@dht_bg_table, {hash, {:done, peers}})
@@ -599,7 +599,7 @@ defmodule Magnet.Fetcher do
     Task.await(task, timeout)
   catch
     :exit, _ ->
-      Logger.warning("[magnet_fetch] dht_discovery_timeout timeout_ms=#{dht_await_timeout_ms()}")
+      Logger.debug("[magnet_fetch] dht_discovery_timeout timeout_ms=#{dht_await_timeout_ms()}")
       []
   end
 
@@ -764,7 +764,7 @@ defmodule Magnet.Fetcher do
         error
 
       nil ->
-        Logger.warning("[magnet_fetch] metadata_unavailable hash=#{hash_hex}")
+        Logger.debug("[magnet_fetch] metadata_unavailable hash=#{hash_hex}")
         {:error, :metadata_unavailable}
     end
   end
@@ -833,7 +833,7 @@ defmodule Magnet.Fetcher do
         piece_count = Magnet.UtMetadata.piece_count(metadata_size)
         hash_hex = Torrent.hex_encoded_hash(hash)
 
-        Logger.info(
+        Logger.debug(
           "[magnet_fetch] metadata_pieces hash=#{hash_hex} total=#{piece_count} have=#{map_size(pieces)} size=#{metadata_size}"
         )
 
@@ -843,7 +843,7 @@ defmodule Magnet.Fetcher do
 
         with {:ok, all_pieces} <-
                fetch_missing_pieces(connections, metadata_size, pieces, missing, hash) do
-          Logger.info(
+          Logger.debug(
             "[magnet_fetch] metadata_pieces_done hash=#{hash_hex} pieces=#{map_size(all_pieces)}"
           )
 
@@ -1016,6 +1016,6 @@ defmodule Magnet.Fetcher do
 
   @spec log_tracker_error(String.t(), Tracker.Error.t()) :: :ok
   defp log_tracker_error(tracker, %Tracker.Error{reason: reason}) do
-    Logger.warning("magnet tracker announce failed tracker=#{tracker} reason=#{inspect(reason)}")
+    Logger.debug("magnet tracker announce failed tracker=#{tracker} reason=#{inspect(reason)}")
   end
 end

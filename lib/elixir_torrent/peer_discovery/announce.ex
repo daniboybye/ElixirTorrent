@@ -569,7 +569,7 @@ defmodule PeerDiscovery.Announce do
 
     case meta do
       {announce, tier_index, _tracker_index} ->
-        Logger.info(
+        Logger.debug(
           "[tracker_announce] disabled announce=#{announce} reason=#{inspect(error.reason)}"
         )
 
@@ -651,7 +651,7 @@ defmodule PeerDiscovery.Announce do
 
       state
     else
-      Logger.info(
+      Logger.debug(
         "[tracker_announce] parallel hash=#{Torrent.hex_encoded_hash(hash)} tier=#{tier_index} trackers=#{length(alive)}"
       )
 
@@ -1533,7 +1533,7 @@ defmodule PeerDiscovery.Announce do
   end
 
   defp finish_dht_round(%__MODULE__{hash: hash, dht_round_peers: peers} = state) do
-    Logger.info(
+    Logger.debug(
       "dht get_peers ok hash=#{Torrent.hex_encoded_hash(hash)} peers=#{length(peers)} connected=#{Swarm.count(hash)}"
     )
 
@@ -1611,7 +1611,7 @@ defmodule PeerDiscovery.Announce do
 
   @spec log_tracker_success(Torrent.hash(), String.t(), Tracker.Response.t()) :: :ok
   defp log_tracker_success(hash, announce, %Tracker.Response{} = response) do
-    Logger.info(
+    Logger.debug(
       "tracker announce ok hash=#{Torrent.hex_encoded_hash(hash)} tracker=#{announce} peers=#{length(response.peers)} seeders=#{response.complete} leechers=#{response.incomplete}"
     )
   end

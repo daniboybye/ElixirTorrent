@@ -358,7 +358,7 @@ defmodule Tracker do
       if MapSet.member?(tracker_families, :inet6), do: Acceptor.announcable_ipv6(), else: []
 
     if ip4 || ip6 do
-      Logger.info(
+      Logger.debug(
         "[tracker_announce] http_endpoints hash=#{Torrent.hex_encoded_hash(hash)} ipv4=#{if ip4, do: Acceptor.format_ip(ip4), else: "none"} ipv6_announce=#{Enum.map_join(v6_announces, ",", &Acceptor.format_ip/1)} ipv6_all=#{Enum.map_join(v6_all, ",", &Acceptor.format_ip/1)}"
       )
     end
@@ -550,7 +550,7 @@ defmodule Tracker do
             %Response{peers: peers} = response ->
               v6 = Enum.count(peers, &ipv6_peer?/1)
 
-              Logger.info(
+              Logger.debug(
                 "[tracker_announce] http family=#{family} local=#{Acceptor.format_ip(ip)} peers=#{length(peers)} ipv6_peers=#{v6}"
               )
 
@@ -626,7 +626,7 @@ defmodule Tracker do
       ip_str = ip |> :inet.ntoa() |> List.to_string()
       preview = binary_part(body, 0, min(byte_size(body), 500))
 
-      Logger.warning(
+      Logger.debug(
         "HTTP tracker returned non-bencode body url=#{url} family=#{family} ip=#{ip_str} content_type=#{inspect(content_type)} bytes=#{byte_size(body)} preview=#{inspect(preview)}"
       )
 
@@ -635,7 +635,7 @@ defmodule Tracker do
       case {depth, extract_js_redirect(body)} do
         {0, {:ok, redirect}} ->
           next_url = absolute_redirect(url, redirect)
-          Logger.info("HTTP tracker redirect follow url=#{next_url}")
+          Logger.debug("HTTP tracker redirect follow url=#{next_url}")
 
           case HTTPoison.get(next_url, [], opts) do
             {:ok, %HTTPoison.Response{status_code: code, body: body2, headers: headers2}}
@@ -917,7 +917,7 @@ defmodule Tracker do
       %Response{peers: peers} = response ->
         v6 = Enum.count(peers, &ipv6_peer?/1)
 
-        Logger.info(
+        Logger.debug(
           "[tracker_announce] udp family=#{family} tracker=#{Acceptor.format_ip(ip)}:#{port} peers=#{length(peers)} ipv6_peers=#{v6}"
         )
 

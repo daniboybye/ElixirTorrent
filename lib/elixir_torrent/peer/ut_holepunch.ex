@@ -188,7 +188,7 @@ defmodule Peer.UtHolepunch do
         if Peer.Endpoints.registered?(state.hash, ip, port) do
           state
         else
-          Logger.info(
+          Logger.debug(
             "[holepunch] connect_recv hash=#{Torrent.hex_encoded_hash(state.hash)} endpoint=#{inspect({ip, port})}"
           )
 
@@ -300,7 +300,7 @@ defmodule Peer.UtHolepunch do
              {target_key, target_ltep, initiator_for_target}
            ) do
         :ok ->
-          Logger.info(
+          Logger.debug(
             "[holepunch] rendezvous_relay hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} initiator=#{inspect({init_ip, init_port})}"
           )
 

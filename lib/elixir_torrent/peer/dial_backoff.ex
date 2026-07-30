@@ -240,7 +240,7 @@ defmodule Peer.DialBackoff do
     if sticky? and fail_count == @hard_fail_threshold and reason not in @sticky_reasons do
       # Log the moment we escalate a transient endpoint — useful for confirming
       # the throttle is actually kicking in on the CGNAT hosts we care about.
-      Logger.info(
+      Logger.debug(
         "[peer_dial] escalated endpoint=#{inspect(ip)}:#{port} fail_count=#{fail_count} reason=#{inspect(reason)}"
       )
     end

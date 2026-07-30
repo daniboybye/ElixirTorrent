@@ -141,7 +141,7 @@ defmodule Torrent.WebSeed do
           tasks
       end
 
-    Logger.info(
+    Logger.debug(
       "[webseed] fail hash=#{Torrent.hex_encoded_hash(state.hash)} index=#{index} url=#{url} reason=#{inspect(reason)}"
     )
 
@@ -163,7 +163,7 @@ defmodule Torrent.WebSeed do
         {:noreply, state}
 
       {{_ref, index, url}, tasks} ->
-        Logger.info(
+        Logger.debug(
           "[webseed] task_down hash=#{Torrent.hex_encoded_hash(state.hash)} index=#{index} url=#{url} reason=#{inspect(reason)}"
         )
 
@@ -261,7 +261,7 @@ defmodule Torrent.WebSeed do
          true <- FileHandle.check?(state.hash, index) do
       Swarm.have(state.hash, index)
 
-      Logger.info(
+      Logger.debug(
         "[webseed] ok hash=#{Torrent.hex_encoded_hash(state.hash)} index=#{index} bytes=#{piece_len} url=#{url}"
       )
 

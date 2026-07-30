@@ -103,7 +103,7 @@ defmodule Magnet.Fetcher.Session do
       {:error, _reason} ->
         backoff = Fetcher.round_backoff_ms(round, elem(result, 1))
 
-        Logger.info(
+        Logger.debug(
           "[magnet_fetch] round_retry hash=#{hash_hex} round=#{round} backoff_ms=#{backoff}"
         )
 
@@ -220,7 +220,7 @@ defmodule Magnet.Fetcher.Session do
 
     peers = Fetcher.select_peers_for_round(known_peers, state.peer_attempts)
 
-    Logger.info(
+    Logger.debug(
       "[magnet_fetch] round=#{round} hash=#{hash_hex} peers_known=#{map_size(known_peers)} peers_new=#{peers_new} tried=#{length(peers)}"
     )
 

@@ -135,7 +135,7 @@ defmodule Magnet.Bootstrap do
   def init(%Magnet{} = magnet) do
     hash = magnet.hash
     hash_hex = Torrent.hex_encoded_hash(hash)
-    Logger.info("[magnet_swarm] bootstrap_start hash=#{hash_hex}")
+    Logger.debug("[magnet_swarm] bootstrap_start hash=#{hash_hex}")
 
     torrent = stub_torrent(magnet)
     :ok = Torrent.PiecesStatistic.init(torrent)

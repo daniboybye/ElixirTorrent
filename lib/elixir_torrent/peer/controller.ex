@@ -353,7 +353,7 @@ defmodule Peer.Controller do
     unless quiet_disconnect_reason?(reason) do
       require Logger
 
-      Logger.info(
+      Logger.debug(
         "[peer_upload] peer=#{Peer.log_id(state.id)} hash=#{Torrent.hex_encoded_hash(state.hash)} disconnect reason=#{inspect(reason)} interested_of_me=#{state.interested_of_me} choked=#{state.choke}"
       )
     end
@@ -387,7 +387,7 @@ defmodule Peer.Controller do
 
         ip_str = ip |> :inet.ntoa() |> to_string()
 
-        Logger.info(
+        Logger.debug(
           "[peer_dial] warm_redial endpoint=#{ip_str}:#{port} hash=#{Torrent.hex_encoded_hash(state.hash)} downloaded=#{n}"
         )
 
@@ -650,7 +650,7 @@ defmodule Peer.Controller do
     if ltep_exts != [] do
       require Logger
 
-      Logger.info(
+      Logger.debug(
         "[ltep] peer=#{Peer.log_key(State.key(state))} hash=#{Torrent.hex_encoded_hash(state.hash)} extensions=#{inspect(ltep_exts)}"
       )
     end

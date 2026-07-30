@@ -235,7 +235,7 @@ defmodule Peer.Controller.State do
 
   @spec unchoke(t()) :: t()
   def unchoke(%__MODULE__{choke: true} = state) do
-    log_upload(state, "unchoke_sent")
+    log_upload(state, "unchoke_sent", :debug)
     :ok = Sender.unchoke(key(state))
     %__MODULE__{state | choke: false}
   end
@@ -269,13 +269,13 @@ defmodule Peer.Controller.State do
   def first_message(%__MODULE__{fast_extension: %FastExtension{}} = state, 0) do
     # BEP 9: have_none makes some seeders choke permanently; empty bitfield is safer.
     :ok = Sender.bitfield(key(state))
-    log_upload(state, bitfield_log(state))
+    log_upload(state, bitfield_log(state), :debug)
     state
   end
 
   def first_message(state, _) do
     :ok = Sender.bitfield(key(state))
-    log_upload(state, bitfield_log(state))
+    log_upload(state, bitfield_log(state), :debug)
     state
   end
 
@@ -729,7 +729,7 @@ defmodule Peer.Controller.State do
 
   def superseed_assign(%__MODULE__{} = state, index) do
     :ok = Sender.have(key(state), index)
-    log_upload(state, "superseed_have_sent index=#{index} reason=rotation")
+    log_upload(state, "superseed_have_sent index=#{index} reason=rotation", :debug)
     %{state | superseed_piece: index}
   end
 
@@ -804,7 +804,7 @@ defmodule Peer.Controller.State do
 
   @spec handle_choke(t()) :: t()
   def handle_choke(%__MODULE__{} = state) do
-    log_download(state, "choked_by_peer in_flight=#{MapSet.size(state.requests)}")
+    log_download(state, "choked_by_peer in_flight=#{MapSet.size(state.requests)}", :debug)
 
     Enum.each(state.requests, fn {index, begin, length} ->
       Downloads.reject(state.hash, index, state.id, begin, length)
@@ -818,7 +818,7 @@ defmodule Peer.Controller.State do
 
   @spec handle_unchoke(t()) :: t()
   def handle_unchoke(%__MODULE__{} = state) do
-    log_download(state, "unchoked")
+    log_download(state, "unchoked", :debug)
 
     %__MODULE__{state | choke_me: false}
     |> fill_request_pipeline()
@@ -856,7 +856,7 @@ defmodule Peer.Controller.State do
   @spec handle_interested(t()) :: t()
   def handle_interested(%__MODULE__{} = state) do
     state = %{state | interested_of_me: true}
-    log_upload(state, "interested_received")
+    log_upload(state, "interested_received", :debug)
     maybe_optimistic_unchoke(state)
   end
 
@@ -931,7 +931,7 @@ defmodule Peer.Controller.State do
           |> sync_status_from_model()
           |> ensure_piece_index()
 
-        Logger.info(
+        Logger.debug(
           "[peer_availability] bitfield peer=#{Peer.log_id(state.id)} hash=#{Torrent.hex_encoded_hash(state.hash)} pieces=#{Bitfield.count(bitfield, state.pieces_count)}/#{state.pieces_count}"
         )
 
@@ -944,7 +944,7 @@ defmodule Peer.Controller.State do
 
       Magnet.Bootstrap.active?(state.hash) and
           byte_size(bitfield) > Bitfield.expected_byte_size(state.pieces_count) ->
-        Logger.info(
+        Logger.debug(
           "[peer_availability] bootstrap_bitfield peer=#{Peer.log_id(state.id)} hash=#{Torrent.hex_encoded_hash(state.hash)} bytes=#{byte_size(bitfield)}"
         )
 
@@ -995,21 +995,22 @@ defmodule Peer.Controller.State do
   end
 
   defp reject_upload_request(state, index, _begin, _length, :bad_index) do
-    log_upload(state, "request_reject index=#{index} reason=bad_index")
+    log_upload(state, "request_reject index=#{index} reason=bad_index", :debug)
     {:error, :protocol_error, state}
   end
 
   defp reject_upload_request(state, index, begin, length, :bad_bounds) do
     log_upload(
       state,
-      "request_reject index=#{index} begin=#{begin} len=#{length} reason=bad_bounds"
+      "request_reject index=#{index} begin=#{begin} len=#{length} reason=bad_bounds",
+      :debug
     )
 
     {:error, :protocol_error, state}
   end
 
   defp reject_upload_request(state, index, begin, length, :superseed_hidden) do
-    log_upload(state, "request_reject index=#{index} reason=superseed_hidden")
+    log_upload(state, "request_reject index=#{index} reason=superseed_hidden", :debug)
 
     if state.fast_extension != nil do
       Sender.reject(key(state), index, begin, length)
@@ -1030,7 +1031,8 @@ defmodule Peer.Controller.State do
 
     log_upload(
       state,
-      "request_reject index=#{index} reason=no_piece_on_disk model_pieces=#{model_count}"
+      "request_reject index=#{index} reason=no_piece_on_disk model_pieces=#{model_count}",
+      :debug
     )
 
     if state.fast_extension != nil do
@@ -1110,7 +1112,8 @@ defmodule Peer.Controller.State do
       {:error, reason} ->
         log_upload(
           state,
-          "request_reject index=#{index} begin=#{begin} len=#{length} reason=#{inspect(reason)}"
+          "request_reject index=#{index} begin=#{begin} len=#{length} reason=#{inspect(reason)}",
+          :debug
         )
 
         if match?(%FastExtension{}, state.fast_extension) do
@@ -1214,7 +1217,7 @@ defmodule Peer.Controller.State do
       |> sync_status_from_model()
       |> ensure_piece_index()
 
-    Logger.info(
+    Logger.debug(
       "[peer_availability] have_all peer=#{Peer.log_id(state.id)} hash=#{Torrent.hex_encoded_hash(state.hash)} pieces=#{state.pieces_count} connected=#{Torrent.Swarm.count(state.hash)}"
     )
 
@@ -1582,7 +1585,7 @@ defmodule Peer.Controller.State do
       Sender.interested(key(state), interested)
 
       if interested do
-        log_download(state, "interested_sent index=#{status}")
+        log_download(state, "interested_sent index=#{status}", :debug)
       end
     end
 
@@ -1659,13 +1662,13 @@ defmodule Peer.Controller.State do
 
   defp normal_seed_first_message(%__MODULE__{fast_extension: %FastExtension{}} = state) do
     :ok = Sender.have_all(key(state))
-    log_upload(state, "have_all_sent reason=connect")
+    log_upload(state, "have_all_sent reason=connect", :debug)
     state
   end
 
   defp normal_seed_first_message(%__MODULE__{} = state) do
     :ok = Sender.bitfield(key(state))
-    log_upload(state, bitfield_log(state))
+    log_upload(state, bitfield_log(state), :debug)
     state
   end
 
@@ -1689,7 +1692,7 @@ defmodule Peer.Controller.State do
     case Superseed.assign(state.hash, state.id, state.bitfield) do
       {:ok, index} ->
         :ok = Sender.have(key(state), index)
-        log_upload(state, "superseed_have_sent index=#{index} reason=assignment")
+        log_upload(state, "superseed_have_sent index=#{index} reason=assignment", :debug)
         %{state | superseed_piece: index}
 
       _ ->
@@ -1743,7 +1746,7 @@ defmodule Peer.Controller.State do
   defp advertise_all_with_haves(%__MODULE__{} = state, reason, peer_key \\ nil) do
     peer_key = peer_key || key(state)
     Enum.each(0..(state.pieces_count - 1), &Sender.have(peer_key, &1))
-    log_upload(state, "have_batch_sent pieces=#{state.pieces_count} reason=#{reason}")
+    log_upload(state, "have_batch_sent pieces=#{state.pieces_count} reason=#{reason}", :debug)
     :ok
   end
 
@@ -1791,7 +1794,7 @@ defmodule Peer.Controller.State do
   end
 
   @spec log_upload(t(), String.t(), :info | :debug) :: :ok
-  defp log_upload(%__MODULE__{hash: hash, id: id}, msg, level \\ :info) do
+  defp log_upload(%__MODULE__{hash: hash, id: id}, msg, level) do
     line = "[peer_upload] peer=#{Peer.log_id(id)} hash=#{Torrent.hex_encoded_hash(hash)} #{msg}"
 
     case level do
@@ -1801,7 +1804,7 @@ defmodule Peer.Controller.State do
   end
 
   @spec log_download(t(), String.t(), :info | :debug) :: :ok
-  defp log_download(%__MODULE__{hash: hash, id: id}, msg, level \\ :info) do
+  defp log_download(%__MODULE__{hash: hash, id: id}, msg, level) do
     line =
       "[peer_download] peer=#{Peer.log_id(id)} hash=#{Torrent.hex_encoded_hash(hash)} #{msg}"
 

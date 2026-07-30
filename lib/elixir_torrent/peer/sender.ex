@@ -519,7 +519,7 @@ defmodule Peer.Sender do
   defp parse(@choke_id, key), do: handle_choke(key)
 
   defp parse(@unchoke_id, key) do
-    log_wire(key, "unchoke", :info)
+    log_wire(key, "unchoke", :debug)
     handle_unchoke(key)
   end
 
@@ -532,14 +532,14 @@ defmodule Peer.Sender do
     do: handle_have(key, index)
 
   defp parse(@have_all_id, key) do
-    log_wire(key, "have_all", :info)
+    log_wire(key, "have_all", :debug)
     handle_have_all(key)
   end
 
   defp parse(@have_none_id, key), do: handle_have_none(key)
 
   defp parse(<<@bitfield_id, bitfield::binary>>, key) do
-    log_wire(key, "bitfield bytes=#{byte_size(bitfield)}", :info)
+    log_wire(key, "bitfield bytes=#{byte_size(bitfield)}", :debug)
     handle_bitfield(key, bitfield)
   end
 

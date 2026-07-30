@@ -47,12 +47,12 @@ defmodule Magnet.ConnectedMetadata do
     keys = wait_metadata_peer_keys(hash)
 
     if keys == [] do
-      Logger.info("[magnet_swarm] no_metadata_peers hash=#{hash_hex}")
+      Logger.debug("[magnet_swarm] no_metadata_peers hash=#{hash_hex}")
       {:error, :no_swarm_metadata_peers}
     else
       peer_count = min(length(keys), max_peers())
 
-      Logger.info("[magnet_swarm] metadata_start hash=#{hash_hex} swarm_peers=#{peer_count}")
+      Logger.debug("[magnet_swarm] metadata_start hash=#{hash_hex} swarm_peers=#{peer_count}")
 
       {result, failures} =
         keys
@@ -103,7 +103,7 @@ defmodule Magnet.ConnectedMetadata do
   @spec log_metadata_round_exhausted(String.t(), non_neg_integer(), [term()]) :: :ok
   defp log_metadata_round_exhausted(hash_hex, peer_count, normalized_failures) do
     if normalized_failures != [] do
-      Logger.info(
+      Logger.debug(
         "[magnet_swarm] metadata_round_exhausted hash=#{hash_hex} peers_tried=#{peer_count} failures=#{inspect(normalized_failures)}"
       )
     end
@@ -119,7 +119,7 @@ defmodule Magnet.ConnectedMetadata do
     with {:ok, info} <- safe_metadata_capable(key),
          {:ok, info} <- wait_metadata_ready(key, info),
          true <- metadata_peer?(info) do
-      Logger.info(
+      Logger.debug(
         "[magnet_swarm] metadata_peer endpoint=#{endpoint} metadata_size=#{inspect(info.metadata_size)} unchoked=#{info.unchoked?} pid=#{peer_pid(key)}"
       )
 
@@ -135,21 +135,21 @@ defmodule Magnet.ConnectedMetadata do
       end
     else
       false ->
-        Logger.info(
+        Logger.debug(
           "[magnet_swarm] metadata_peer_skip endpoint=#{endpoint} reason=no_ut_metadata"
         )
 
         {:error, :no_ut_metadata}
 
       {:error, :metadata_size_pending} ->
-        Logger.info(
+        Logger.debug(
           "[magnet_swarm] metadata_peer_skip endpoint=#{endpoint} reason=metadata_size_pending"
         )
 
         {:error, :metadata_size_pending}
 
       :error ->
-        Logger.info("[magnet_swarm] metadata_peer_skip endpoint=#{endpoint} reason=no_session")
+        Logger.debug("[magnet_swarm] metadata_peer_skip endpoint=#{endpoint} reason=no_session")
         {:error, :no_metadata_session}
 
       {:error, reason} ->
@@ -197,11 +197,11 @@ defmodule Magnet.ConnectedMetadata do
     normalized = normalize_peer_error(reason)
 
     if normalized in [:peer_died, :noproc] do
-      Logger.info(
+      Logger.debug(
         "[magnet_swarm] metadata_peer_died endpoint=#{endpoint} step=#{step} reason=#{inspect(normalized)} pid=#{peer_pid(key)} trying_next_peer"
       )
     else
-      Logger.info(
+      Logger.debug(
         "[magnet_swarm] metadata_peer_fail endpoint=#{endpoint} step=#{step} reason=#{inspect(normalized)} pid=#{peer_pid(key)} trying_next_peer"
       )
     end

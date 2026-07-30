@@ -183,7 +183,7 @@ defmodule Torrent.Model do
       :ok = Session.save(torrent.hash, torrent)
       Process.put({:checkpoint_downloaded, torrent.hash}, torrent.downloaded)
 
-      Logger.info(
+      Logger.debug(
         "[checkpoint] hash=#{Torrent.hex_encoded_hash(torrent.hash)} downloaded=#{torrent.downloaded} left=#{torrent.left} pieces=#{Bitfield.count(torrent.bitfield, torrent.last_index + 1)}"
       )
     end

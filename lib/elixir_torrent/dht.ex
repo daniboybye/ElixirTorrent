@@ -300,9 +300,7 @@ defmodule DHT do
 
   def handle_info({:udp_error, socket, reason}, state)
       when socket == state.socket_v4 or socket == state.socket_v6 do
-    Logger.warning(
-      "DHT UDP error family=#{socket_family(state, socket)} reason=#{inspect(reason)}"
-    )
+    Logger.debug("DHT UDP error family=#{socket_family(state, socket)} reason=#{inspect(reason)}")
 
     {:noreply, state}
   end
@@ -1128,7 +1126,7 @@ defmodule DHT do
     bt_port = lookup.bt_port
     node_count = map_size(lookup.announce_nodes)
 
-    Logger.info(
+    Logger.debug(
       "[dht_announce] hash=#{Torrent.hex_encoded_hash(hash)} port=#{bt_port} nodes=#{node_count}"
     )
 

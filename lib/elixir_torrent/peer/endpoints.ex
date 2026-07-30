@@ -230,7 +230,7 @@ defmodule Peer.Endpoints do
   defp log_disconnect({hash, ip, port}, reason) do
     active = Swarm.count(hash)
 
-    Logger.info(
+    Logger.debug(
       "peer disconnected hash=#{Torrent.hex_encoded_hash(hash)} endpoint=#{inspect(ip)}:#{port} reason=#{inspect(reason)} active=#{active}"
     )
   end
