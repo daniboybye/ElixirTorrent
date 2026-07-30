@@ -14,6 +14,18 @@ defmodule Peer.Sender do
 
   @timeout 100_000
   @max_length Torrent.Downloads.piece_max_length()
+  # BEP 3 piece: <id=7><index::32><begin::32><block>. The largest block we ever
+  # ask a peer for is @max_length (16 KiB) — that is the same source of truth the
+  # inbound `request` bound-check below and Peer.Controller.valid_piece_block?/4
+  # use — so a longer `piece` frame can never be a reply to a request we made.
+  @max_piece_message_size 1 + 4 + 4 + @max_length
+  # BEP 3 bitfield: <id=5><ceil(pieces_count / 8) bytes>. The exact per-torrent
+  # bound needs pieces_count, which is not reachable here (see take_message/1), so
+  # bound it by the largest piece count the reference implementation will even
+  # load: libtorrent's load_torrent_limits::max_pieces / settings_pack
+  # ::max_piece_count default of 0x200000 pieces, i.e. a 256 KiB bitfield.
+  @max_bitfield_pieces 0x200000
+  @max_bitfield_message_size 1 + Torrent.Bitfield.expected_byte_size(@max_bitfield_pieces)
   @max_hash_header_message_size 1 + Peer.HashWire.header_size()
   @max_hashes_message_size Peer.HashWire.max_hashes_message_size()
   @ut_metadata_local_id Magnet.UtMetadata.Extension.local_id()
@@ -481,6 +493,20 @@ defmodule Peer.Sender do
     end
   end
 
+  # Pure wire framing: buffer -> one complete message. The 4-byte length prefix is
+  # attacker-controlled (up to 2^32-1) and the generic clause below waits until the
+  # buffer holds `len` bytes, so every message type with a known legitimate maximum
+  # must be rejected *from its prefix* — otherwise one peer makes us grow the recv
+  # buffer to an arbitrary size before we ever look at the body (libtorrent caps the
+  # recv buffer the same way, disconnecting with errors::packet_too_large).
+  #
+  # This layer only has the buffer; the per-torrent bound for `bitfield`
+  # (ceil(pieces_count / 8)) is deliberately not applied here: pieces_count lives in
+  # Torrent.Model, reachable only through a GenServer.call per frame on the hot wire
+  # path, and during a magnet fetch it is still the Magnet.Bootstrap placeholder
+  # (1 piece) while real peers legitimately send their full-size bitfield — which
+  # Peer.Controller.State.do_handle_bitfield/2 accepts as have_all. The exact
+  # per-torrent length check stays there; here we only stop the amplification.
   @spec take_message(binary()) :: {:ok, binary(), binary()} | :incomplete | :protocol_error
   defp take_message(<<len::32, @extended_id, _::binary>>)
        when len > @max_extended_message_size,
@@ -496,6 +522,14 @@ defmodule Peer.Sender do
 
   defp take_message(<<len::32, 22, _::binary>>) when len > @max_hashes_message_size,
     do: :protocol_error
+
+  defp take_message(<<len::32, @bitfield_id, _::binary>>)
+       when len > @max_bitfield_message_size,
+       do: :protocol_error
+
+  defp take_message(<<len::32, @piece_id, _::binary>>)
+       when len > @max_piece_message_size,
+       do: :protocol_error
 
   defp take_message(<<len::32, rest::binary>>) when byte_size(rest) >= len do
     message = binary_part(rest, 0, len)
@@ -513,6 +547,10 @@ defmodule Peer.Sender do
   @doc false
   @spec known_wire_id?(integer()) :: boolean()
   def known_wire_id?(id) when is_integer(id), do: id in @known_wire_ids
+
+  @doc false
+  @spec max_bitfield_message_size() :: pos_integer()
+  def max_bitfield_message_size, do: @max_bitfield_message_size
 
   defp parse(<<>>, _), do: :ok
 

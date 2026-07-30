@@ -177,6 +177,72 @@ defmodule PeerSenderLoopbackTest do
       refute_received {:controller, :handle_extended, _}
     end
 
+    test "oversized bitfield frame is rejected from its prefix without buffering its body" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      # Only the 5-byte prefix goes out: the declared body never arrives, so a
+      # protocol_error here proves we reject on `len` instead of growing the recv
+      # buffer to match it.
+      oversized = Peer.Sender.max_bitfield_message_size() + 1
+      assert :ok = :gen_tcp.send(server, <<oversized::32, 5>>)
+
+      ref = Process.monitor(sender_pid)
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
+      refute_received {:controller, :handle_bitfield, _}
+    end
+
+    test "bitfield frame at the ceiling still passes framing" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      # Guards the other direction: the cap must not clip a real peer's bitfield.
+      bitfield = :binary.copy(<<0xFF>>, Peer.Sender.max_bitfield_message_size() - 1)
+      assert :ok = :gen_tcp.send(server, frame_payload(<<5, bitfield::binary>>))
+
+      assert_receive {:controller, :handle_bitfield, [^bitfield]}, @timeout
+      assert Process.alive?(sender_pid)
+    end
+
+    test "oversized piece frame is rejected from its prefix without buffering its body" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      # 9 = piece id + index::32 + begin::32; the block itself can never exceed the
+      # largest block we request (Downloads.piece_max_length/0).
+      oversized = 9 + @piece_len + 1
+      assert :ok = :gen_tcp.send(server, <<oversized::32, 7>>)
+
+      ref = Process.monitor(sender_pid)
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
+      refute_received {:controller, :handle_piece, _}
+    end
+
+    test "wildly oversized bitfield and piece lengths never allocate the declared body" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      # A 4 GiB declared length: before the cap this grew Sender's buffer unbounded.
+      assert :ok = :gen_tcp.send(server, <<0xFFFF_FFFF::32, 5>>)
+
+      ref = Process.monitor(sender_pid)
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
+
+      {client2, server2, listen2, key2, sender_pid2} = start_sender_pair()
+      on_exit(fn -> cleanup(client2, server2, listen2, sender_pid2, key2) end)
+
+      assert :ok = :gen_tcp.send(server2, <<0xFFFF_FFFF::32, 7>>)
+
+      ref2 = Process.monitor(sender_pid2)
+
+      assert_receive {:DOWN, ^ref2, :process, ^sender_pid2, {:shutdown, :protocol_error}},
+                     @timeout
+    end
+
     test "truncated known message body is a protocol error" do
       {client, server, listen, key, sender_pid} = start_sender_pair()
 
