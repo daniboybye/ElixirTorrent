@@ -243,6 +243,91 @@ defmodule PeerSenderLoopbackTest do
                      @timeout
     end
 
+    test "oversized unknown wire id is rejected from its prefix without buffering its body" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      # id 99 has no per-id cap and never can have one: BEP 3 forward-compat means we
+      # must *ignore* unrecognised ids, and the generic take_message/1 clause can only
+      # skip a body once it has fully arrived — so a 4 GiB declared length grew the
+      # recv buffer toward 4 GiB from a 5-byte prefix. Only that prefix is sent here,
+      # so a protocol_error proves the global ceiling rejects on `len` alone.
+      refute Peer.Sender.known_wire_id?(99)
+      assert :ok = :gen_tcp.send(server, <<0xFFFF_FFFF::32, 99>>)
+
+      ref = Process.monitor(sender_pid)
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
+      refute_received {:controller, _, _}
+    end
+
+    test "one byte over the global ceiling is rejected for a known-but-uncapped id" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      # choke (id 0) is known but has no per-id cap — parse/2 would have called it a
+      # protocol error for a >1-byte body, but only after buffering all of it.
+      oversized = Peer.Sender.max_wire_message_size() + 1
+      assert :ok = :gen_tcp.send(server, <<oversized::32, 0>>)
+
+      ref = Process.monitor(sender_pid)
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
+      refute_received {:controller, :handle_choke, _}
+    end
+
+    test "one byte over the global ceiling is rejected for an unknown id" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      # Exact boundary from above: the guard is `len > ceiling`, so ceiling + 1 is the
+      # first fatal length.
+      oversized = Peer.Sender.max_wire_message_size() + 1
+      assert :ok = :gen_tcp.send(server, <<oversized::32, 99>>)
+
+      ref = Process.monitor(sender_pid)
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
+    end
+
+    test "unknown wire id at a sane length is still ignored per BEP 3 forward-compat" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      # The global ceiling bounds SIZE only. An unrecognised id is still just a
+      # message from a newer peer, so it must stay non-fatal: skip the frame, keep
+      # the connection, and go on parsing whatever follows it in the same stream.
+      refute Peer.Sender.known_wire_id?(99)
+      assert :ok = :gen_tcp.send(server, frame_payload(<<99, 0, 1, 2, 3>>))
+      TestSupport.Sync.sync(sender_pid)
+      refute_received {:controller, _, _}
+
+      assert :ok = :gen_tcp.send(server, frame_payload(<<0>>))
+      assert_receive {:controller, :handle_choke, []}, @timeout
+      assert Process.alive?(sender_pid)
+    end
+
+    test "LTEP frame at its own 1 MiB cap still passes the global ceiling" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      # The largest frame this client legitimately accepts. The global ceiling is
+      # 2 MiB and compares with `>`, so this must survive framing untouched — it is
+      # exactly the boundary a ceiling of 1 MiB, or a `>=` comparison, would clip.
+      len = Peer.LTEP.max_message_size()
+      # 2 = wire id 20 + LTEP extension id; 254 is not ut_metadata's local id, so only
+      # the generic LTEP cap applies here.
+      payload = :binary.copy(<<0xAB>>, len - 2)
+      assert :ok = :gen_tcp.send(server, <<len::32, 20, 254, payload::binary>>)
+
+      assert_receive {:controller, :handle_extended, [254, received]}, @timeout
+      assert byte_size(received) == len - 2
+      assert received == payload
+      assert Process.alive?(sender_pid)
+    end
+
     test "truncated known message body is a protocol error" do
       {client, server, listen, key, sender_pid} = start_sender_pair()
 

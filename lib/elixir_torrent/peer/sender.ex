@@ -32,6 +32,26 @@ defmodule Peer.Sender do
   @max_extended_message_size Peer.LTEP.max_message_size()
   # Length includes the top-level wire id and LTEP extension id.
   @max_ut_metadata_message_size 2 + Magnet.UtMetadata.max_message_payload_size()
+  # Global recv-buffer ceiling for ONE wire frame, independent of its id. Every
+  # BEP 3 frame is <<len::32, id, body>> with a fully attacker-controlled `len`, so
+  # the framing layer has to judge plausibility from the 4-byte prefix alone —
+  # before it accumulates any bytes toward it. The per-id caps below only cover ids
+  # we recognise, and they cannot be extended to the rest: BEP 3 forward-compat
+  # requires unknown ids to be *ignored*, so an unknown id declaring 4 GiB would
+  # otherwise reach the generic take_message/1 clause, which resolves only once
+  # byte_size(rest) >= len — i.e. one 5-byte frame prefix makes us grow the recv
+  # buffer toward 4 GiB. libtorrent bounds it the same way, with a single
+  # recv-buffer limit for every message id (settings_pack::max_peer_recv_buffer_size,
+  # default 2 MiB) and errors::packet_too_large on the disconnect.
+  #
+  # 2 MiB is 2x the largest frame we legitimately accept (LTEP's 1 MiB), so this
+  # ceiling cannot clip any per-id cap — LTEP 1_048_576, bitfield 262_145, hashes
+  # 18_481, ut_metadata 17_410, piece 16_393, hash header 49. Deliberately not
+  # *equal* to the LTEP cap: an equal ceiling would start rejecting max-size LTEP
+  # frames the moment that cap was raised. The comparison is `>` (never `>=`),
+  # matching all six per-id guards — a declared length exactly equal to a
+  # documented cap is legal everywhere in this module.
+  @max_wire_message_size 2 * 1024 * 1024
 
   defstruct [:socket, :buffer, :key, active: false, utp_held_bytes: 0]
 
@@ -500,6 +520,10 @@ defmodule Peer.Sender do
   # buffer to an arbitrary size before we ever look at the body (libtorrent caps the
   # recv buffer the same way, disconnecting with errors::packet_too_large).
   #
+  # The global @max_wire_message_size ceiling runs first, so an absurd length is
+  # fatal for *every* id — known, or unknown-and-therefore-ignored. The per-id caps
+  # after it then tighten each known id down to its own legitimate maximum.
+  #
   # This layer only has the buffer; the per-torrent bound for `bitfield`
   # (ceil(pieces_count / 8)) is deliberately not applied here: pieces_count lives in
   # Torrent.Model, reachable only through a GenServer.call per frame on the hot wire
@@ -508,6 +532,14 @@ defmodule Peer.Sender do
   # Peer.Controller.State.do_handle_bitfield/2 accepts as have_all. The exact
   # per-torrent length check stays there; here we only stop the amplification.
   @spec take_message(binary()) :: {:ok, binary(), binary()} | :incomplete | :protocol_error
+  # Size, not identity, is what makes this fatal — the id byte is not even matched
+  # (`_::binary` also matches <<>>), so a bare 4-byte prefix declaring gigabytes is
+  # rejected the moment it lands, one byte earlier than any per-id guard could act.
+  # BEP 3 forward-compat is untouched: an unknown id at a sane length still falls
+  # through to parse/2, which ignores it.
+  defp take_message(<<len::32, _::binary>>) when len > @max_wire_message_size,
+    do: :protocol_error
+
   defp take_message(<<len::32, @extended_id, _::binary>>)
        when len > @max_extended_message_size,
        do: :protocol_error
@@ -551,6 +583,10 @@ defmodule Peer.Sender do
   @doc false
   @spec max_bitfield_message_size() :: pos_integer()
   def max_bitfield_message_size, do: @max_bitfield_message_size
+
+  @doc false
+  @spec max_wire_message_size() :: pos_integer()
+  def max_wire_message_size, do: @max_wire_message_size
 
   defp parse(<<>>, _), do: :ok
 
