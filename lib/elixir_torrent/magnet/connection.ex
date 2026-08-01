@@ -15,9 +15,14 @@ defmodule Magnet.Connection do
   @reserved Magnet.Peer.reserved()
   @ltep_message_id Peer.LTEP.message_id()
   @ltep_handshake_id Peer.LTEP.handshake_id()
-  @interested_id 2
-  @choke_id 0
-  @unchoke_id 1
+  # BEP 3 wire ids come from Peer.Const, the same source Peer.Sender uses, so the
+  # magnet path can never disagree with the real peer wire protocol. We take the
+  # integer view (not `use Peer.Const`'s on-wire `<<0>>` bytes) because
+  # decode_wire_frame/2 has already peeled the id byte out of the length-prefixed
+  # frame and hands the drain loop a number.
+  @interested_id Peer.Const.interested_id()
+  @choke_id Peer.Const.choke_id()
+  @unchoke_id Peer.Const.unchoke_id()
   @ut_metadata Peer.LTEP.Extension.name(Magnet.UtMetadata.Extension)
   @unchoke_stable_ms 500
   # Brief drain of early BEP 3 traffic after LTEP; do not wait for unchoke (BEP 9).
