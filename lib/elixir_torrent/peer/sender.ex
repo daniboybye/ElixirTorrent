@@ -53,7 +53,21 @@ defmodule Peer.Sender do
   # documented cap is legal everywhere in this module.
   @max_wire_message_size 2 * 1024 * 1024
 
-  defstruct [:socket, :buffer, :key, active: false, utp_held_bytes: 0]
+  # Wall-clock budget for one wire frame to go from "first byte seen" to "fully
+  # parsed" once @max_wire_message_size has let it start buffering at all. Without
+  # this, a peer that declares a length just under that ceiling and then trickles
+  # the body in a few bytes at a time holds up to @max_wire_message_size of `buffer`
+  # per connection indefinitely: every delivery is real socket activity, so unlike a
+  # genuinely idle connection it never falls quiet long enough to trip a plain
+  # inactivity timer. The watchdog started in track_frame_stall/1 is deliberately
+  # independent of this GenServer's own keep-alive cadence (@timeout): it is set
+  # once when a partial frame starts accumulating and is only cleared by real
+  # progress (a full message parsing out of `buffer`) -- receiving more bytes of the
+  # SAME stalled frame never pushes it out. libtorrent pairs its recv-buffer ceiling
+  # with exactly this (settings_pack::peer_timeout) for the same reason.
+  @max_frame_assembly_time @timeout
+
+  defstruct [:socket, :buffer, :key, active: false, utp_held_bytes: 0, frame_stall_ref: nil]
 
   @type socket :: Peer.Transport.socket()
 
@@ -62,7 +76,8 @@ defmodule Peer.Sender do
           buffer: binary(),
           key: Peer.key(),
           active: boolean(),
-          utp_held_bytes: non_neg_integer()
+          utp_held_bytes: non_neg_integer(),
+          frame_stall_ref: reference() | nil
         }
 
   def start_link([hash, id, socket]) do
@@ -215,7 +230,12 @@ defmodule Peer.Sender do
           state
           | active: false,
             buffer: buffer,
-            utp_held_bytes: state.utp_held_bytes + held
+            utp_held_bytes: state.utp_held_bytes + held,
+            # Going inactive leaves the wire-framing model entirely (bytes are
+            # pulled via socket_recv/3 instead) -- any watchdog left running from
+            # active-mode buffering would otherwise fire against a buffer that
+            # inactive-mode code no longer interprets as "one stalled frame".
+            frame_stall_ref: nil
         }
 
         {:reply, :ok, state, @timeout}
@@ -379,6 +399,20 @@ defmodule Peer.Sender do
 
   def handle_info(:timeout, state), do: do_send(state, [])
 
+  # Fires @max_frame_assembly_time after some partial frame started accumulating in
+  # `buffer` (see track_frame_stall/1). `ref` only matches state.frame_stall_ref when
+  # that SAME partial frame is still stuck -- if it completed, or deactivate/1 reset
+  # tracking, in the meantime, frame_stall_ref has moved on (nil or a newer ref) and
+  # this message is stale and dropped. Cheaper than Process.cancel_timer/1 on every
+  # completed frame, and just as race-free: a cancel racing the timer's own send
+  # would need this same staleness check anyway.
+  def handle_info({:frame_stall, ref}, %__MODULE__{frame_stall_ref: ref, key: key} = state) do
+    Acceptor.malicious_peer(Peer.key_to_id(key))
+    {:stop, {:shutdown, :frame_stalled}, state}
+  end
+
+  def handle_info({:frame_stall, _stale_ref}, state), do: {:noreply, state, @timeout}
+
   def terminate(reason, %__MODULE__{key: key}) do
     case reason do
       :normal ->
@@ -416,7 +450,11 @@ defmodule Peer.Sender do
       {:ok, message, rest} ->
         case parse(message, key) do
           :ok ->
-            drain_inbound(%{state | buffer: rest})
+            # A full frame just parsed -- real progress, so whatever is left in
+            # `rest` (nothing, or the start of the next frame) earns a fresh
+            # assembly window instead of inheriting this frame's deadline.
+            state = track_frame_stall(%{state | buffer: rest, frame_stall_ref: nil})
+            drain_inbound(state)
 
           :protocol_error ->
             Acceptor.malicious_peer(Peer.key_to_id(key))
@@ -424,13 +462,29 @@ defmodule Peer.Sender do
         end
 
       :incomplete ->
-        {:noreply, release_utp_if_buffer_empty(state), @timeout}
+        state = track_frame_stall(release_utp_if_buffer_empty(state))
+        {:noreply, state, @timeout}
 
       :protocol_error ->
         Acceptor.malicious_peer(Peer.key_to_id(key))
         {:stop, {:shutdown, :protocol_error}, state}
     end
   end
+
+  # Starts the stall watchdog the first time `buffer` holds an incomplete frame, and
+  # leaves it alone on every later call for that SAME frame -- only drain_inbound's
+  # `:ok` branch (real progress) is allowed to replace it. An empty buffer means
+  # nothing is pending, so tracking is cleared instead.
+  @spec track_frame_stall(t()) :: t()
+  defp track_frame_stall(%{buffer: <<>>} = state), do: %{state | frame_stall_ref: nil}
+
+  defp track_frame_stall(%{frame_stall_ref: nil} = state) do
+    ref = make_ref()
+    Process.send_after(self(), {:frame_stall, ref}, @max_frame_assembly_time)
+    %{state | frame_stall_ref: ref}
+  end
+
+  defp track_frame_stall(state), do: state
 
   # Peer data can arrive after the last passive recv (LTEP) but before active:true.
   @spec absorb_kernel_buffer(Peer.Transport.socket(), binary()) ::

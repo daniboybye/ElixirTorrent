@@ -392,6 +392,84 @@ defmodule PeerSenderLoopbackTest do
     end
   end
 
+  describe "frame assembly stall watchdog" do
+    test "an incomplete frame starts a watchdog that disconnects the peer once it fires" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      # Declares a 10-byte piece body but only 2 bytes ever arrive -- the frame never
+      # completes, mirroring a peer trickling a near-ceiling frame in one byte at a time.
+      assert :ok = :gen_tcp.send(server, <<0, 0, 0, 10, 7, 0>>)
+      state = await_state(sender_pid, &is_reference(&1.frame_stall_ref))
+
+      down_ref = Process.monitor(sender_pid)
+      send(sender_pid, {:frame_stall, state.frame_stall_ref})
+
+      assert_receive {:DOWN, ^down_ref, :process, ^sender_pid, {:shutdown, :frame_stalled}},
+                     @timeout
+    end
+
+    test "more bytes of the same incomplete frame do not restart its watchdog" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = :gen_tcp.send(server, <<0, 0, 0, 10, 7, 0>>)
+      state = await_state(sender_pid, &is_reference(&1.frame_stall_ref))
+      ref = state.frame_stall_ref
+
+      # More dribble for the SAME frame -- still incomplete afterwards.
+      assert :ok = :gen_tcp.send(server, <<0, 0>>)
+
+      state2 = await_state(sender_pid, &(byte_size(&1.buffer) == byte_size(state.buffer) + 2))
+      assert state2.frame_stall_ref == ref
+
+      # The watchdog scheduled on the FIRST delivery still fires and disconnects the
+      # peer -- the dribble above did not buy it a fresh window.
+      down_ref = Process.monitor(sender_pid)
+      send(sender_pid, {:frame_stall, ref})
+
+      assert_receive {:DOWN, ^down_ref, :process, ^sender_pid, {:shutdown, :frame_stalled}},
+                     @timeout
+    end
+
+    test "completing the frame clears its watchdog" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      # 5-byte `have` body (id + index::32); only the id and first index byte arrive
+      # at first. (Not a `piece` frame here: completing one calls into
+      # Peer.Controller.valid_piece_block?/4, which needs a live Torrent.Model this
+      # loopback harness never starts.)
+      assert :ok = :gen_tcp.send(server, <<0, 0, 0, 5, 4, 0>>)
+      await_state(sender_pid, &is_reference(&1.frame_stall_ref))
+
+      assert :ok = :gen_tcp.send(server, <<0, 0, 0>>)
+      assert_receive {:controller, :handle_have, [0]}, @timeout
+
+      state = await_state(sender_pid, &is_nil(&1.frame_stall_ref))
+      assert state.buffer == <<>>
+      assert Process.alive?(sender_pid)
+    end
+
+    test "a stale watchdog message is ignored" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      # A ref that can never match state.frame_stall_ref (nil, since nothing is
+      # buffered yet) simulates a watchdog belatedly firing for a frame that already
+      # completed -- it must not disconnect a healthy connection.
+      send(sender_pid, {:frame_stall, make_ref()})
+
+      assert :ok = :gen_tcp.send(server, frame_payload(<<1>>))
+      assert_receive {:controller, :handle_unchoke, []}, @timeout
+      assert Process.alive?(sender_pid)
+    end
+  end
+
   describe "outbound casts produce correct wire bytes" do
     test "single-byte messages and multi-field messages" do
       {client, server, listen, key, sender_pid} = start_sender_pair()
@@ -532,6 +610,24 @@ defmodule PeerSenderLoopbackTest do
 
   defp frame_payload(body) when is_binary(body) do
     <<byte_size(body)::32, body::binary>>
+  end
+
+  # TCP delivery into the Sender's mailbox is async, so a bare :sys.get_state right
+  # after :gen_tcp.send can race ahead of it. Poll instead of asserting on one read.
+  defp await_state(pid, pred, deadline \\ System.monotonic_time(:millisecond) + 2_000) do
+    state = :sys.get_state(pid)
+
+    cond do
+      pred.(state) ->
+        state
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("condition not met before timeout, last state: #{inspect(state)}")
+
+      true ->
+        Process.sleep(5)
+        await_state(pid, pred, deadline)
+    end
   end
 
   defp wire_message(server) do
