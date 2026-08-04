@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-08-04
 
 ### Added
 
@@ -14,9 +14,18 @@
 - Magnet `x.pe` peers kept as live dial candidates after metadata fetch
 - Developer quality gate: warnings-as-errors compile, Dialyzer, and all enabled Credo checks at every priority via `mix quality`
 
+### Changed
+
+- `Magnet.Connection` sources its BEP 3 choke/unchoke/interested wire ids from `Peer.Const` instead of a local copy
+- CI publish workflow renamed to `build-and-publish`, gated to run `mix hex.publish` on semver tag pushes
+
 ### Fixed
 
 - NAT-PMP and UPnP passive UDP receive handling now decodes the datagram payload instead of the source-address tuple
+- Global 2 MiB recv-buffer ceiling now bounds every wire frame's declared length, not only the six previously-capped ids
+- Per-connection stall watchdog disconnects peers that trickle a declared frame length in forever instead of completing it
+- Declared bitfield/piece frame lengths capped ahead of buffering, closing a memory-amplification gap alongside the existing LTEP/BEP 52 caps
+- Tracker `started` is now resent on the first announce of every session (e.g. after a cold restart), not only once per info hash ever
 
 ## 0.5.1 - 2026-07-22
 
