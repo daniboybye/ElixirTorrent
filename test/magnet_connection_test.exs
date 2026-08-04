@@ -14,6 +14,7 @@ defmodule Magnet.ConnectionTest do
   use ExUnit.Case, async: false
 
   alias Magnet.ConnectionTest.WireIds
+  alias Magnet.UtMetadata.Extension
   alias Peer.LTEP.{Handshake, Session}
 
   @timeout 5_000
@@ -101,7 +102,7 @@ defmodule Magnet.ConnectionTest do
     peer_hs = %Handshake{m: %{"ut_metadata" => 7}, metadata_size: total_size}
 
     ltep =
-      Session.new([Magnet.UtMetadata.Extension])
+      Session.new([Extension])
       |> Session.apply_peer_handshake(peer_hs)
 
     # Starts choked, so request_piece/2 has to drain the wire until the peer unchokes.
@@ -147,7 +148,7 @@ defmodule Magnet.ConnectionTest do
     :gen_tcp.send(
       socket,
       Peer.LTEP.extended_message_wire(
-        Magnet.UtMetadata.Extension.local_id(),
+        Extension.local_id(),
         Magnet.UtMetadata.encode_data(0, total_size, data)
       )
     )
