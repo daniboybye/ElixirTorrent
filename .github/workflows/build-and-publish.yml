@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,6 +20,10 @@ jobs:
     name: Build, analyze, and test
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Check out repository
