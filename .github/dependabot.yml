@@ -14,10 +14,12 @@ updates:
       prefix: "chore"
       prefix-development: "chore"
       include: "scope"
-    # This package is published on Hex: only tighten a requirement in mix.exs when
-    # the existing one cannot resolve the new version, so consumers keep the widest
-    # compatible range (`~> 3.0` stays put for 3.1, moves only for 4.0).
-    versioning-strategy: "increase-if-necessary"
+    # This package is published on Hex. "increase-if-necessary" isn't implemented
+    # for the mix updater — GitHub's schema only accepts lockfile-only/auto here.
+    # "auto" treats this as a library and widens mix.exs only when the existing
+    # requirement can't resolve the new version, keeping consumer ranges as wide
+    # as possible (`~> 3.0` stays put for 3.1, widens only for 4.0).
+    versioning-strategy: "auto"
     groups:
       # Dev/test tooling never ships to consumers — batch it into one low-risk PR.
       dev-and-test-tooling:
