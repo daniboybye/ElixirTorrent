@@ -52,8 +52,10 @@ Run the project quality gate with:
 mix quality
 ```
 
-It compiles with warnings as errors, runs Dialyzer, and runs `mix credo --strict --all`.
-The same strict Credo gate runs in CI, covering every enabled check at every priority.
+It compiles with warnings as errors, runs Dialyzer, runs `mix credo --strict --all`, and
+runs [Sobelow](https://hexdocs.pm/sobelow) for security-focused static analysis
+(`--threshold medium`, filtering out low-confidence file-path findings from the torrent
+engine's own already-sanitized path handling). The same gates run in CI.
 
 ## Quick start
 

@@ -81,6 +81,9 @@ jobs:
       - name: Run strict Credo
         run: mix credo --all
 
+      - name: Run Sobelow
+        run: mix sobelow --exit --threshold medium --skip --no-router
+
       - name: Run tests and collect coverage
         run: timeout 60s mix coveralls.json --no-compile
 
