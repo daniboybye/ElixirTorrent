@@ -46,7 +46,3 @@ updates:
       github-actions:
         patterns:
           - "*"
-    ignore:
-      # Intentionally tracks the action's latest code on @master (see the workflow
-      # comment); a branch ref has no version for Dependabot to bump.
-      - dependency-name: "aquasecurity/trivy-action"
