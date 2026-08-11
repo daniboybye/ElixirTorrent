@@ -6,6 +6,8 @@ on:
     - cron: "27 5 * * 1"
   push:
     branches: ["master"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions: read-all
