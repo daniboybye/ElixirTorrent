@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.3 - 2026-08-11
+
+### Fixed
+
+- Release pipeline: `cosign sign-blob` now writes a `--bundle` file instead of the deprecated `--output-signature`/`--output-certificate` flags, which current cosign silently ignores in favor of its new Sigstore bundle format (0.6.2's release signing failed with `create bundle file: open : no such file or directory` as a result). The bundle is named `*.tar.sigstore.json` so OpenSSF Scorecard's Signed-Releases check recognizes it. No runtime/library changes.
+
 ## 0.6.2 - 2026-08-11
 
 ### Fixed

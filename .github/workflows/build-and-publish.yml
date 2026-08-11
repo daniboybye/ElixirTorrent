@@ -175,10 +175,16 @@ jobs:
       - name: Sign package tarball (keyless, via GitHub OIDC)
         run: |
           TARBALL=$(ls elixir_torrent-*.tar)
+          # cosign >=3 always writes the new Sigstore bundle format; --bundle
+          # is the only way to get output (the old --output-signature /
+          # --output-certificate flags are silently ignored). The bundle
+          # filename must end in one of OpenSSF Scorecard's recognized
+          # signature suffixes (.sig/.sigstore/.sigstore.json/...) for the
+          # Signed-Releases check to detect it; .sigstore.json also matches
+          # cosign's own convention for this format.
           for attempt in 1 2 3; do
             if cosign sign-blob --yes \
-                --output-signature "$TARBALL.sig" \
-                --output-certificate "$TARBALL.pem" \
+                --bundle "$TARBALL.sigstore.json" \
                 "$TARBALL"; then
               exit 0
             fi
@@ -193,5 +199,4 @@ jobs:
         with:
           files: |
             elixir_torrent-*.tar
-            elixir_torrent-*.tar.sig
-            elixir_torrent-*.tar.pem
+            elixir_torrent-*.tar.sigstore.json
