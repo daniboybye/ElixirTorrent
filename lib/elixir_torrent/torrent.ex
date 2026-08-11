@@ -6,6 +6,20 @@ defmodule Torrent do
   use Supervisor, type: :supervisor, restart: :transient
   use Via
 
+  alias __MODULE__.{
+    Controller,
+    Swarm,
+    # Bitfield,
+    PiecesStatistic,
+    FileHandle,
+    Uploader,
+    Downloads,
+    Files,
+    Model,
+    Resume,
+    Session
+  }
+
   @type hash :: <<_::160>>
   @type hash_v2 :: <<_::256>>
   @type kind :: :v1 | :hybrid | :v2
@@ -86,20 +100,6 @@ defmodule Torrent do
           kind: kind()
         }
 
-  alias __MODULE__.{
-    Controller,
-    Swarm,
-    # Bitfield,
-    PiecesStatistic,
-    FileHandle,
-    Uploader,
-    Downloads,
-    Files,
-    Model,
-    Resume,
-    Session
-  }
-
   @spec start_link(Path.t() | {Path.t(), keyword()}) :: Supervisor.on_start() | none()
   def start_link({path, opts}) when is_binary(path) and is_list(opts),
     do: Supervisor.start_link(__MODULE__, {path, opts})
@@ -109,12 +109,16 @@ defmodule Torrent do
 
   @compile {:inline, empty: 0, started: 0, completed: 0, stopped: 0, event_to_string: 1}
 
+  @spec started() :: 2
   def started, do: @started
 
+  @spec empty() :: 0
   def empty, do: @empty
 
+  @spec completed() :: 1
   def completed, do: @completed
 
+  @spec stopped() :: 3
   def stopped, do: @stopped
 
   @spec event_to_string(0..3) :: String.t() | nil
@@ -126,6 +130,7 @@ defmodule Torrent do
 
   def event_to_string(@stopped), do: "stopped"
 
+  @spec hex_encoded_hash(Torrent.hash()) :: String.t()
   def hex_encoded_hash(hash) do
     hash
     |> :crypto.bytes_to_integer()
@@ -162,12 +167,14 @@ defmodule Torrent do
 
   defdelegate stop(pid), to: Supervisor
 
+  @spec init({Path.t(), keyword()}) :: {:ok, {map(), [any()]}}
   def init({path, opts}) when is_binary(path) and is_list(opts) do
     download_dir = normalize_download_dir(Keyword.get(opts, :download_dir))
     %Torrent{hash: hash} = torrent = parse_file!(path) |> Map.put(:download_dir, download_dir)
     start_torrent(torrent, hash, opts)
   end
 
+  @spec init(Path.t()) :: {:ok, {map(), [any()]}}
   def init(path) when is_binary(path), do: init({path, []})
 
   defp start_torrent(%Torrent{hash: hash} = torrent, hash, opts) do
@@ -467,8 +474,15 @@ defmodule Torrent do
   defp bencode_value(<<c, _::binary>> = str) when c in ?0..?9, do: bencode_string(str)
   defp bencode_value(_), do: throw(:invalid)
 
-  defp bencode_int(<<"e", rest::binary>>, [_ | _] = acc),
-    do: {acc |> Enum.reverse() |> IO.iodata_to_binary() |> String.to_integer(), rest}
+  defp bencode_int(<<"e", rest::binary>>, [_ | _] = acc) do
+    value =
+      acc
+      |> Enum.reverse()
+      |> IO.iodata_to_binary()
+      |> String.to_integer()
+
+    {value, rest}
+  end
 
   defp bencode_int(<<c, rest::binary>>, acc) when c in ?0..?9 or (acc == [] and c == ?-),
     do: bencode_int(rest, [c | acc])
@@ -478,7 +492,11 @@ defmodule Torrent do
   defp bencode_string(bytes), do: bencode_string_len(bytes, [])
 
   defp bencode_string_len(<<":", rest::binary>>, [_ | _] = acc) do
-    len = acc |> Enum.reverse() |> IO.iodata_to_binary() |> String.to_integer()
+    len =
+      acc
+      |> Enum.reverse()
+      |> IO.iodata_to_binary()
+      |> String.to_integer()
 
     if len > byte_size(rest) do
       throw(:invalid)

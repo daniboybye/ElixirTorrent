@@ -41,7 +41,11 @@ defmodule DHT.Lookup do
       shortlist
       |> Enum.split_with(&(not &1.queried?))
 
-    queries = pending |> Enum.take(alpha) |> Enum.map(& &1.id)
+    queries =
+      pending
+      |> Enum.take(alpha)
+      |> Enum.map(& &1.id)
+
     marked = Enum.map(queries, &%{id: &1, queried?: true})
 
     {merge_shortlist(shortlist, marked), queries}
@@ -130,6 +134,8 @@ defmodule DHT.Lookup do
   defp farthest_queried_distance([], _target), do: nil
 
   defp farthest_queried_distance(queried, target) do
-    queried |> Enum.map(&RoutingTable.distance(&1, target)) |> Enum.max()
+    queried
+    |> Enum.map(&RoutingTable.distance(&1, target))
+    |> Enum.max()
   end
 end

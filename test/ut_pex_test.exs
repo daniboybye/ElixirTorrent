@@ -5,8 +5,7 @@ defmodule Peer.UtPexTest do
   alias Peer.Controller.State
   alias Peer.LTEP
   alias Peer.LTEP.{Extensions, Handshake, Session}
-  alias Peer.UtHolepunch
-  alias Peer.UtPex
+  alias Peer.{UtHolepunch, UtPex}
 
   alias Peer.UtPex.{
     BEP40,
@@ -786,6 +785,7 @@ defmodule Peer.UtPexTest do
       assert DisconnectReason.eligible?({:shutdown, :duplicate_peer})
       assert DisconnectReason.eligible?({:shutdown, :no_mutual_interest})
       assert DisconnectReason.eligible?({:shutdown, :resource_limit})
+      assert Enum.all?(DisconnectReason.eligible_reasons(), &DisconnectReason.eligible?/1)
 
       refute DisconnectReason.eligible?({:shutdown, :protocol_error})
       refute DisconnectReason.eligible?({:shutdown, :connection_closed})
@@ -1028,6 +1028,84 @@ defmodule Peer.UtPexTest do
       assert Filter.global_unicast_endpoint?({pub4(1), 6881})
       refute Filter.global_unicast_endpoint?({{0x2001, 0xDB8, 0, 0, 0, 0, 0, 1}, 6881})
       assert Filter.global_unicast_endpoint?({{0x2606, 0x4700, 0, 0, 0, 0, 0, 1}, 6881})
+    end
+
+    test "global_unicast_ip? covers every reserved v4/v6 family and malformed addresses" do
+      for ip <- [
+            {172, 16, 0, 1},
+            {192, 168, 1, 1},
+            {169, 254, 1, 1},
+            {192, 0, 0, 1},
+            {192, 0, 2, 1},
+            {198, 18, 0, 1},
+            {198, 19, 0, 1},
+            {198, 51, 100, 1},
+            {240, 0, 0, 1},
+            {0, 0, 0, 0, 0, 0, 0, 0},
+            {0, 0, 0, 0, 0, 0xFFFF, 0x0100, 0x0203},
+            {0x100, 0, 0, 0, 0, 0, 0, 1},
+            {0xFC00, 0, 0, 0, 0, 0, 0, 1},
+            {1, 2, 3},
+            :not_an_ip
+          ] do
+        refute Filter.global_unicast_ip?(ip)
+      end
+
+      assert Filter.global_unicast_ip?(pub4(2))
+      assert Filter.global_unicast_ip?({0x2000, 0, 0, 0, 0, 0, 0, 1})
+      refute Filter.global_unicast_ip?({0x1FFF, 0, 0, 0, 0, 0, 0, 1})
+    end
+
+    test "global_unicast_endpoint? enforces port bounds on global addresses" do
+      global = pub4(3)
+
+      refute Filter.global_unicast_endpoint?({global, 0})
+      refute Filter.global_unicast_endpoint?({global, -1})
+      refute Filter.global_unicast_endpoint?({global, 65_536})
+      assert Filter.global_unicast_endpoint?({global, 1})
+      assert Filter.global_unicast_endpoint?({global, 65_535})
+    end
+
+    test "advertisable? rejects self, local listen, and non-global endpoints" do
+      hash = <<0::160>>
+      global = {pub4(20), 7020}
+
+      assert Filter.advertisable?(hash, global)
+      refute Filter.advertisable?(hash, global, global)
+      refute Filter.advertisable?(hash, {{10, 0, 0, 1}, 6881})
+
+      listen = Application.get_env(:elixir_torrent, :listen_port, 6881)
+
+      case Acceptor.all_global_ips().inet do
+        nil -> :ok
+        ip -> refute Filter.advertisable?(hash, {ip, listen})
+      end
+    end
+
+    test "filter_peers keeps global routable peers and drops private or local listen" do
+      hash = <<0::160>>
+      listen = Application.get_env(:elixir_torrent, :listen_port, 6881)
+      keep = %Peer{ip: pub4(21), port: 7021}
+      drop_private = %Peer{ip: {10, 0, 0, 1}, port: 6881}
+
+      peers =
+        case Acceptor.all_global_ips().inet do
+          nil -> [keep, drop_private]
+          ip -> [keep, drop_private, %Peer{ip: ip, port: listen}]
+        end
+
+      assert Filter.filter_peers(peers, hash) == [keep]
+    end
+
+    test "duplicate_ip_blocked? is true only when the same IP already uses another port" do
+      ip = pub4(22)
+      first = {ip, 7022}
+      queue = %{first => %DialQueue{peer: %Peer{ip: ip, port: 7022}, sources: MapSet.new()}}
+
+      assert Filter.duplicate_ip_blocked?(queue, %Peer{ip: ip, port: 7023})
+      refute Filter.duplicate_ip_blocked?(queue, %Peer{ip: ip, port: 7022})
+      refute Filter.duplicate_ip_blocked?(queue, %Peer{ip: pub4(23), port: 7023})
+      refute Filter.duplicate_ip_blocked?(%{}, %Peer{ip: ip, port: 7023})
     end
 
     test "duplicate IP different port suppressed on PEX queue insert" do

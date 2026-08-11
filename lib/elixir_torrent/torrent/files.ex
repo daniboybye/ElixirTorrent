@@ -13,10 +13,7 @@ defmodule Torrent.Files do
   keeps working; only the visible file list drops them.
   """
 
-  alias Torrent.Bitfield
-  alias Torrent.Merkle
-  alias Torrent.Model
-  alias Torrent.PathLayout
+  alias Torrent.{Bitfield, Merkle, Model, PathLayout}
 
   @doc """
   Whether a file entry from `info["files"]` is a BEP 47 padding file.

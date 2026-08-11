@@ -13,6 +13,7 @@ defmodule Torrent.HashServe do
 
   @max_tasks 8
 
+  @spec child_spec(Torrent.hash()) :: Supervisor.child_spec()
   def child_spec(hash) do
     %{
       start:
@@ -64,6 +65,18 @@ defmodule Torrent.HashServe do
 
   @spec do_serve(Torrent.hash(), HashWire.t()) :: response()
   defp do_serve(hash, req) do
+    case validate_serve_request(hash, req) do
+      {:ok, ctx, file, piece_layer} ->
+        serve_file(ctx, file, req, piece_layer)
+
+      _ ->
+        :reject
+    end
+  catch
+    _, _ -> :reject
+  end
+
+  defp validate_serve_request(hash, req) do
     with {:ok, ctx} <- fetch_context(hash),
          {:ok, piece_layer} <- Merkle.piece_layer_level(ctx.piece_length),
          :ok <- HashWire.validate_request(req, piece_layer),
@@ -71,12 +84,8 @@ defmodule Torrent.HashServe do
          num_layers <- num_layers_for_file(file.length),
          :ok <- HashWire.validate_response_header(req, piece_layer, num_layers),
          :ok <- validate_index_bounds(file, req, ctx.piece_length) do
-      serve_file(ctx, file, req, piece_layer)
-    else
-      _ -> :reject
+      {:ok, ctx, file, piece_layer}
     end
-  catch
-    _, _ -> :reject
   end
 
   @spec maybe_deliver(Peer.key(), pid() | nil, (response() -> any()), response()) :: :ok
@@ -204,7 +213,10 @@ defmodule Torrent.HashServe do
 
   @spec file_path(map(), Merkle.file_context()) :: {:ok, Path.t()} | {:error, term()}
   defp file_path(ctx, %{path: path, length: length}) do
-    relative = path |> Path.join() |> String.replace("\\", "/")
+    relative =
+      path
+      |> Path.join()
+      |> String.replace("\\", "/")
 
     case Enum.find(ctx.all_files, fn
            {_end, {:gap, _}} ->

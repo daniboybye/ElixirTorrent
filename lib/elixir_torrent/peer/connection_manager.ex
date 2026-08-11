@@ -6,11 +6,11 @@ defmodule Peer.ConnectionManager do
 
   import Process, only: [send_after: 3]
 
-  require Logger
-
   alias Acceptor.Connection.Handshakes
   alias Peer.ConnectionManager.Queue, as: DialQueue
   alias Torrent.Swarm
+
+  require Logger
 
   # @target_connected must stay strictly below @swarm_cap. Both `handle_info(:tick)`
   # and `handle_info({:dial_done, ...})` gate peer-refresh/replenish on
@@ -38,6 +38,7 @@ defmodule Peer.ConnectionManager do
   # than @snub_grace_ms so we drop stallers before the wall-clock zero-byte path.
   @idle_unchoked_snub_ms 30_000
 
+  @spec start_link(Torrent.hash()) :: GenServer.on_start()
   def start_link(hash) do
     GenServer.start_link(__MODULE__, hash, name: via(hash))
   end
@@ -113,14 +114,14 @@ defmodule Peer.ConnectionManager do
     :exit, _ -> :ok
   end
 
-  @impl true
+  @impl GenServer
   def init(hash) do
     send_after(self(), :tick, @normal_interval_ms)
     # nil = never snubbed; monotonic ms can be negative so 0 is not a safe sentinel.
     {:ok, %{hash: hash, queue: %{}, dialing?: false, dial_task: nil, last_snub_ms: nil}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_cast({:offer, peers, source}, state) when is_list(peers) do
     queue = DialQueue.offer(state.queue, peers, source, offer_opts(state))
     maybe_continue_dial(state, queue, peers != [])
@@ -151,7 +152,7 @@ defmodule Peer.ConnectionManager do
     {:noreply, state, {:continue, :dial}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_continue(:dial, %{dialing?: true} = state), do: {:noreply, state}
 
   def handle_continue(:dial, %{hash: hash} = state) do
@@ -162,14 +163,14 @@ defmodule Peer.ConnectionManager do
     maybe_dial(state, connected)
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:tick, %{hash: hash} = state) do
     connected = Swarm.count(hash)
     send_after(self(), :tick, tick_interval(hash, connected))
     handle_tick(state, hash, connected)
   end
 
-  @impl true
+  @impl GenServer
   def handle_info({:dial_done, selected_keys, results}, %{hash: hash} = state) do
     {_ok, _failures, failed_peers} = results
     failed_keys = MapSet.new(Enum.map(failed_peers, fn {p, _} -> {p.ip, p.port} end))
@@ -185,7 +186,7 @@ defmodule Peer.ConnectionManager do
     maybe_dial(state, connected)
   end
 
-  @impl true
+  @impl GenServer
   def terminate(_reason, %{dial_task: pid}) when is_pid(pid) do
     if Process.alive?(pid), do: Process.exit(pid, :shutdown)
     :ok
@@ -487,8 +488,20 @@ defmodule Peer.ConnectionManager do
 
   defp select_eviction_pids(candidates, connected) do
     candidates
+    |> eligible_eviction_candidates()
+    |> pick_eviction_pids(connected)
+  end
+
+  @spec eligible_eviction_candidates(list()) :: list()
+  defp eligible_eviction_candidates(candidates) do
+    candidates
     |> Enum.filter(&eviction_eligible?/1)
     |> Enum.sort_by(fn {_pid, info} -> eviction_sort_key(info) end)
+  end
+
+  @spec pick_eviction_pids(list(), non_neg_integer()) :: [pid()]
+  defp pick_eviction_pids(sorted_candidates, connected) do
+    sorted_candidates
     |> Enum.reduce({[], connected}, fn {pid, info}, {acc, remaining} ->
       if length(acc) < @evict_batch and may_evict?(info, remaining) do
         {[pid | acc], remaining - 1}

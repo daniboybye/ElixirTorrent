@@ -65,6 +65,28 @@ defmodule Peer.HashWireTest do
 
     assert HashWire.encode_reject(req) == HashWire.encode_request(req)
   end
+
+  test "decode rejects truncated, oversize, and misaligned hash payloads" do
+    req = %HashWire{
+      pieces_root: @root,
+      base_layer: 0,
+      index: 0,
+      length: 2,
+      proof_layers: 0
+    }
+
+    assert {:error, :truncated} = HashWire.decode_header(<<0::320>>)
+    assert {:error, :truncated} = HashWire.decode_request(<<0::320>>)
+    assert {:error, :invalid_size} = HashWire.decode_request(<<0::512>>)
+
+    header = HashWire.encode_request(req)
+    assert {:error, :truncated} = HashWire.decode_hashes(<<0::320>>)
+    assert {:error, :invalid_hashes_size} = HashWire.decode_hashes(header <> <<1, 2, 3>>)
+    assert {:error, :invalid_hashes_size} = HashWire.validate_hashes_payload(req, <<1, 2, 3>>)
+
+    assert {:error, :invalid_root} =
+             HashWire.validate_request(%{req | pieces_root: <<0::248>>}, 2)
+  end
 end
 
 defmodule Torrent.MerkleRangeTest do

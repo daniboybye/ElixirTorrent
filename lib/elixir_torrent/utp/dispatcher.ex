@@ -12,6 +12,7 @@ defmodule UTP.Dispatcher do
 
   @accept_callback Acceptor.Connection.Handshakes
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
@@ -127,13 +128,13 @@ defmodule UTP.Dispatcher do
     :ok
   end
 
-  @impl true
+  @impl GenServer
   def init(_opts) do
     :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
     {:ok, %{}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call({:start_connect, ip, port, opts}, _from, _state) do
     reply =
       with {:ok, udp_socket} <- udp_socket(ip) do
@@ -143,7 +144,7 @@ defmodule UTP.Dispatcher do
     {:reply, reply, %{}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_cast({:dispatch, udp_socket, ip, port, packet}, state) do
     route_packet(udp_socket, ip, port, packet)
     {:noreply, state}

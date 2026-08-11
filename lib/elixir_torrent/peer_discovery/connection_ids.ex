@@ -1,6 +1,4 @@
 defmodule PeerDiscovery.ConnectionIds do
-  use GenServer, start: {GenServer, :start_link, [__MODULE__, nil, [name: __MODULE__]]}
-
   @moduledoc """
   Caches BEP 15 UDP tracker `connection_id` values per tracker endpoint and local UDP port.
 
@@ -11,6 +9,8 @@ defmodule PeerDiscovery.ConnectionIds do
   `@request_timeout_ms` so parallel announces do not block on dead trackers until the
   90-minute GenServer.call timeout and crash their Tasks.
   """
+
+  use GenServer, start: {GenServer, :start_link, [__MODULE__, nil, [name: __MODULE__]]}
 
   alias __MODULE__.State
   alias Tracker.Error
@@ -39,47 +39,76 @@ defmodule PeerDiscovery.ConnectionIds do
     GenServer.cast(__MODULE__, {:invalidate, socket, ip, port})
   end
 
+  @spec init(term()) :: {:ok, State.t()}
   def init(_), do: {:ok, %State{}}
 
+  @spec handle_cast({:invalidate, port(), :inet.ip_address(), :inet.port_number()}, State.t()) ::
+          {:noreply, State.t()}
   def handle_cast({:invalidate, socket, ip, port}, %State{} = state) do
     {:ok, local_port} = :inet.port(socket)
     key = {ip, port, local_port}
     {:noreply, update_in(state, [Access.key!(:ids)], &Map.delete(&1, key))}
   end
 
+  @spec handle_call(term(), GenServer.from(), State.t()) ::
+          {:reply, {:ok, Tracker.connection_id()} | Tracker.Error.t() | :error, State.t()}
+          | {:noreply, State.t()}
   def handle_call([socket, ip, port], from, %State{} = state) do
     # Some UDP trackers appear to bind connection_id validity to the client's source port.
     # We open new UDP sockets over time, so cache connection_ids per (tracker endpoint, local port).
-    {:ok, local_port} = :inet.port(socket)
-    key = {ip, port, local_port}
+    key = connection_id_cache_key(socket, ip, port)
 
     case Map.fetch(state.ids, key) do
       {:ok, [_ | _]} ->
-        {:noreply, update_in(state, [Access.key!(:ids), key], &[from | &1])}
+        {:noreply, enqueue_connection_id_waiter(state, key, from)}
 
       {:ok, connection_id} ->
         {:reply, {:ok, connection_id}, state}
 
       :error ->
-        %Task{ref: ref} =
-          Task.Supervisor.async_nolink(
-            PeerDiscovery.Requests,
-            Tracker,
-            :udp_connect,
-            [socket, ip, port]
-          )
-
-        timer_ref = Process.send_after(self(), {:request_timeout, ref}, @request_timeout_ms)
-
-        {:noreply,
-         %{
-           state
-           | ids: Map.put(state.ids, key, [from]),
-             requests: Map.put(state.requests, ref, {key, timer_ref})
-         }}
+        {:noreply, start_connection_id_fetch(state, socket, ip, port, key, from)}
     end
   end
 
+  @spec connection_id_cache_key(port(), :inet.ip_address(), :inet.port_number()) ::
+          {:inet.ip_address(), :inet.port_number(), :inet.port_number()}
+  defp connection_id_cache_key(socket, ip, port) do
+    {:ok, local_port} = :inet.port(socket)
+    {ip, port, local_port}
+  end
+
+  @spec enqueue_connection_id_waiter(State.t(), term(), GenServer.from()) :: State.t()
+  defp enqueue_connection_id_waiter(%State{} = state, key, from) do
+    update_in(state, [Access.key!(:ids), key], &[from | &1])
+  end
+
+  @spec start_connection_id_fetch(
+          State.t(),
+          port(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          term(),
+          GenServer.from()
+        ) :: State.t()
+  defp start_connection_id_fetch(%State{} = state, socket, ip, port, key, from) do
+    %Task{ref: ref} =
+      Task.Supervisor.async_nolink(
+        PeerDiscovery.Requests,
+        Tracker,
+        :udp_connect,
+        [socket, ip, port]
+      )
+
+    timer_ref = Process.send_after(self(), {:request_timeout, ref}, @request_timeout_ms)
+
+    %{
+      state
+      | ids: Map.put(state.ids, key, [from]),
+        requests: Map.put(state.requests, ref, {key, timer_ref})
+    }
+  end
+
+  @spec handle_info(term(), State.t()) :: {:noreply, State.t()}
   def handle_info({:timeout, key}, state),
     do: {:noreply, Map.update!(state, :ids, &Map.delete(&1, key))}
 

@@ -18,9 +18,10 @@ defmodule PeerDiscovery.SeedPeers do
 
   @table __MODULE__
 
+  @spec start_link(term()) :: GenServer.on_start()
   def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
-  @impl true
+  @impl GenServer
   def init(_) do
     :ets.new(@table, [:set, :public, :named_table, read_concurrency: true])
     {:ok, %{}}

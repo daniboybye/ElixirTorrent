@@ -124,6 +124,18 @@ defmodule Peer.HashCorrelationIntegrationTest do
   ## helpers -----------------------------------------------------------------
 
   defp setup_v2_torrent! do
+    {content, root, piece_length, piece_hashes} = build_v2_corr_content!()
+    hash = :crypto.strong_rand_bytes(20)
+    {dir, path} = setup_v2_corr_dir!(content)
+    merkle = build_v2_corr_merkle(content, root, piece_length, piece_hashes)
+    torrent = build_v2_corr_torrent(hash, content, dir, piece_length, merkle)
+    {model, store, hash_sup} = start_v2_corr_processes!(hash, torrent)
+    register_v2_corr_cleanup(model, store, hash_sup)
+
+    {hash, root, path, piece_length, piece_hashes, content}
+  end
+
+  defp build_v2_corr_content! do
     blocks =
       for byte <- [?a, ?b, ?c, ?d, ?e, ?f, ?g, ?h, ?i, ?j, ?k, ?l, ?m, ?n, ?o, ?p],
           do: :binary.copy(<<byte>>, @block)
@@ -135,8 +147,10 @@ defmodule Peer.HashCorrelationIntegrationTest do
     {:ok, layer} = Merkle.piece_layer_level(piece_length)
     piece_hashes = tree.levels |> Enum.at(layer)
 
-    hash = :crypto.strong_rand_bytes(20)
+    {content, root, piece_length, piece_hashes}
+  end
 
+  defp setup_v2_corr_dir!(content) do
     dir =
       Path.join(
         System.tmp_dir!(),
@@ -146,10 +160,12 @@ defmodule Peer.HashCorrelationIntegrationTest do
     File.mkdir_p!(dir)
     path = Path.join(dir, "data.bin")
     File.write!(path, content)
-
     on_exit(fn -> File.rm_rf!(dir) end)
+    {dir, path}
+  end
 
-    merkle = %{
+  defp build_v2_corr_merkle(content, root, piece_length, piece_hashes) do
+    %{
       piece_length: piece_length,
       files: [
         %{
@@ -160,8 +176,10 @@ defmodule Peer.HashCorrelationIntegrationTest do
         }
       ]
     }
+  end
 
-    torrent = %Torrent{
+  defp build_v2_corr_torrent(hash, content, dir, piece_length, merkle) do
+    %Torrent{
       hash: hash,
       metadata: %{
         "info" => %{
@@ -177,7 +195,9 @@ defmodule Peer.HashCorrelationIntegrationTest do
       kind: :hybrid,
       merkle: merkle
     }
+  end
 
+  defp start_v2_corr_processes!(hash, torrent) do
     :ok = PiecesStatistic.init(torrent)
     {:ok, model} = Model.start_link(torrent)
     {:ok, store} = FileHandle.Store.start_link(hash)
@@ -189,6 +209,10 @@ defmodule Peer.HashCorrelationIntegrationTest do
         name: {:via, Registry, {Registry, {hash, Torrent.HashServe}}}
       )
 
+    {model, store, hash_sup}
+  end
+
+  defp register_v2_corr_cleanup(model, store, hash_sup) do
     on_exit(fn ->
       for pid <- [model, store, hash_sup] do
         try do
@@ -198,8 +222,6 @@ defmodule Peer.HashCorrelationIntegrationTest do
         end
       end
     end)
-
-    {hash, root, path, piece_length, piece_hashes, content}
   end
 
   defp start_controller(hash, id) do

@@ -1,0 +1,50 @@
+version: 2
+
+updates:
+  # Hex / Mix dependencies (mix.exs + mix.lock)
+  - package-ecosystem: "mix"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "Europe/Sofia"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+    # This package is published on Hex: only tighten a requirement in mix.exs when
+    # the existing one cannot resolve the new version, so consumers keep the widest
+    # compatible range (`~> 3.0` stays put for 3.1, moves only for 4.0).
+    versioning-strategy: "increase-if-necessary"
+    groups:
+      # Dev/test tooling never ships to consumers — batch it into one low-risk PR.
+      dev-and-test-tooling:
+        dependency-type: "development"
+    ignore:
+      # Pinned to an upstream ref that carries the OTP 29 warning fixes (see mix.exs);
+      # the pin is deliberate and must stay immutable.
+      - dependency-name: "proper"
+
+  # GitHub Actions used by .github/workflows/*
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "Europe/Sofia"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    groups:
+      # All actions are SHA-pinned CI infrastructure — one PR per week is enough.
+      github-actions:
+        patterns:
+          - "*"
+    ignore:
+      # Intentionally tracks the action's latest code on @master (see the workflow
+      # comment); a branch ref has no version for Dependabot to bump.
+      - dependency-name: "aquasecurity/trivy-action"

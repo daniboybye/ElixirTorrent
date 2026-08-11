@@ -50,7 +50,9 @@ defmodule Peer.LTEP.Handshake do
   """
   @spec encode(t()) :: binary()
   def encode(%__MODULE__{} = handshake) do
-    handshake |> to_map() |> Bento.encode!()
+    handshake
+    |> to_map()
+    |> Bento.encode!()
   end
 
   @doc false
@@ -72,16 +74,25 @@ defmodule Peer.LTEP.Handshake do
   @doc false
   @spec to_map(t()) :: map()
   def to_map(%__MODULE__{} = hs) do
-    %{}
-    |> maybe_put("m", hs.m, hs.m != %{})
-    |> maybe_put("p", hs.p, is_integer(hs.p))
-    |> maybe_put("v", hs.v, is_binary(hs.v) and hs.v != "")
-    |> maybe_put("yourip", hs.yourip, valid_ip?(hs.yourip))
-    |> maybe_put("ipv4", hs.ipv4, ipv4?(hs.ipv4))
-    |> maybe_put("ipv6", hs.ipv6, ipv6?(hs.ipv6))
-    |> maybe_put("reqq", hs.reqq, is_integer(hs.reqq))
-    |> maybe_put("metadata_size", hs.metadata_size, is_integer(hs.metadata_size))
-    |> maybe_put("e", hs.e, hs.e == 1)
+    handshake_field_specs(hs)
+    |> Enum.reduce(%{}, fn {key, value, include?}, acc ->
+      maybe_put(acc, key, value, include?)
+    end)
+  end
+
+  @spec handshake_field_specs(t()) :: [{String.t(), term(), boolean()}]
+  defp handshake_field_specs(hs) do
+    [
+      {"m", hs.m, hs.m != %{}},
+      {"p", hs.p, is_integer(hs.p)},
+      {"v", hs.v, is_binary(hs.v) and hs.v != ""},
+      {"yourip", hs.yourip, valid_ip?(hs.yourip)},
+      {"ipv4", hs.ipv4, ipv4?(hs.ipv4)},
+      {"ipv6", hs.ipv6, ipv6?(hs.ipv6)},
+      {"reqq", hs.reqq, is_integer(hs.reqq)},
+      {"metadata_size", hs.metadata_size, is_integer(hs.metadata_size)},
+      {"e", hs.e, hs.e == 1}
+    ]
   end
 
   @doc """

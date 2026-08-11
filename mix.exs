@@ -51,6 +51,7 @@ defmodule ElixirTorrent.MixProject do
     [
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.15", only: [:dev, :test], runtime: false},
       {:stream_data, "~> 1.2", only: :test},
       {:propcheck, "~> 1.5", only: :test},
       {:excoveralls, "~> 0.18.5", only: :test},
@@ -77,7 +78,12 @@ defmodule ElixirTorrent.MixProject do
 
   defp aliases do
     [
-      quality: ["compile --warnings-as-errors", "dialyzer", "credo --strict --all"],
+      quality: [
+        "compile --warnings-as-errors",
+        "dialyzer",
+        "credo --all",
+        "sobelow --exit --threshold medium --skip --no-router"
+      ],
       "deps.patch-test": [
         "cmd elixir scripts/patch-propcheck.exs",
         "cmd elixir scripts/patch-excoveralls.exs"

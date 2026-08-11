@@ -5,6 +5,7 @@ defmodule Acceptor.Connection do
 
   alias __MODULE__.{Handler, Handshakes}
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     %{
       id: __MODULE__,

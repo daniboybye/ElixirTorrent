@@ -1,20 +1,39 @@
 defmodule Peer do
-  @enforce_keys [:ip, :port]
-  # `seed` is set from BEP 11 PEX `added.f` / `added6.f` (bit 0x02) when ingesting
-  # peers for dial; nil means no PEX seed hint (tracker/DHT/LSD sources).
-  defstruct [:ip, :port, id: nil, seed: nil]
-
   @moduledoc """
-  Recommend Peer controls a :gen_tcp.socket 
+  Recommend Peer controls a :gen_tcp.socket
   and do not need to be closed manually
   """
 
   use Via
 
-  alias __MODULE__.{Sender, Controller}
-
   import ElixirTorrent, only: [version: 0]
 
+  alias __MODULE__.{Sender, Controller}
+
+  @enforce_keys [:ip, :port]
+  # `seed` is set from BEP 11 PEX `added.f` / `added6.f` (bit 0x02) when ingesting
+  # peers for dial; nil means no PEX seed hint (tracker/DHT/LSD sources).
+  defstruct [:ip, :port, id: nil, seed: nil]
+
+  @type id :: <<_::160>>
+  @type reserved :: <<_::64>>
+  @type ip :: :inet.ip_address()
+  @type key :: {id(), Torrent.hash()}
+  @type status :: nil | :seed | :connecting_to_peers | Torrent.index()
+
+  @type t :: %__MODULE__{
+          ip: ip(),
+          port: :inet.port_number(),
+          id: id() | nil,
+          seed: boolean() | nil
+        }
+
+  # BEP 10 LTEP (byte 5: 0x10), BEP 5 DHT + BEP 6 Fast + BEP 52 v2 (byte 7: 0x15)
+  @reserved <<0, 0, 0, 0, 0, 0x10, 0, 0x15>>
+  @id_length 20
+  @id_key {__MODULE__, :id}
+
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(args) do
     %{
       id: __MODULE__,
@@ -24,6 +43,8 @@ defmodule Peer do
     }
   end
 
+  @spec start_link(Torrent.hash(), id(), Peer.Transport.socket(), reserved()) ::
+          Supervisor.on_start()
   def start_link(hash, id, socket, reserved) do
     # Both children are temporary + significant: when either exits (tcp_closed,
     # graceful disconnect, protocol_error), auto_shutdown tears the peer tree
@@ -53,24 +74,6 @@ defmodule Peer do
 
     Supervisor.start_link(children, opts)
   end
-
-  @type id :: <<_::160>>
-  @type reserved :: <<_::64>>
-  @type ip :: :inet.ip_address()
-  @type key :: {id(), Torrent.hash()}
-  @type status :: nil | :seed | :connecting_to_peers | Torrent.index()
-
-  # BEP 10 LTEP (byte 5: 0x10), BEP 5 DHT + BEP 6 Fast + BEP 52 v2 (byte 7: 0x15)
-  @reserved <<0, 0, 0, 0, 0, 0x10, 0, 0x15>>
-  @id_length 20
-  @id_key {__MODULE__, :id}
-
-  @type t :: %__MODULE__{
-          ip: ip(),
-          port: :inet.port_number(),
-          id: id() | nil,
-          seed: boolean() | nil
-        }
 
   defp vm(hash, id), do: via(make_key(hash, id))
 
@@ -106,7 +109,7 @@ defmodule Peer do
   end
 
   @spec exists?(t(), Torrent.hash()) :: boolean()
-  def exists?(%Peer{id: id}, hash), do: !!whereis(hash, id)
+  def exists?(%Peer{id: id}, hash), do: not is_nil(whereis(hash, id))
 
   @spec whereis(Torrent.hash(), id()) :: pid() | {atom(), node()} | nil
   def whereis(hash, id), do: GenServer.whereis(vm(hash, id))

@@ -108,7 +108,10 @@ defmodule NAT.Stun do
   """
   @spec classify([reflexive()]) :: mapping()
   def classify(reflexives) do
-    ports = reflexives |> Enum.map(fn {_ip, port} -> port end) |> Enum.uniq()
+    ports =
+      reflexives
+      |> Enum.map(fn {_ip, port} -> port end)
+      |> Enum.uniq()
 
     cond do
       length(reflexives) < 2 -> :unknown
@@ -158,35 +161,43 @@ defmodule NAT.Stun do
   @spec parse_attrs(binary(), reflexive() | nil) :: reflexive() | nil
   defp parse_attrs(<<type::16, len::16, rest::binary>>, fallback) when byte_size(rest) >= len do
     value = binary_part(rest, 0, len)
-    padded = len + rem(4 - rem(len, 4), 4)
-
-    tail =
-      if byte_size(rest) >= padded,
-        do: binary_part(rest, padded, byte_size(rest) - padded),
-        else: <<>>
-
-    case type do
-      @attr_xor_mapped_address ->
-        case decode_xor_mapped(value) do
-          {:ok, addr} -> addr
-          _ -> parse_attrs(tail, fallback)
-        end
-
-      @attr_mapped_address ->
-        fallback =
-          case decode_mapped(value) do
-            {:ok, addr} -> addr
-            _ -> fallback
-          end
-
-        parse_attrs(tail, fallback)
-
-      _ ->
-        parse_attrs(tail, fallback)
-    end
+    tail = attr_tail(rest, len)
+    parse_attr_type(type, value, tail, fallback)
   end
 
   defp parse_attrs(_, fallback), do: fallback
+
+  @spec parse_attr_type(non_neg_integer(), binary(), binary(), reflexive() | nil) ::
+          reflexive() | nil
+  defp parse_attr_type(@attr_xor_mapped_address, value, tail, fallback) do
+    case decode_xor_mapped(value) do
+      {:ok, addr} -> addr
+      _ -> parse_attrs(tail, fallback)
+    end
+  end
+
+  defp parse_attr_type(@attr_mapped_address, value, tail, fallback) do
+    parse_attrs(tail, mapped_address_fallback(value, fallback))
+  end
+
+  defp parse_attr_type(_type, _value, tail, fallback), do: parse_attrs(tail, fallback)
+
+  @spec mapped_address_fallback(binary(), reflexive() | nil) :: reflexive() | nil
+  defp mapped_address_fallback(value, fallback) do
+    case decode_mapped(value) do
+      {:ok, addr} -> addr
+      _ -> fallback
+    end
+  end
+
+  @spec attr_tail(binary(), non_neg_integer()) :: binary()
+  defp attr_tail(rest, len) do
+    padded = len + rem(4 - rem(len, 4), 4)
+
+    if byte_size(rest) >= padded,
+      do: binary_part(rest, padded, byte_size(rest) - padded),
+      else: <<>>
+  end
 
   # XOR-MAPPED-ADDRESS: port XORed with the top 16 bits of the magic cookie,
   # IPv4 address XORed with the full 32-bit magic cookie.

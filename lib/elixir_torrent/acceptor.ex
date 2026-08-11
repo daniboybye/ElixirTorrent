@@ -7,6 +7,7 @@ defmodule Acceptor do
   alias Connection.{Handler, Handshakes}
   require Logger
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     %{
       id: __MODULE__,
@@ -299,6 +300,8 @@ defmodule Acceptor do
   @doc false
   @spec format_ip(:inet.ip_address()) :: String.t()
   def format_ip(ip) do
-    ip |> :inet.ntoa() |> List.to_string()
+    ip
+    |> :inet.ntoa()
+    |> List.to_string()
   end
 end

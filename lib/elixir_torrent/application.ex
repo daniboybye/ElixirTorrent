@@ -2,6 +2,7 @@ defmodule ElixirTorrentApplication do
   @moduledoc false
   use Application
 
+  @spec start(atom(), term()) :: Supervisor.on_start()
   def start(_type, _args) do
     :ok = Peer.initialize_id()
 

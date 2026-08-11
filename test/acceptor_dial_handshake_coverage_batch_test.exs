@@ -215,6 +215,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
       hash = :crypto.strong_rand_bytes(20)
       bad_id = <<8::160>>
       :ok = Acceptor.malicious_peer(bad_id)
+      assert Acceptor.BlackList.member?(bad_id)
 
       with_torrent_stack(hash, fn _hash ->
         {:ok, listen, port, ip} = listen_on_loopback()
@@ -1666,6 +1667,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.TorrentHashStub do
   @moduledoc false
   use GenServer
 
+  @spec child_spec(Torrent.hash()) :: Supervisor.child_spec()
   def child_spec(hash) do
     %{
       id: {__MODULE__, hash},
@@ -1674,8 +1676,10 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.TorrentHashStub do
     }
   end
 
+  @spec start_link(Torrent.hash()) :: GenServer.on_start()
   def start_link(hash), do: GenServer.start_link(__MODULE__, hash)
 
+  @spec init(Torrent.hash()) :: {:ok, Torrent.hash()}
   def init(hash) do
     Registry.register(Registry, self(), hash)
     {:ok, hash}
@@ -1685,6 +1689,7 @@ end
 defmodule AcceptorDialHandshakeCoverageBatchTest.DummyWorker do
   @moduledoc false
 
+  @spec start_link(term()) :: {:ok, pid()}
   def start_link(_swarm_hash) do
     Task.start_link(fn ->
       release = make_ref()
@@ -1700,31 +1705,32 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.SentCollector do
   @moduledoc false
   use GenServer
 
+  @spec start_link(Peer.key(), pid()) :: GenServer.on_start()
   def start_link(key, test_pid) do
     GenServer.start_link(__MODULE__, {key, test_pid},
       name: {:via, Registry, {Registry, {key, Peer.Sender}}}
     )
   end
 
-  @impl true
+  @impl GenServer
   def init({key, test_pid}), do: {:ok, {key, test_pid}}
 
-  @impl true
+  @impl GenServer
   def handle_cast(msg, {key, test_pid}) do
     send(test_pid, {:sent, key, msg})
     {:noreply, {key, test_pid}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call({:socket_send_raw, data}, _from, {key, test_pid}) do
     send(test_pid, {:sent, key, {:socket_send_raw, data}})
     {:reply, :ok, {key, test_pid}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call(:activate, _from, state), do: {:reply, :ok, state}
 
-  @impl true
+  @impl GenServer
   def handle_call(:deactivate, _from, state), do: {:reply, :ok, state}
 end
 
@@ -1736,6 +1742,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.RelayPeer do
   alias Peer.UtHolepunch.Extension, as: UtHolepunchExtension
   alias Peer.UtPex.Extension, as: UtPexExtension
 
+  @spec start_link(Torrent.hash(), Torrent.hash(), Peer.id(), pid()) :: GenServer.on_start()
   def start_link(_swarm_hash, hash, id, test_pid) do
     GenServer.start_link(__MODULE__, {hash, id, test_pid})
   end
@@ -1773,6 +1780,14 @@ defmodule AcceptorDialHandshakeCoverageBatchTest.TargetPeer do
   alias Peer.LTEP.{Handshake, Session}
   alias Peer.UtHolepunch.Extension, as: UtHolepunchExtension
 
+  @spec start_link(
+          Torrent.hash(),
+          Torrent.hash(),
+          Peer.id(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          boolean()
+        ) :: GenServer.on_start()
   def start_link(_swarm_hash, hash, id, endpoint_ip, endpoint_port, holepunch?) do
     GenServer.start_link(__MODULE__, {hash, id, endpoint_ip, endpoint_port, holepunch?})
   end

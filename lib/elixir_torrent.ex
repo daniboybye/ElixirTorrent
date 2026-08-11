@@ -1,7 +1,4 @@
 defmodule ElixirTorrent do
-  @package_version Mix.Project.config() |> Keyword.fetch!(:version)
-  @peer_id_prefix "ET" <> String.replace(@package_version, ".", "-")
-
   @moduledoc """
   Public API for the ElixirTorrent BitTorrent engine.
 
@@ -40,6 +37,9 @@ defmodule ElixirTorrent do
   See the [README](readme.html) for a full quick-start guide.
   """
 
+  @package_version Mix.Project.config() |> Keyword.fetch!(:version)
+  @peer_id_prefix "ET" <> String.replace(@package_version, ".", "-")
+
   @typedoc "20-byte torrent info hash."
   @type info_hash :: binary()
 
@@ -51,6 +51,7 @@ defmodule ElixirTorrent do
   @type file_entry :: Torrent.Files.Entry.t()
 
   @doc "Starts the CLI loop used by the escript entrypoint."
+  @spec main([String.t()]) :: no_return()
   def main(_), do: loop()
 
   @doc """

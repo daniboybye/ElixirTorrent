@@ -278,16 +278,17 @@ defmodule Bep9MetadataHardeningTest.SenderCapture do
   @moduledoc false
   use GenServer
 
+  @spec start_link(Peer.key(), pid()) :: GenServer.on_start()
   def start_link(key, test_pid) do
     GenServer.start_link(__MODULE__, test_pid,
       name: {:via, Registry, {Registry, {key, Peer.Sender}}}
     )
   end
 
-  @impl true
+  @impl GenServer
   def init(test_pid), do: {:ok, test_pid}
 
-  @impl true
+  @impl GenServer
   def handle_call({:socket_send_raw, wire}, _from, test_pid) do
     send(test_pid, {:metadata_wire, wire})
     {:reply, :ok, test_pid}

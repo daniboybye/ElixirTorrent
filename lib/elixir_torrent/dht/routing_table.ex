@@ -68,26 +68,11 @@ defmodule DHT.RoutingTable do
     status = Keyword.get(opts, :status, :good)
     from_query? = Keyword.get(opts, :from_query, false)
 
-    cond do
-      id == table.local_id ->
-        table
-
-      node_count(table) >= @max_nodes and find_entry(table, id) == nil and
-          not bad_slot_for_id?(table, id) ->
-        table
-
-      true ->
-        entry = %{
-          id: id,
-          ip: ip,
-          port: port,
-          status: status,
-          last_seen_ms: now,
-          last_query_ms: if(from_query?, do: now, else: nil),
-          failed_queries: 0
-        }
-
-        insert_into_bucket(table, id_to_int(id), entry, now)
+    if insert_rejected?(table, id) do
+      table
+    else
+      entry = build_insert_entry(id, ip, port, status, from_query?, now)
+      insert_into_bucket(table, id_to_int(id), entry, now)
     end
   end
 
@@ -198,7 +183,9 @@ defmodule DHT.RoutingTable do
   @doc "Total node count across all buckets."
   @spec node_count(t()) :: non_neg_integer()
   def node_count(%__MODULE__{} = table) do
-    table.buckets |> Enum.map(&length(&1.nodes)) |> Enum.sum()
+    table.buckets
+    |> Enum.map(&length(&1.nodes))
+    |> Enum.sum()
   end
 
   @doc "Convert routing entries to compact contacts."
@@ -310,9 +297,20 @@ defmodule DHT.RoutingTable do
   @spec add_new_node(bucket(), node_id(), non_neg_integer(), entry(), non_neg_integer()) ::
           {:ok, bucket()} | {:split, bucket(), bucket()}
   defp add_new_node(%{nodes: nodes} = bucket, local_id, _id_int, entry, now) do
+    full_bucket_action(bucket, nodes, local_id, entry, now)
+  end
+
+  @spec full_bucket_action(
+          bucket(),
+          [entry()],
+          node_id(),
+          entry(),
+          non_neg_integer()
+        ) :: {:ok, bucket()} | {:split, bucket(), bucket()}
+  defp full_bucket_action(bucket, nodes, local_id, entry, now) do
     cond do
       length(nodes) < @k ->
-        {:ok, touch_bucket(%{bucket | nodes: nodes ++ [entry]}, now)}
+        append_bucket_node(bucket, nodes, entry, now)
 
       all_good?(nodes) and not local_in_range?(local_id, bucket) ->
         {:ok, bucket}
@@ -323,6 +321,38 @@ defmodule DHT.RoutingTable do
       true ->
         {:ok, replace_bad_slot(bucket, entry, now)}
     end
+  end
+
+  @spec append_bucket_node(bucket(), [entry()], entry(), non_neg_integer()) :: {:ok, bucket()}
+  defp append_bucket_node(bucket, nodes, entry, now) do
+    {:ok, touch_bucket(%{bucket | nodes: nodes ++ [entry]}, now)}
+  end
+
+  @spec insert_rejected?(t(), node_id()) :: boolean()
+  defp insert_rejected?(table, id) do
+    id == table.local_id or
+      (node_count(table) >= @max_nodes and find_entry(table, id) == nil and
+         not bad_slot_for_id?(table, id))
+  end
+
+  @spec build_insert_entry(
+          node_id(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          status(),
+          boolean(),
+          non_neg_integer()
+        ) :: entry()
+  defp build_insert_entry(id, ip, port, status, from_query?, now) do
+    %{
+      id: id,
+      ip: ip,
+      port: port,
+      status: status,
+      last_seen_ms: now,
+      last_query_ms: if(from_query?, do: now, else: nil),
+      failed_queries: 0
+    }
   end
 
   @spec replace_bad_slot(bucket(), entry(), non_neg_integer()) :: bucket()

@@ -24,14 +24,23 @@ defmodule NAT.UPnP do
 
   @spec discover_control_url() :: {:ok, {String.t(), String.t()}} | {:error, term()}
   def discover_control_url do
-    msearch =
-      "M-SEARCH * HTTP/1.1\r\n" <>
-        "HOST: 239.255.255.250:1900\r\n" <>
-        "MAN: \"ssdp:discover\"\r\n" <>
-        "MX: 1\r\n" <>
-        "ST: urn:schemas-upnp-org:service:WANIPConnection:1\r\n" <>
-        "\r\n"
+    discover_control_url(ssdp_msearch())
+  catch
+    :exit, _ -> {:error, :timeout}
+  end
 
+  @spec ssdp_msearch() :: iodata()
+  defp ssdp_msearch do
+    "M-SEARCH * HTTP/1.1\r\n" <>
+      "HOST: 239.255.255.250:1900\r\n" <>
+      "MAN: \"ssdp:discover\"\r\n" <>
+      "MX: 1\r\n" <>
+      "ST: urn:schemas-upnp-org:service:WANIPConnection:1\r\n" <>
+      "\r\n"
+  end
+
+  @spec discover_control_url(iodata()) :: {:ok, {String.t(), String.t()}} | {:error, term()}
+  defp discover_control_url(msearch) do
     with {:ok, socket} <- open_multicast_socket(),
          :ok <- :gen_udp.send(socket, @ssdp_address, @ssdp_port, msearch),
          {:ok, response} <- recv_ssdp(socket, @search_timeout),
@@ -43,8 +52,6 @@ defmodule NAT.UPnP do
     else
       {:error, _} = error -> error
     end
-  catch
-    :exit, _ -> {:error, :timeout}
   end
 
   @spec add_port_mapping(String.t(), String.t(), :tcp | :udp, :inet.port_number(), pos_integer()) ::
@@ -257,7 +264,11 @@ defmodule NAT.UPnP do
   end
 
   defp parse_control_url(body, location) do
-    base = location |> URI.parse() |> Map.get(:path, "/") |> Path.dirname()
+    base =
+      location
+      |> URI.parse()
+      |> Map.get(:path, "/")
+      |> Path.dirname()
 
     services =
       @service_block_pattern

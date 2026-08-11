@@ -152,11 +152,134 @@ defmodule UDPTrackerTest do
       assert {:error, "invalid info_hash"} = UDP.decode_error_response(body, @transaction_id)
     end
 
+    test "decode_error_response/2 rejects short, unexpected action, and txn mismatch" do
+      assert {:error, :invalid_packet} =
+               UDP.decode_error_response(<<1::32, 1, 2, 3>>, @transaction_id)
+
+      assert {:error, :unexpected_action} =
+               UDP.decode_error_response(
+                 <<1::32, @transaction_id::binary, "ignored">>,
+                 @transaction_id
+               )
+
+      assert {:error, :transaction_mismatch} =
+               UDP.decode_error_response(
+                 <<3::32, @other_transaction_id::binary, "nope">>,
+                 @transaction_id
+               )
+    end
+
     test "classify_response/3 ignores mismatched transaction_id for recv loops" do
       body = <<1::32, @other_transaction_id::binary, 60::32, 1::32, 2::32>>
 
       assert :ignore =
                UDP.classify_response(body, @transaction_id, expected: :announce, family: :inet)
+    end
+  end
+
+  describe "BEP 15 decode/classify remaining branches" do
+    test "decode_connect_response/2 returns unexpected_action for wrong action with matching txn" do
+      body = <<1::32, @transaction_id::binary, @connection_id::binary>>
+
+      assert {:error, :unexpected_action} = UDP.decode_connect_response(body, @transaction_id)
+    end
+
+    test "decode_announce_response/3 surfaces tracker errors and unexpected_action" do
+      assert {:error, "announce busy"} =
+               UDP.decode_announce_response(
+                 <<3::32, @transaction_id::binary, "announce busy">>,
+                 @transaction_id,
+                 :inet
+               )
+
+      assert {:error, :unexpected_action} =
+               UDP.decode_announce_response(
+                 <<2::32, @transaction_id::binary, 1::32, 2::32, 3::32>>,
+                 @transaction_id,
+                 :inet
+               )
+    end
+
+    test "encode_scrape/3 raises on empty list or non-20-byte hashes" do
+      assert_raise ArgumentError, "empty scrape list", fn ->
+        UDP.encode_scrape(@connection_id, @transaction_id, [])
+      end
+
+      assert_raise ArgumentError, "each info_hash must be 20 bytes", fn ->
+        UDP.encode_scrape(@connection_id, @transaction_id, [<<1, 2, 3>>])
+      end
+    end
+
+    test "decode_scrape_response/3 covers error, short header, unexpected_action, and txn mismatch" do
+      assert {:error, :invalid_packet} =
+               UDP.decode_scrape_response(<<2::32>>, @transaction_id, 1)
+
+      assert {:error, "scrape denied"} =
+               UDP.decode_scrape_response(
+                 <<3::32, @transaction_id::binary, "scrape denied">>,
+                 @transaction_id,
+                 1
+               )
+
+      assert {:error, :unexpected_action} =
+               UDP.decode_scrape_response(
+                 <<1::32, @transaction_id::binary, 1::32, 2::32, 3::32>>,
+                 @transaction_id,
+                 1
+               )
+
+      assert {:error, :transaction_mismatch} =
+               UDP.decode_scrape_response(
+                 <<2::32, @other_transaction_id::binary, 1::32, 2::32, 3::32>>,
+                 @transaction_id,
+                 1
+               )
+    end
+
+    test "classify_response/3 routes connect, announce, and scrape successes and errors" do
+      connect_ok = <<0::32, @transaction_id::binary, @connection_id::binary>>
+
+      assert {:ok, @connection_id} =
+               UDP.classify_response(connect_ok, @transaction_id, expected: :connect)
+
+      assert {:error, "connect fail"} =
+               UDP.classify_response(
+                 <<3::32, @transaction_id::binary, "connect fail">>,
+                 @transaction_id,
+                 expected: :connect
+               )
+
+      assert {:error, "announce fail"} =
+               UDP.classify_response(
+                 <<3::32, @transaction_id::binary, "announce fail">>,
+                 @transaction_id,
+                 expected: :announce,
+                 family: :inet
+               )
+
+      assert {:error, :invalid_packet} =
+               UDP.classify_response(
+                 <<2::32, @transaction_id::binary>>,
+                 @transaction_id,
+                 expected: :announce,
+                 family: :inet
+               )
+
+      assert {:error, "scrape fail!!"} =
+               UDP.classify_response(
+                 <<3::32, @transaction_id::binary, "scrape fail!!">>,
+                 @transaction_id,
+                 expected: :scrape,
+                 hash_count: 1
+               )
+
+      assert {:error, :invalid_packet} =
+               UDP.classify_response(
+                 <<2::32, @transaction_id::binary>>,
+                 @transaction_id,
+                 expected: :scrape,
+                 hash_count: 2
+               )
     end
   end
 
@@ -166,6 +289,14 @@ defmodule UDPTrackerTest do
 
       assert [%Peer{ip: {1, 2, 3, 4}, port: 1000}] =
                UDP.parse_compact_peers(peers, :inet)
+    end
+
+    test "parse_compact_peers/2 stops cleanly on partial IPv6 trailing bytes" do
+      peers =
+        <<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 9999::16, 0, 0, 0>>
+
+      assert [%Peer{ip: {0, 0, 0, 0, 0, 0, 0, 1}, port: 9999}] =
+               UDP.parse_compact_peers(peers, :inet6)
     end
   end
 

@@ -26,20 +26,30 @@ defmodule Peer.UtPex.BEP40 do
         {:ok, sort_ports(client_port, peer_port)}
 
       v4?(client_ip) and v4?(peer_ip) ->
-        mask = ipv4_mask(client_ip, peer_ip)
-        a = mask_ip4(client_ip, mask)
-        b = mask_ip4(peer_ip, mask)
-        {:ok, sort_pair(a, b)}
+        priority_bytes_v4(client_ip, peer_ip)
 
       v6?(client_ip) and v6?(peer_ip) ->
-        mask_bytes = ipv6_mask_bytes(client_ip, peer_ip)
-        a = mask_ip6(client_ip, mask_bytes)
-        b = mask_ip6(peer_ip, mask_bytes)
-        {:ok, sort_pair(a, b)}
+        priority_bytes_v6(client_ip, peer_ip)
 
       true ->
         :error
     end
+  end
+
+  @spec priority_bytes_v4(:inet.ip_address(), :inet.ip_address()) :: {:ok, binary()}
+  defp priority_bytes_v4(client_ip, peer_ip) do
+    mask = ipv4_mask(client_ip, peer_ip)
+    a = mask_ip4(client_ip, mask)
+    b = mask_ip4(peer_ip, mask)
+    {:ok, sort_pair(a, b)}
+  end
+
+  @spec priority_bytes_v6(:inet.ip_address(), :inet.ip_address()) :: {:ok, binary()}
+  defp priority_bytes_v6(client_ip, peer_ip) do
+    mask_bytes = ipv6_mask_bytes(client_ip, peer_ip)
+    a = mask_ip6(client_ip, mask_bytes)
+    b = mask_ip6(peer_ip, mask_bytes)
+    {:ok, sort_pair(a, b)}
   end
 
   @doc false

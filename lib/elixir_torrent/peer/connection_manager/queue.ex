@@ -126,27 +126,42 @@ defmodule Peer.ConnectionManager.Queue do
 
   @spec enforce_per_source_caps(t(), term()) :: t()
   defp enforce_per_source_caps(queue, clients) do
-    pex_sources =
-      queue
-      |> Map.values()
-      |> Enum.flat_map(fn %__MODULE__{sources: sources} ->
-        sources |> MapSet.to_list() |> Enum.filter(&match?({:pex, _}, &1))
-      end)
-      |> Enum.uniq()
-      |> Enum.sort()
-
-    Enum.reduce(pex_sources, queue, fn {:pex, src} = tag, acc ->
-      keys_for_source =
-        acc
-        |> Enum.filter(fn {_k, %__MODULE__{sources: sources}} -> MapSet.member?(sources, tag) end)
-        |> Enum.map(fn {k, _} -> k end)
-
-      if length(keys_for_source) <= @max_pex_per_source do
-        acc
-      else
-        evict_over_cap_pex(acc, keys_for_source, tag, clients, src)
-      end
+    queue
+    |> collect_pex_sources()
+    |> Enum.reduce(queue, fn tag, acc ->
+      enforce_pex_source_cap(acc, tag, clients)
     end)
+  end
+
+  @spec collect_pex_sources(t()) :: [source()]
+  defp collect_pex_sources(queue) do
+    queue
+    |> Map.values()
+    |> Enum.flat_map(fn %__MODULE__{sources: sources} ->
+      sources
+      |> MapSet.to_list()
+      |> Enum.filter(&match?({:pex, _}, &1))
+    end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  @spec enforce_pex_source_cap(t(), source(), term()) :: t()
+  defp enforce_pex_source_cap(queue, {:pex, src} = tag, clients) do
+    keys_for_source = keys_for_pex_source(queue, tag)
+
+    if length(keys_for_source) <= @max_pex_per_source do
+      queue
+    else
+      evict_over_cap_pex(queue, keys_for_source, tag, clients, src)
+    end
+  end
+
+  @spec keys_for_pex_source(t(), source()) :: [key()]
+  defp keys_for_pex_source(queue, tag) do
+    queue
+    |> Enum.filter(fn {_k, %__MODULE__{sources: sources}} -> MapSet.member?(sources, tag) end)
+    |> Enum.map(fn {k, _} -> k end)
   end
 
   defp evict_over_cap_pex(queue, keys_for_source, tag, clients, src) do

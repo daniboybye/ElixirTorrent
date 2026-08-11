@@ -1,8 +1,7 @@
 defmodule Torrent.ModelSyncTest do
   use ExUnit.Case, async: true
 
-  alias Torrent.Bitfield
-  alias Torrent.Model
+  alias Torrent.{Bitfield, Model}
 
   test "sync_progress reconciles counters without synthesizing a completed event" do
     torrent = %Torrent{

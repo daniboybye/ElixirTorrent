@@ -3,6 +3,13 @@ defmodule Torrent.FileHandle.Piece do
   GenServer buffering and flushing one piece's bytes across multi-file layouts.
   """
 
+  use GenServer
+  use Via
+
+  alias Torrent.{FileHandle, Merkle, Model, PiecesStatistic}
+
+  require Logger
+
   @enforce_keys [:hash, :offset, :files, :length]
   defstruct [:hash, :offset, :files, :length, pending_writes: %{}]
   # offset: offset from the beginning of the first file
@@ -24,13 +31,6 @@ defmodule Torrent.FileHandle.Piece do
   # Piece.init and close in terminate, not in Store.
   @file_modes [:binary, :raw, :read, :write]
 
-  use GenServer
-  use Via
-
-  alias Torrent.{FileHandle, Merkle, Model, PiecesStatistic}
-
-  require Logger
-
   # Idle window before the process terminates (was: hibernate forever). Any
   # read/write/check resets it. When it fires the piece process exits and the
   # next access lazily restarts it — completed/untouched pieces stop holding a
@@ -47,6 +47,7 @@ defmodule Torrent.FileHandle.Piece do
   # flushed synchronously to the io_device, and the struct is re-derivable from
   # FileHandle.context/1), so idle self-termination and rare crashes are both
   # handled by lazy restart on next access rather than a supervisor restart.
+  @spec child_spec([Torrent.index()]) :: Supervisor.child_spec()
   def child_spec(args) do
     %{
       id: __MODULE__,
@@ -65,6 +66,7 @@ defmodule Torrent.FileHandle.Piece do
     end
   end
 
+  @spec key(Torrent.hash(), Torrent.index()) :: {Torrent.index(), Torrent.hash()}
   def key(hash, index), do: {index, hash}
 
   @spec check?(Torrent.hash(), Torrent.index(), :download | :resume) :: boolean()
@@ -114,6 +116,7 @@ defmodule Torrent.FileHandle.Piece do
     end
   end
 
+  @spec init(t()) :: {:ok, t(), timeout()}
   def init(%__MODULE__{files: paths} = piece) do
     # `paths` from FileHandle.piece_struct/2 is [{path, length}]. Open raw fds
     # owned by this GenServer and replace `files` with [{fd, length}] so
@@ -122,11 +125,14 @@ defmodule Torrent.FileHandle.Piece do
     {:ok, %__MODULE__{piece | files: open_files(paths)}, @timeout_idle}
   end
 
+  @spec terminate(term(), t()) :: :ok
   def terminate(_reason, %__MODULE__{files: fds} = piece) do
     _ = flush_pending_writes(piece)
     close_files(fds)
   end
 
+  @spec handle_call(term(), GenServer.from(), t()) ::
+          {:reply, :ok | boolean() | {:ok, binary()} | :error, t(), timeout()}
   def handle_call(:flush, _, piece) do
     piece = flush_pending_writes(piece)
     {:reply, :ok, piece, @timeout_idle}
@@ -143,6 +149,7 @@ defmodule Torrent.FileHandle.Piece do
     {:reply, do_read(begin + piece.offset, length, piece.files), piece, @timeout_idle}
   end
 
+  @spec handle_cast({:write, Torrent.begin(), binary()}, t()) :: {:noreply, t(), timeout()}
   def handle_cast({:write, begin, block}, piece) do
     piece = buffer_write(piece, begin, block)
     piece = maybe_flush_writes(piece)
@@ -151,6 +158,7 @@ defmodule Torrent.FileHandle.Piece do
 
   # Idle: flush any coalesced blocks, then terminate. The receive-timeout only
   # fires with an empty mailbox, so no cast can race a partial buffer here.
+  @spec handle_info(:timeout, t()) :: {:stop, :normal, t()}
   def handle_info(:timeout, piece) do
     piece = flush_pending_writes(piece)
     {:stop, :normal, piece}
@@ -326,49 +334,61 @@ defmodule Torrent.FileHandle.Piece do
 
   defp hash_check(torrent_hash, index, piece, fds, context) do
     {:ok, block} = do_read(piece.offset, piece.length, fds)
-
-    res =
-      case FileHandle.context(torrent_hash) do
-        %{kind: :v2, piece_specs: specs, piece_length: piece_length} when is_list(specs) ->
-          case Enum.at(specs, index) do
-            %{file: file, file_piece_index: file_piece_index} ->
-              Merkle.verify_file_piece(file, piece_length, file_piece_index, block)
-
-            _ ->
-              false
-          end
-
-        _ ->
-          # v1 and hybrid torrents keep the BEP 3 SHA-1 piece list check.
-          piece.hash === :crypto.hash(:sha, block)
-      end
-
-    hash_hex = Torrent.hex_encoded_hash(torrent_hash)
+    res = verify_piece_hash(torrent_hash, index, piece, block)
 
     if res do
-      log_verify(context, "[piece_verify] hash=#{hash_hex} index=#{index} result=ok", :ok)
-
-      Model.downloaded_piece(torrent_hash, index)
-      PiecesStatistic.set(torrent_hash, index, :complete)
+      handle_hash_check_success(torrent_hash, index, context)
     else
-      # During :resume a mismatch just means the piece isn't on disk yet — not a
-      # failure. During :download it means a peer served corrupt data, which is a
-      # genuine warning (and the caller drops that block/peer).
-      if context == :download do
-        invalidate_piece_on_disk(piece, fds)
-      end
-
-      log_verify(
-        context,
-        "[piece_verify] hash=#{hash_hex} index=#{index} result=#{if context == :resume, do: "absent", else: "fail"} expected_len=#{piece.length} read_bytes=#{byte_size(block)}",
-        :fail
-      )
-
-      Model.hash_check_failure(torrent_hash, index)
-      PiecesStatistic.set(torrent_hash, index, nil)
+      handle_hash_check_failure(torrent_hash, index, piece, fds, block, context)
     end
 
     res
+  end
+
+  defp verify_piece_hash(torrent_hash, index, piece, block) do
+    case FileHandle.context(torrent_hash) do
+      %{kind: :v2, piece_specs: specs, piece_length: piece_length} when is_list(specs) ->
+        case Enum.at(specs, index) do
+          %{file: file, file_piece_index: file_piece_index} ->
+            Merkle.verify_file_piece(file, piece_length, file_piece_index, block)
+
+          _ ->
+            false
+        end
+
+      _ ->
+        # v1 and hybrid torrents keep the BEP 3 SHA-1 piece list check.
+        piece.hash === :crypto.hash(:sha, block)
+    end
+  end
+
+  defp handle_hash_check_success(torrent_hash, index, context) do
+    hash_hex = Torrent.hex_encoded_hash(torrent_hash)
+
+    log_verify(context, "[piece_verify] hash=#{hash_hex} index=#{index} result=ok", :ok)
+
+    Model.downloaded_piece(torrent_hash, index)
+    PiecesStatistic.set(torrent_hash, index, :complete)
+  end
+
+  defp handle_hash_check_failure(torrent_hash, index, piece, fds, block, context) do
+    hash_hex = Torrent.hex_encoded_hash(torrent_hash)
+
+    # During :resume a mismatch just means the piece isn't on disk yet — not a
+    # failure. During :download it means a peer served corrupt data, which is a
+    # genuine warning (and the caller drops that block/peer).
+    if context == :download do
+      invalidate_piece_on_disk(piece, fds)
+    end
+
+    log_verify(
+      context,
+      "[piece_verify] hash=#{hash_hex} index=#{index} result=#{if context == :resume, do: "absent", else: "fail"} expected_len=#{piece.length} read_bytes=#{byte_size(block)}",
+      :fail
+    )
+
+    Model.hash_check_failure(torrent_hash, index)
+    PiecesStatistic.set(torrent_hash, index, nil)
   end
 
   defp log_verify(:download, msg, :ok), do: Logger.debug(msg)

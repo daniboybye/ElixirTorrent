@@ -31,7 +31,7 @@ defmodule Torrent.Model do
 
   @spec has_hash?(Torrent.hash()) :: boolean()
   def has_hash?(hash),
-    do: !!GenServer.whereis(via(hash))
+    do: not is_nil(GenServer.whereis(via(hash)))
 
   @spec downloaded?(Torrent.hash()) :: boolean()
   def downloaded?(hash),
@@ -62,9 +62,11 @@ defmodule Torrent.Model do
   def update_event(hash, announced_event),
     do: GenServer.cast(via(hash), {:update_event, announced_event})
 
+  @spec piece_length(Torrent.hash(), Torrent.index()) :: Torrent.length()
   def piece_length(hash, index),
     do: GenServer.call(via(hash), {:piece_length, index})
 
+  @spec set_peer_status(Torrent.hash(), Peer.status()) :: :ok
   def set_peer_status(hash, status),
     do: GenServer.cast(via(hash), {:set_peer_status, status})
 
@@ -80,6 +82,7 @@ defmodule Torrent.Model do
   def set_event(hash, event),
     do: GenServer.cast(via(hash), {:set_event, event})
 
+  @spec init(Torrent.t()) :: {:ok, Torrent.t()}
   def init(%Torrent{} = torrent) do
     torrent =
       if torrent.bitfield do
@@ -87,7 +90,7 @@ defmodule Torrent.Model do
       else
         bitfield =
           torrent
-          |> do_pieces_count
+          |> do_pieces_count()
           |> Bitfield.make()
 
         %{torrent | bitfield: bitfield, added_at: torrent.added_at || DateTime.utc_now()}
@@ -100,6 +103,7 @@ defmodule Torrent.Model do
     {:ok, torrent}
   end
 
+  @spec handle_call(term(), GenServer.from(), Torrent.t()) :: {:reply, term(), Torrent.t()}
   def handle_call(:get, _, torrent),
     do: {:reply, torrent, torrent}
 
@@ -120,6 +124,7 @@ defmodule Torrent.Model do
     {:reply, :ok, torrent}
   end
 
+  @spec handle_cast(term(), Torrent.t()) :: {:noreply, Torrent.t()}
   def handle_cast({:downloaded_piece, index}, torrent) do
     if Bitfield.have?(torrent.bitfield, index) do
       {:noreply, torrent}
@@ -127,7 +132,7 @@ defmodule Torrent.Model do
       torrent =
         torrent
         |> update_downloaded_bytes(index, 1)
-        |> if_downloaded
+        |> if_downloaded()
 
       {:noreply, torrent}
     end
@@ -160,6 +165,7 @@ defmodule Torrent.Model do
   def handle_cast({:update_event, _announced_event}, %Torrent{} = torrent),
     do: {:noreply, torrent}
 
+  @spec handle_info(term(), Torrent.t()) :: {:noreply, Torrent.t()}
   def handle_info({:detected_the_speed, download, upload}, %Torrent{} = torrent) do
     message_for_next_detection(torrent)
 

@@ -13,9 +13,9 @@ defmodule DHT.RoutingStore do
   as a fallback in case every saved node is gone.
   """
 
-  require Logger
-
   alias DHT.{BEP42, RoutingTable, RoutingTables}
+
+  require Logger
 
   @filename "dht_routing_table.bin"
   @format_version 1
@@ -79,6 +79,10 @@ defmodule DHT.RoutingStore do
     |> Enum.map(fn %{id: id, ip: ip, port: port} -> %{id: id, ip: ip, port: port} end)
   end
 
+  # sobelow_skip ["Misc.BinToTerm"]
+  # `bin` is this module's own persisted routing-table cache, not attacker-
+  # controlled network input; `:safe` blocks the atom-exhaustion vector that
+  # matters for this data.
   @spec decode(binary()) :: {:ok, map()} | :error
   defp decode(bin) do
     {:ok, :erlang.binary_to_term(bin, [:safe])}

@@ -64,10 +64,12 @@ defmodule Peer.DialStats do
   @decay_num 7
   @decay_den 8
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     %{id: __MODULE__, start: {__MODULE__, :start_link, [[]]}}
   end
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
@@ -171,7 +173,7 @@ defmodule Peer.DialStats do
     end
   end
 
-  @impl true
+  @impl GenServer
   def init(_) do
     :ets.new(@table, [
       :named_table,
@@ -185,7 +187,7 @@ defmodule Peer.DialStats do
     {:ok, %{}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:decay, state) do
     # Gently age every counter; drop rows that have fully aged out so the table
     # stays bounded to torrents with genuinely recent dial activity.

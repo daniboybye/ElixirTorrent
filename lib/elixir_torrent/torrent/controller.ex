@@ -8,9 +8,9 @@ defmodule Torrent.Controller do
 
   import Process, only: [send_after: 3]
 
-  require Logger
-
   alias Torrent.{Downloads, Model, PiecesStatistic, Superseed, Swarm}
+
+  require Logger
 
   @next_piece_timeout 2_500
   # Concurrent in-flight pieces per torrent. Each active piece is what lets a
@@ -77,11 +77,13 @@ defmodule Torrent.Controller do
     :ok
   end
 
+  @spec init(Torrent.hash()) :: {:ok, Torrent.hash()}
   def init(hash) do
     :ok = PeerDiscovery.ensure_announce(hash)
     {:ok, hash}
   end
 
+  @spec handle_info(term(), Torrent.hash()) :: {:noreply, Torrent.hash()}
   def handle_info(:resume_ready, hash) do
     Logger.info(
       "[resume] controller_start hash=#{Torrent.hex_encoded_hash(hash)} scheduling download"

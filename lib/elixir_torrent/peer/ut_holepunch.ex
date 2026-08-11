@@ -5,10 +5,10 @@ defmodule Peer.UtHolepunch do
   IPv4 rendezvous/connect: 8 bytes. IPv6 connect: 20 bytes. IPv4 error: 12 bytes.
   """
 
-  require Logger
-
   alias Peer.Controller.State
   alias Peer.LTEP.Session
+
+  require Logger
 
   @extension_name "ut_holepunch"
 
@@ -30,14 +30,19 @@ defmodule Peer.UtHolepunch do
   @inbound_rate_window_ms 10_000
 
   @doc false
+  @spec err_none() :: 0
   def err_none, do: @err_none
   @doc false
+  @spec err_no_such_peer() :: 1
   def err_no_such_peer, do: @err_no_such_peer
   @doc false
+  @spec err_not_connected() :: 2
   def err_not_connected, do: @err_not_connected
   @doc false
+  @spec err_no_support() :: 3
   def err_no_support, do: @err_no_support
   @doc false
+  @spec err_no_self() :: 4
   def err_no_self, do: @err_no_self
 
   @doc false
@@ -284,37 +289,75 @@ defmodule Peer.UtHolepunch do
           :inet.port_number()
         ) :: Peer.Controller.State.t()
   defp do_relay(state, target_key, target_ltep, target_ip, target_port) do
-    hash = state.hash
-    initiator_key = State.key(state)
+    case relay_connect_payloads(state, target_ip, target_port) do
+      {:ok, payloads} ->
+        handle_relay_send_result(
+          state,
+          target_key,
+          target_ltep,
+          target_ip,
+          target_port,
+          payloads
+        )
 
+      _ ->
+        state
+    end
+  end
+
+  @spec relay_connect_payloads(Peer.Controller.State.t(), :inet.ip_address(), :inet.port_number()) ::
+          {:ok, {{:inet.ip_address(), :inet.port_number()}, binary(), binary()}} | :error
+  defp relay_connect_payloads(state, target_ip, target_port) do
     with true <- Session.peer_supports?(state.ltep, @extension_name),
-         {:ok, {init_ip, init_port}} <- peer_endpoint(state.socket),
+         {:ok, {init_ip, init_port} = initiator_endpoint} <- peer_endpoint(state.socket),
          target_for_initiator when is_binary(target_for_initiator) <-
            encode_connect(target_ip, target_port),
          initiator_for_target when is_binary(initiator_for_target) <-
            encode_connect(init_ip, init_port) do
-      # BEP 55 relay sends connect hints to two peers; either may drop mid-relay
-      # (Endpoints still registered briefly while Sender/uTP is shutting down).
-      case relay_connect_sends(
-             {initiator_key, state.ltep, target_for_initiator},
-             {target_key, target_ltep, initiator_for_target}
-           ) do
-        :ok ->
-          Logger.debug(
-            "[holepunch] rendezvous_relay hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} initiator=#{inspect({init_ip, init_port})}"
-          )
-
-          state
-
-        {:error, reason} ->
-          Logger.debug(
-            "[holepunch] relay_send_failed hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} reason=#{inspect(reason)}"
-          )
-
-          state
-      end
+      {:ok, {initiator_endpoint, target_for_initiator, initiator_for_target}}
     else
-      _ -> state
+      _ -> :error
+    end
+  end
+
+  @spec handle_relay_send_result(
+          Peer.Controller.State.t(),
+          Peer.key(),
+          Session.t(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          {{:inet.ip_address(), :inet.port_number()}, binary(), binary()}
+        ) :: Peer.Controller.State.t()
+  defp handle_relay_send_result(
+         state,
+         target_key,
+         target_ltep,
+         target_ip,
+         target_port,
+         {initiator_endpoint, target_for_initiator, initiator_for_target}
+       ) do
+    hash = state.hash
+    initiator_key = State.key(state)
+
+    # BEP 55 relay sends connect hints to two peers; either may drop mid-relay
+    # (Endpoints still registered briefly while Sender/uTP is shutting down).
+    case relay_connect_sends(
+           {initiator_key, state.ltep, target_for_initiator},
+           {target_key, target_ltep, initiator_for_target}
+         ) do
+      :ok ->
+        Logger.debug(
+          "[holepunch] rendezvous_relay hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} initiator=#{inspect(initiator_endpoint)}"
+        )
+
+        state
+
+      {:error, reason} ->
+        Logger.debug(
+          "[holepunch] relay_send_failed hash=#{Torrent.hex_encoded_hash(hash)} target=#{inspect({target_ip, target_port})} reason=#{inspect(reason)}"
+        )
+
+        state
     end
   end
 

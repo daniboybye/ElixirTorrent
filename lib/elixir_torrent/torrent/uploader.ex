@@ -7,6 +7,7 @@ defmodule Torrent.Uploader do
 
   alias Torrent.{FileHandle, Model}
 
+  @spec child_spec(Torrent.hash()) :: Supervisor.child_spec()
   def child_spec(hash) do
     %{
       start: {Task.Supervisor, :start_link, [[max_restarts: 0, name: via(hash)]]},

@@ -273,17 +273,68 @@ defmodule Peer.UtPex do
           {:ok, binary(), EncodeReport.t()} | {:error, term()}
   def encode_delta(added, dropped, opts \\ []) do
     initial? = Keyword.get(opts, :initial?, false)
-
-    added_entries = added |> Enum.map(&Entry.normalize/1) |> dedupe_entries()
-    dropped_endpoints = dropped |> Enum.map(&Entry.normalize/1) |> dedupe_endpoints()
-
-    added_cap = if initial?, do: @max_initial_added, else: @max_non_initial_added
-    dropped_cap = if initial?, do: @max_initial_added, else: @max_non_initial_dropped
-
+    {added_entries, dropped_endpoints} = normalize_delta_inputs(added, dropped)
+    {added_cap, dropped_cap} = delta_encode_caps(initial?)
     {added_enc, added_trunc} = take_prefix(added_entries, added_cap)
     {dropped_enc, dropped_trunc} = take_prefix_endpoints(dropped_endpoints, dropped_cap)
 
-    report = %EncodeReport{
+    report =
+      build_encode_report(
+        initial?,
+        added_entries,
+        dropped_endpoints,
+        added_enc,
+        dropped_enc,
+        added_trunc,
+        dropped_trunc
+      )
+
+    case build_payload(added_enc, dropped_enc) do
+      nil -> {:error, :empty}
+      payload -> {:ok, payload, report}
+    end
+  end
+
+  @spec normalize_delta_inputs([entry_input()], [entry_input()]) ::
+          {[Entry.t()], [endpoint()]}
+  defp normalize_delta_inputs(added, dropped) do
+    added_entries =
+      added
+      |> Enum.map(&Entry.normalize/1)
+      |> dedupe_entries()
+
+    dropped_endpoints =
+      dropped
+      |> Enum.map(&Entry.normalize/1)
+      |> dedupe_endpoints()
+
+    {added_entries, dropped_endpoints}
+  end
+
+  @spec delta_encode_caps(boolean()) :: {pos_integer(), pos_integer()}
+  defp delta_encode_caps(true), do: {@max_initial_added, @max_initial_added}
+
+  defp delta_encode_caps(false), do: {@max_non_initial_added, @max_non_initial_dropped}
+
+  @spec build_encode_report(
+          boolean(),
+          [Entry.t()],
+          [endpoint()],
+          [Entry.t()],
+          [endpoint()],
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: EncodeReport.t()
+  defp build_encode_report(
+         initial?,
+         added_entries,
+         dropped_endpoints,
+         added_enc,
+         dropped_enc,
+         added_trunc,
+         dropped_trunc
+       ) do
+    %EncodeReport{
       initial?: initial?,
       added_total: length(added_entries),
       dropped_total: length(dropped_endpoints),
@@ -294,11 +345,6 @@ defmodule Peer.UtPex do
       added_entries: added_enc,
       dropped_endpoints: dropped_enc
     }
-
-    case build_payload(added_enc, dropped_enc) do
-      nil -> {:error, :empty}
-      payload -> {:ok, payload, report}
-    end
   end
 
   @doc false
@@ -398,23 +444,25 @@ defmodule Peer.UtPex do
 
   @spec build_payload([Entry.t()], [endpoint()]) :: binary() | nil
   defp build_payload(added_entries, dropped_endpoints) do
+    case wire_payload_fields(added_entries, dropped_endpoints) do
+      [] -> nil
+      fields -> Bento.encode!(Map.new(fields))
+    end
+  end
+
+  @spec wire_payload_fields([Entry.t()], [endpoint()]) :: [{binary(), binary()}]
+  defp wire_payload_fields(added_entries, dropped_endpoints) do
     added4 = Enum.filter(added_entries, fn %Entry{ip: ip} -> tuple_size(ip) == 4 end)
     added6 = Enum.filter(added_entries, fn %Entry{ip: ip} -> tuple_size(ip) == 8 end)
     {dropped4, dropped6} = split_endpoints(dropped_endpoints)
 
-    fields =
-      []
-      |> maybe_put("added", encode_ipv4_entries(added4))
-      |> maybe_put("added.f", encode_flags(added4))
-      |> maybe_put("added6", encode_ipv6_entries(added6))
-      |> maybe_put("added6.f", encode_flags(added6))
-      |> maybe_put("dropped", encode_ipv4(dropped4))
-      |> maybe_put("dropped6", encode_ipv6(dropped6))
-
-    case fields do
-      [] -> nil
-      _ -> Bento.encode!(Map.new(fields))
-    end
+    []
+    |> maybe_put("added", encode_ipv4_entries(added4))
+    |> maybe_put("added.f", encode_flags(added4))
+    |> maybe_put("added6", encode_ipv6_entries(added6))
+    |> maybe_put("added6.f", encode_flags(added6))
+    |> maybe_put("dropped", encode_ipv4(dropped4))
+    |> maybe_put("dropped6", encode_ipv6(dropped6))
   end
 
   @spec validate_wire_dict(map(), keyword()) :: :ok | :error

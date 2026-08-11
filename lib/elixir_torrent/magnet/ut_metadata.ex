@@ -7,11 +7,8 @@ defmodule Magnet.UtMetadata do
   already hold the torrent metadata, include top-level `metadata_size` (BEP 9 § extension header).
   """
 
-  @block_size 16_384
-  # The bencoded data header is normally under 100 bytes. Keep a small bounded
-  # allowance for key ordering / integer widths while rejecting a declared
-  # ut_metadata frame before Peer.Sender buffers an attacker-sized body.
-  @max_header_size 1_024
+  alias Magnet.UtMetadata.Extension
+  alias Peer.LTEP.Handshake
 
   @type msg_type :: :request | :data | :reject
   @type extension_handshake :: %{
@@ -19,8 +16,11 @@ defmodule Magnet.UtMetadata do
           optional(:metadata_size) => pos_integer() | nil
         }
 
-  alias Magnet.UtMetadata.Extension
-  alias Peer.LTEP.Handshake
+  @block_size 16_384
+  # The bencoded data header is normally under 100 bytes. Keep a small bounded
+  # allowance for key ordering / integer widths while rejecting a declared
+  # ut_metadata frame before Peer.Sender buffers an attacker-sized body.
+  @max_header_size 1_024
 
   @doc """
   Fixed metadata block size from BEP 9 (16384 bytes).
@@ -75,6 +75,7 @@ defmodule Magnet.UtMetadata do
   end
 
   @doc false
+  @spec extension_name() :: String.t()
   def extension_name, do: Extension.name()
 
   @doc """
@@ -191,20 +192,37 @@ defmodule Magnet.UtMetadata do
 
     assembled =
       Enum.reduce_while(0..(count - 1), <<>>, fn index, acc ->
-        expected = piece_byte_size(metadata_size, index)
-
-        case Map.get(pieces, index) do
-          bin when is_binary(bin) and byte_size(bin) == expected ->
-            {:cont, acc <> bin}
-
-          _ ->
-            {:halt, :incomplete}
-        end
+        append_piece_if_valid(pieces, metadata_size, index, acc)
       end)
 
-    case assembled do
-      :incomplete -> {:error, :incomplete}
-      blob when byte_size(blob) == metadata_size -> {:ok, blob}
+    validate_assembled_blob(assembled, metadata_size)
+  end
+
+  @spec append_piece_if_valid(
+          %{non_neg_integer() => binary()},
+          pos_integer(),
+          non_neg_integer(),
+          binary()
+        ) :: {:cont, binary()} | {:halt, :incomplete}
+  defp append_piece_if_valid(pieces, metadata_size, index, acc) do
+    expected = piece_byte_size(metadata_size, index)
+
+    case Map.get(pieces, index) do
+      bin when is_binary(bin) and byte_size(bin) == expected ->
+        {:cont, acc <> bin}
+
+      _ ->
+        {:halt, :incomplete}
+    end
+  end
+
+  @spec validate_assembled_blob(binary() | :incomplete, pos_integer()) ::
+          {:ok, binary()} | {:error, term()}
+  defp validate_assembled_blob(:incomplete, _metadata_size), do: {:error, :incomplete}
+
+  defp validate_assembled_blob(blob, metadata_size) when is_binary(blob) do
+    case byte_size(blob) do
+      ^metadata_size -> {:ok, blob}
       _ -> {:error, :size_mismatch}
     end
   end
@@ -275,8 +293,15 @@ defmodule Magnet.UtMetadata do
 
   defp integer_start(_), do: throw(:invalid)
 
-  defp integer_continue("e" <> rest, acc),
-    do: {acc |> Enum.reverse() |> IO.iodata_to_binary() |> String.to_integer(), rest}
+  defp integer_continue("e" <> rest, acc) do
+    value =
+      acc
+      |> Enum.reverse()
+      |> IO.iodata_to_binary()
+      |> String.to_integer()
+
+    {value, rest}
+  end
 
   defp integer_continue(<<digit>> <> rest, acc) when digit in ~c"0123456789",
     do: integer_continue(rest, [digit | acc])
@@ -294,7 +319,12 @@ defmodule Magnet.UtMetadata do
     do: string_length(rest, [digit | acc])
 
   defp string_length(":" <> rest, acc) do
-    len = acc |> Enum.reverse() |> IO.iodata_to_binary() |> String.to_integer()
+    len =
+      acc
+      |> Enum.reverse()
+      |> IO.iodata_to_binary()
+      |> String.to_integer()
+
     string_contents(len, rest)
   end
 

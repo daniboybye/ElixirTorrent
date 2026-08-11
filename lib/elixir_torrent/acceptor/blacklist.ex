@@ -11,11 +11,15 @@ defmodule Acceptor.BlackList do
   @spec member?(Peer.id()) :: boolean()
   def member?(peer_id), do: GenServer.call(__MODULE__, peer_id)
 
+  @spec init(term()) :: {:ok, MapSet.t(Peer.id())}
   def init(_), do: {:ok, MapSet.new()}
 
+  @spec handle_call(Peer.id(), GenServer.from(), MapSet.t(Peer.id())) ::
+          {:reply, boolean(), MapSet.t(Peer.id())}
   def handle_call(peer_id, _, state),
     do: {:reply, MapSet.member?(state, peer_id), state}
 
+  @spec handle_cast(Peer.id(), MapSet.t(Peer.id())) :: {:noreply, MapSet.t(Peer.id())}
   def handle_cast(peer_id, state),
     do: {:noreply, MapSet.put(state, peer_id)}
 end

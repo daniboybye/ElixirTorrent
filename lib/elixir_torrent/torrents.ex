@@ -10,6 +10,7 @@ defmodule Torrents do
 
   @default_stats_fields [:name, :speed, :downloaded, :bytes_size]
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     %{
       id: __MODULE__,

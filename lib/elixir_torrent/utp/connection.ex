@@ -1,9 +1,10 @@
 defmodule UTP.Connection do
   @moduledoc false
   use GenServer
-  require Logger
 
   alias UTP.{LEDBAT, Packet}
+
+  require Logger
 
   @st_data Packet.st_data()
   @st_fin Packet.st_fin()
@@ -179,10 +180,10 @@ defmodule UTP.Connection do
     end
   end
 
-  @impl true
+  @impl GenServer
   def init(state), do: {:ok, state}
 
-  @impl true
+  @impl GenServer
   def handle_cast({:boot, state}, _old) do
     state = schedule_tick(state)
 
@@ -211,7 +212,7 @@ defmodule UTP.Connection do
     {:noreply, %{state | active_recv_bytes: max(state.active_recv_bytes - bytes, 0)}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call(:activate, _from, %{active: false} = state) do
     {:reply, :ok, %{state | active: true}}
   end
@@ -270,7 +271,7 @@ defmodule UTP.Connection do
     {:reply, {:ok, {ip, port}}, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info({:utp_packet, header, payload, extensions}, state) do
     state =
       state
@@ -282,7 +283,13 @@ defmodule UTP.Connection do
   end
 
   def handle_info(:tick, state) do
-    {:noreply, state |> check_timeouts() |> flush_send() |> schedule_tick()}
+    state =
+      state
+      |> check_timeouts()
+      |> flush_send()
+      |> schedule_tick()
+
+    {:noreply, state}
   end
 
   def handle_info({:recv_timeout, from}, state) do
@@ -773,43 +780,46 @@ defmodule UTP.Connection do
 
   defp check_timeouts(state) do
     now = now_ms()
+    {give_up, timed_out} = scan_unacked_timeouts(state, now)
 
-    # First scan (pure): what's timed out, and is anyone past give-up? This
-    # decouples the state-mutation from iteration so we back off exactly ONCE
-    # per timeout event (libutp semantics) instead of doubling timeout_ms per
-    # timed-out packet, and so a shutdown mid-iteration doesn't leave the
-    # reduce still trying to retransmit later entries.
-    {give_up, timed_out} =
-      Enum.reduce(state.unacked, {nil, []}, fn
-        {seq, {_type, _payload, _sent_ms, tx_count, _bytes}}, {nil, list}
-        when tx_count >= 10 ->
-          {seq, list}
+    state
+    |> apply_timeout_scan_result(give_up, timed_out)
+    |> check_idle_timeout(now)
+  end
 
-        {seq, {_type, _payload, sent_ms, _tx_count, _bytes}}, {gu, list} ->
-          if now - sent_ms >= state.timeout_ms do
-            {gu, [seq | list]}
-          else
-            {gu, list}
-          end
-      end)
+  # First scan (pure): what's timed out, and is anyone past give-up? This
+  # decouples the state-mutation from iteration so we back off exactly ONCE
+  # per timeout event (libutp semantics) instead of doubling timeout_ms per
+  # timed-out packet, and so a shutdown mid-iteration doesn't leave the
+  # reduce still trying to retransmit later entries.
+  defp scan_unacked_timeouts(state, now) do
+    Enum.reduce(state.unacked, {nil, []}, fn
+      {seq, {_type, _payload, _sent_ms, tx_count, _bytes}}, {nil, list}
+      when tx_count >= 10 ->
+        {seq, list}
 
-    state =
-      case {give_up, timed_out} do
-        {seq, _} when not is_nil(seq) ->
-          Logger.debug(
-            "[utp] give_up seq=#{seq} peer=#{inspect({state.peer_ip, state.peer_port})}"
-          )
+      {seq, {_type, _payload, sent_ms, _tx_count, _bytes}}, {gu, list} ->
+        if now - sent_ms >= state.timeout_ms do
+          {gu, [seq | list]}
+        else
+          {gu, list}
+        end
+    end)
+  end
 
-          shutdown(state, :too_many_retransmits)
+  defp apply_timeout_scan_result(state, give_up, timed_out) do
+    case {give_up, timed_out} do
+      {seq, _} when not is_nil(seq) ->
+        Logger.debug("[utp] give_up seq=#{seq} peer=#{inspect({state.peer_ip, state.peer_port})}")
 
-        {_, []} ->
-          state
+        shutdown(state, :too_many_retransmits)
 
-        {_, _} ->
-          retransmit_timed_out(state, timed_out)
-      end
+      {_, []} ->
+        state
 
-    check_idle_timeout(state, now)
+      {_, _} ->
+        retransmit_timed_out(state, timed_out)
+    end
   end
 
   defp retransmit_timed_out(state, timed_out) do
@@ -904,22 +914,26 @@ defmodule UTP.Connection do
   end
 
   defp satisfy_recv_waiters(state) do
-    Enum.reduce(state.recv_waiters, {state, []}, fn
-      {from, len, timer_ref}, {s, rest} ->
-        if byte_size(s.recv_buffer) >= len do
-          Process.cancel_timer(timer_ref)
-          {chunk, buffer} = take_bytes(s.recv_buffer, len)
-          GenServer.reply(from, {:ok, chunk})
-          {%{s | recv_buffer: buffer}, rest}
-        else
-          {s, rest ++ [{from, len, timer_ref}]}
-        end
+    {state, waiters} =
+      Enum.reduce(state.recv_waiters, {state, []}, fn waiter, acc ->
+        satisfy_recv_waiter(waiter, acc)
+      end)
 
-      other, {s, rest} ->
-        {s, rest ++ [other]}
-    end)
-    |> then(fn {s, waiters} -> %{s | recv_waiters: waiters} end)
+    %{state | recv_waiters: waiters}
   end
+
+  defp satisfy_recv_waiter({from, len, timer_ref}, {s, rest}) do
+    if byte_size(s.recv_buffer) >= len do
+      Process.cancel_timer(timer_ref)
+      {chunk, buffer} = take_bytes(s.recv_buffer, len)
+      GenServer.reply(from, {:ok, chunk})
+      {%{s | recv_buffer: buffer}, rest}
+    else
+      {s, rest ++ [{from, len, timer_ref}]}
+    end
+  end
+
+  defp satisfy_recv_waiter(other, {s, rest}), do: {s, rest ++ [other]}
 
   defp shutdown(state, reason) do
     if state.closed do
@@ -991,20 +1005,21 @@ defmodule UTP.Connection do
         []
 
       _ ->
-        byte_count =
-          offsets
-          |> Enum.max()
-          |> Kernel.+(1)
-          |> then(&max(div(&1 + 31, 32) * 4, 4))
+        [{:selective_ack, build_selective_ack_bitmask(offsets)}]
+    end
+  end
 
-        offsets = MapSet.new(offsets)
+  defp build_selective_ack_bitmask(offsets) do
+    byte_count =
+      offsets
+      |> Enum.max()
+      |> Kernel.+(1)
+      |> then(&max(div(&1 + 31, 32) * 4, 4))
 
-        bitmask =
-          for byte_index <- 0..(byte_count - 1), into: <<>> do
-            sack_bitmask_byte(offsets, byte_index)
-          end
+    offsets = MapSet.new(offsets)
 
-        [{:selective_ack, bitmask}]
+    for byte_index <- 0..(byte_count - 1), into: <<>> do
+      sack_bitmask_byte(offsets, byte_index)
     end
   end
 
@@ -1066,7 +1081,7 @@ defmodule UTP.Connection do
     end
   end
 
-  @impl true
+  @impl GenServer
   def terminate(_reason, state) do
     unless state.closed do
       _ = shutdown(state, :terminate)

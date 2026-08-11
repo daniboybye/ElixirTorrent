@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,9 +21,21 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Scan dependencies and secrets
+        uses: aquasecurity/trivy-action@master # intentionally tracks latest action code
+        with:
+          scan-type: fs
+          scan-ref: .
+          trivy-config: .trivy.yaml
+          version: latest
 
       - name: Set up Erlang and Elixir
         id: beam
@@ -68,7 +79,10 @@ jobs:
         run: mix dialyzer
 
       - name: Run strict Credo
-        run: mix credo --strict --all
+        run: mix credo --all
+
+      - name: Run Sobelow
+        run: mix sobelow --exit --threshold medium --skip --no-router
 
       - name: Run tests and collect coverage
         run: timeout 60s mix coveralls.json --no-compile

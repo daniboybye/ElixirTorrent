@@ -47,8 +47,12 @@ defmodule PeerDiscoveryStartedAnnouncesTest do
     # The whole mechanism rests on this: nothing about tracker events reaches
     # disk, so a cold boot always reads an empty table and correctly treats the
     # first announce for a hash as a new session's `started`.
-    assert session |> Map.keys() |> Enum.sort() ==
-             [:added_at, :bitfield, :downloaded, :left, :peer_status, :uploaded]
+    keys =
+      session
+      |> Map.keys()
+      |> Enum.sort()
+
+    assert keys == [:added_at, :bitfield, :downloaded, :left, :peer_status, :uploaded]
   end
 
   defp sample_torrent do

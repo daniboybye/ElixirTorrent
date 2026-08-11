@@ -264,3 +264,184 @@ defmodule DHTGenServerTest do
     assert {:error, :disabled} = DHT.get_peers(<<0::128>>)
   end
 end
+
+defmodule DiscoveryCoverageBatchTest do
+  @moduledoc false
+  use ExUnit.Case, async: false
+
+  alias PeerDiscovery.LSD
+  alias Tracker.{Error, Response}
+
+  setup do
+    {:ok, _} = Application.ensure_all_started(:elixir_torrent)
+    :ok
+  end
+
+  test "HTTP tracker JS redirect interoperability batch: success then hard failure" do
+    hash = :crypto.strong_rand_bytes(20)
+    peers_bin = <<192, 168, 99, 1, 6888::16>>
+
+    ok_body =
+      Bento.encode!(%{
+        "interval" => 600,
+        "complete" => 1,
+        "incomplete" => 2,
+        "peers" => peers_bin
+      })
+
+    redirect = ~s(<html><script>window.location.href="/peers";</script></html>)
+    {port, _pid} = start_batch_tracker([{200, redirect}, {200, ok_body}])
+
+    stats = [uploaded: 0, downloaded: 0, left: 4096, event: Torrent.started()]
+
+    assert %Response{interval: 600, peers: [%Peer{ip: {192, 168, 99, 1}, port: 6888}]} =
+             Tracker.request!(
+               "http://127.0.0.1:#{port}/interstitial",
+               hash,
+               stats,
+               http_timeout_ms: 5_000
+             )
+
+    fail_redirect = ~s(<html><script>window.location.href="/dead-end";</script></html>)
+    {port2, _pid2} = start_batch_tracker([{200, fail_redirect}, {200, "<html>nope</html>"}])
+
+    assert %Error{reason: :non_bencoded_response, retry_in: "never"} =
+             Tracker.request!(
+               "http://127.0.0.1:#{port2}/interstitial",
+               hash,
+               stats,
+               http_timeout_ms: 5_000
+             )
+  end
+
+  test "LSD loopback socket offers peer then private torrent blocks offer" do
+    public_hash = :crypto.strong_rand_bytes(20)
+    private_hash = :crypto.strong_rand_bytes(20)
+
+    for {hash, private?} <- [{public_hash, false}, {private_hash, true}] do
+      start_batch_manager!(hash)
+      start_batch_announce!(hash, private?)
+    end
+
+    {:ok, socket} =
+      :gen_udp.open(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+
+    on_exit(fn -> :gen_udp.close(socket) end)
+
+    state = %{
+      cookie: "batch-cookie",
+      sockets: %{inet: socket, inet6: nil},
+      interfaces: %{inet: [], inet6: []},
+      announce_queue: []
+    }
+
+    source = {10, 11, 12, 13}
+
+    public_packet =
+      IO.iodata_to_binary(LSD.build_message([public_hash], 9001, "remote-a"))
+
+    assert {:noreply, ^state} =
+             LSD.handle_info({:udp, socket, source, 6771, public_packet}, state)
+
+    assert batch_peer_queued?(public_hash, source, 9001)
+
+    private_packet =
+      IO.iodata_to_binary(LSD.build_message([private_hash], 9002, "remote-b"))
+
+    assert {:noreply, ^state} =
+             LSD.handle_info({:udp, socket, source, 6771, private_packet}, state)
+
+    refute batch_peer_queued?(private_hash, source, 9002)
+  end
+
+  defp start_batch_tracker(steps) do
+    {:ok, listen} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, port} = :inet.port(listen)
+    {:ok, agent} = Agent.start_link(fn -> 0 end)
+
+    pid =
+      spawn(fn ->
+        batch_serve(listen, agent, steps)
+      end)
+
+    on_exit(fn ->
+      Process.exit(pid, :kill)
+      if Process.alive?(agent), do: Agent.stop(agent, :normal, 1_000)
+      :gen_tcp.close(listen)
+    end)
+
+    {port, pid}
+  end
+
+  defp batch_serve(listen, agent, steps) do
+    case :gen_tcp.accept(listen) do
+      {:ok, socket} ->
+        spawn(fn -> batch_client(socket, agent, steps) end)
+        batch_serve(listen, agent, steps)
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  defp batch_client(socket, agent, steps) do
+    case :gen_tcp.recv(socket, 0, 5_000) do
+      {:ok, _request} ->
+        idx = Agent.get_and_update(agent, fn n -> {n, n + 1} end)
+        {code, body} = Enum.at(steps, idx) || List.last(steps)
+        status = if code == 200, do: "200 OK", else: "#{code} Error"
+
+        response =
+          "HTTP/1.1 #{status}\r\nContent-Length: #{byte_size(body)}\r\nConnection: close\r\n\r\n#{body}"
+
+        :gen_tcp.send(socket, response)
+
+      {:error, _} ->
+        :ok
+    end
+
+    :gen_tcp.close(socket)
+  end
+
+  defp start_batch_manager!(hash) do
+    name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
+
+    {:ok, pid} = GenServer.start_link(Peer.ConnectionManager, hash, name: name)
+    on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
+    pid
+  end
+
+  defp start_batch_announce!(hash, private?) do
+    info =
+      if private?,
+        do: %{"name" => "batch-private", "private" => 1},
+        else: %{"name" => "batch-public"}
+
+    torrent = %Torrent{
+      hash: hash,
+      metadata: %{"info" => info},
+      left: 512,
+      last_index: 0,
+      last_piece_length: 512
+    }
+
+    {:ok, model_pid} = Torrent.Model.start_link(torrent)
+    on_exit(fn -> TestSupport.Sync.safe_stop(model_pid, 5_000) end)
+
+    name = {:via, Registry, {Registry, {hash, PeerDiscovery.Announce}}}
+    {:ok, pid} = GenServer.start_link(PeerDiscovery.Announce, [self(), torrent], name: name)
+    on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
+    pid
+  end
+
+  defp batch_peer_queued?(hash, ip, port) do
+    name = {:via, Registry, {Registry, {hash, Peer.ConnectionManager}}}
+
+    case GenServer.whereis(name) do
+      nil -> false
+      pid -> Map.has_key?(:sys.get_state(pid).queue, {ip, port})
+    end
+  end
+end

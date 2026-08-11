@@ -28,36 +28,66 @@ defmodule Magnet do
 
   @spec parse(String.t()) :: {:ok, t()} | {:error, term()}
   def parse(uri) when is_binary(uri) do
-    uri = String.trim(uri)
+    uri
+    |> String.trim()
+    |> do_parse()
+  end
 
-    with %URI{scheme: "magnet", query: query} when is_binary(query) <- URI.parse(uri),
-         params when is_map(params) <- URI.decode_query(query),
-         xt_values <- extract_xt_values(query),
-         {:ok, hash_v1, hash_v2, kind} <- classify_xt(xt_values),
-         trackers <- extract_trackers(query),
-         x_pe_peers <- extract_x_pe(query) do
+  @spec do_parse(String.t()) :: {:ok, t()} | {:error, term()}
+  defp do_parse(uri) do
+    with {:ok, params, query} <- parse_magnet_query(uri),
+         {:ok, hash_v1, hash_v2, kind} <- classify_xt(extract_xt_values(query)) do
       {:ok,
-       %__MODULE__{
-         hash: hash_v1,
-         hash_v2: hash_v2,
-         kind: kind,
-         trackers: trackers,
-         x_pe_peers: x_pe_peers,
-         display_name: Map.get(params, "dn")
-       }}
-    else
+       build_magnet(
+         params,
+         hash_v1,
+         hash_v2,
+         kind,
+         extract_trackers(query),
+         extract_x_pe(query)
+       )}
+    end
+  end
+
+  @spec parse_magnet_query(String.t()) :: {:ok, map(), String.t()} | {:error, term()}
+  defp parse_magnet_query(uri) do
+    case URI.parse(uri) do
+      %URI{scheme: "magnet", query: query} when is_binary(query) ->
+        case URI.decode_query(query) do
+          params when is_map(params) -> {:ok, params, query}
+          _ -> {:error, :invalid_magnet}
+        end
+
       %URI{scheme: scheme} when scheme != "magnet" ->
         {:error, :invalid_scheme}
 
       %URI{query: nil} ->
         {:error, :missing_query}
 
-      {:error, _} = error ->
-        error
-
       _ ->
         {:error, :invalid_magnet}
     end
+  end
+
+  @spec build_magnet(
+          map(),
+          Torrent.hash(),
+          Torrent.hash_v2() | nil,
+          Torrent.kind(),
+          [String.t()],
+          [
+            Peer.t()
+          ]
+        ) :: t()
+  defp build_magnet(params, hash_v1, hash_v2, kind, trackers, x_pe_peers) do
+    %__MODULE__{
+      hash: hash_v1,
+      hash_v2: hash_v2,
+      kind: kind,
+      trackers: trackers,
+      x_pe_peers: x_pe_peers,
+      display_name: Map.get(params, "dn")
+    }
   end
 
   @spec metadata_left() :: pos_integer()

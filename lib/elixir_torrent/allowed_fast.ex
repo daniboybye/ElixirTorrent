@@ -22,16 +22,18 @@ defmodule AllowedFast do
   @spec set(:inet.ip_address(), Torrent.hash(), Torrent.index(), non_neg_integer()) :: set()
   def set(ip, hash, torrent_size, set_size \\ count())
 
-  def set({ip1, ip2, ip3, _}, hash, torrent_size, set_size) do
+  def set({ip1, ip2, ip3, _}, hash, torrent_size, set_size)
+      when is_integer(torrent_size) and torrent_size > 0 and is_integer(set_size) and set_size > 0 do
     bin = <<ip1, ip2, ip3, 0, hash::binary>>
 
-    new_indexies(new(), bin, torrent_size, set_size)
+    new_indexies(new(), bin, torrent_size, min(set_size, torrent_size))
   end
 
-  def set({s1, s2, s3, _s4, _s5, _s6, _s7, _s8}, hash, torrent_size, set_size) do
+  def set({s1, s2, s3, _s4, _s5, _s6, _s7, _s8}, hash, torrent_size, set_size)
+      when is_integer(torrent_size) and torrent_size > 0 and is_integer(set_size) and set_size > 0 do
     bin = <<s1::16, s2::16, s3::16, 0::80, hash::binary>>
 
-    new_indexies(new(), bin, torrent_size, set_size)
+    new_indexies(new(), bin, torrent_size, min(set_size, torrent_size))
   end
 
   def set(_, _, _, _), do: new()

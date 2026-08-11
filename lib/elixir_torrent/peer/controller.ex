@@ -6,14 +6,15 @@ defmodule Peer.Controller do
   use GenServer
   use Via
 
+  import Peer, only: [make_key: 2, key_to_id: 1, key_to_hash: 1]
+
   alias __MODULE__.{State, FastExtension}
   alias Peer.LTEP.Session
   alias Peer.Sender
   alias Torrent.{Downloads, Uploader}
 
-  import Peer, only: [make_key: 2, key_to_id: 1, key_to_hash: 1]
-
-  # @spec start_link({Peer.id(), Torrent.hash(), port(), Peer.reserved()}) :: GenServer.on_start()
+  @spec start_link([Torrent.hash() | Peer.id() | Peer.Transport.socket() | Peer.reserved()]) ::
+          GenServer.on_start()
   def start_link([hash, id, socket, reserved]) do
     GenServer.start_link(
       __MODULE__,
@@ -41,7 +42,7 @@ defmodule Peer.Controller do
           :ok
   def cancel(hash, id, index, begin, length) do
     make_key(hash, id)
-    |> via
+    |> via()
     |> GenServer.cast({:cancel, [index, begin, length]})
   end
 
@@ -56,14 +57,14 @@ defmodule Peer.Controller do
   @spec choke(Torrent.hash(), Peer.id()) :: :ok
   def choke(hash, id) do
     make_key(hash, id)
-    |> via
+    |> via()
     |> GenServer.cast({:choke, []})
   end
 
   @spec unchoke(Torrent.hash(), Peer.id()) :: :ok
   def unchoke(hash, id) do
     make_key(hash, id)
-    |> via
+    |> via()
     |> GenServer.cast({:unchoke, []})
   end
 
@@ -199,13 +200,22 @@ defmodule Peer.Controller do
     block_size = byte_size(block)
     max = Torrent.Downloads.piece_max_length()
 
-    with true <- block_size > 0,
-         true <- block_size <= max,
-         pieces_count when is_integer(pieces_count) <- Torrent.get(hash, :pieces_count),
+    valid_block_size?(block_size, max) and
+      valid_piece_bounds?(hash, index, begin, block_size)
+  end
+
+  @spec valid_block_size?(non_neg_integer(), pos_integer()) :: boolean()
+  defp valid_block_size?(block_size, max) do
+    block_size > 0 and block_size <= max
+  end
+
+  @spec valid_piece_bounds?(Torrent.hash(), Torrent.index(), Torrent.begin(), non_neg_integer()) ::
+          boolean()
+  defp valid_piece_bounds?(hash, index, begin, block_size) do
+    with pieces_count when is_integer(pieces_count) <- Torrent.get(hash, :pieces_count),
          true <- index >= 0 and index < pieces_count,
-         piece_len when is_integer(piece_len) <- Torrent.Model.piece_length(hash, index),
-         true <- begin >= 0 and begin + block_size <= piece_len do
-      true
+         piece_len when is_integer(piece_len) <- Torrent.Model.piece_length(hash, index) do
+      begin >= 0 and begin + block_size <= piece_len
     else
       _ -> false
     end
@@ -307,6 +317,8 @@ defmodule Peer.Controller do
     :exit, _ -> :ok
   end
 
+  @spec init([Torrent.hash() | Peer.id() | Peer.Transport.socket() | Peer.reserved()]) ::
+          {:ok, State.t()}
   def init([hash, id, socket, reserved]) do
     # The peer supervisor is one_for_all: a Sender exit tears this process down
     # with an exit signal, which skips terminate/2 unless exits are trapped —
@@ -336,6 +348,7 @@ defmodule Peer.Controller do
      }}
   end
 
+  @spec terminate(term(), State.t()) :: :ok
   def terminate({:shutdown, :protocol_error}, state) do
     State.notify_hash_request_disconnect(state, :protocol_error)
     Torrent.Superseed.release(state.hash, state.id)
@@ -385,7 +398,10 @@ defmodule Peer.Controller do
 
         require Logger
 
-        ip_str = ip |> :inet.ntoa() |> to_string()
+        ip_str =
+          ip
+          |> :inet.ntoa()
+          |> to_string()
 
         Logger.debug(
           "[peer_dial] warm_redial endpoint=#{ip_str}:#{port} hash=#{Torrent.hex_encoded_hash(state.hash)} downloaded=#{n}"
@@ -418,6 +434,8 @@ defmodule Peer.Controller do
     _, _ -> {:ok, state}
   end
 
+  @spec handle_info(term(), State.t()) ::
+          {:noreply, State.t()} | {:stop, term(), State.t()}
   def handle_info(:pex_initial_snapshot, %State{} = state) do
     if state.pex_outbound.initial_pending? and not state.pex_outbound.initial_sent? do
       key = State.key(state)
@@ -456,6 +474,10 @@ defmodule Peer.Controller do
     end
   end
 
+  @spec handle_call(term(), GenServer.from(), State.t()) ::
+          {:reply, term(), State.t()}
+          | {:stop, term(), State.t()}
+          | {:stop, term(), term(), State.t()}
   def handle_call({:complete_upload, index, begin, length, block}, _from, state) do
     {reply, state} = State.complete_upload(state, index, begin, length, block)
     {:reply, reply, state}
@@ -748,6 +770,8 @@ defmodule Peer.Controller do
     end
   end
 
+  @spec handle_cast(term(), State.t()) ::
+          {:noreply, State.t()} | {:stop, term(), State.t()}
   def handle_cast({:handle_extended, [0, payload]}, %State{} = state) do
     state =
       state

@@ -49,6 +49,14 @@ defmodule Torrent.FileHandle do
   defdelegate write(hash, index, begin, block), to: Piece
   defdelegate flush(hash, index), to: Piece
 
+  @spec init(Torrent.hash()) ::
+          {:ok,
+           {%{
+              :auto_shutdown => :never | :any_significant | :all_significant,
+              :intensity => non_neg_integer(),
+              :period => pos_integer(),
+              :strategy => Supervisor.strategy()
+            }, [map()]}}
   def init(hash) do
     children = [
       # Store must come first: it opens the io_devices and publishes the shared

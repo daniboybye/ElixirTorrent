@@ -3,9 +3,9 @@ defmodule Tracker do
   HTTP and UDP (BEP 15) tracker announce/scrape client with multi-homed source IP selection.
   """
 
-  require Logger
-
   alias __MODULE__.{Error, Response, UDP}
+
+  require Logger
 
   @type connection_id :: <<_::64>>
   @type announce :: binary()
@@ -73,11 +73,30 @@ defmodule Tracker do
 
   def request!(<<"udp:", _::binary>> = announce, hash, stats, opts) do
     # BEP 15: optional path after host:port is ignored for UDP trackers.
+    with {:ok, host, port} <- parse_udp_tracker_endpoint(announce) do
+      udp_announce_responses(host, port, hash, stats, opts)
+    end
+  end
+
+  @spec parse_udp_tracker_endpoint(binary()) ::
+          {:ok, String.t(), :inet.port_number()} | {:error, String.t(), term()}
+  defp parse_udp_tracker_endpoint(announce) do
     %URI{port: port, host: host} =
       announce
       |> URI.parse()
       |> Map.update!(:port, &if(&1, do: &1, else: 6969))
 
+    {:ok, host, port}
+  end
+
+  @spec udp_announce_responses(
+          String.t(),
+          :inet.port_number(),
+          Torrent.hash(),
+          stats(),
+          request_opts()
+        ) :: Response.t() | Error.t()
+  defp udp_announce_responses(host, port, hash, stats, opts) do
     case resolve_hosts(host) do
       {:ok, hosts} ->
         source_ips = Acceptor.primary_ips()
@@ -218,18 +237,37 @@ defmodule Tracker do
 
       {:ok, socket} ->
         try do
-          result =
-            udp_scrape(socket, ip, port, [hash], max_udp_attempts: @scrape_udp_max_attempts)
-
-          case result do
-            %Error{} when rest != [] -> udp_scrape_hosts(rest, port, hash)
-            %Error{} = err -> err
-            %{^hash => stats} -> Map.take(stats, [:seeders, :leechers, :completed])
-            _ -> %Error{reason: :scrape_no_data}
-          end
+          finalize_udp_scrape_attempt(
+            udp_scrape(socket, ip, port, [hash], max_udp_attempts: @scrape_udp_max_attempts),
+            rest,
+            port,
+            hash
+          )
         after
           :gen_udp.close(socket)
         end
+    end
+  end
+
+  @spec finalize_udp_scrape_attempt(
+          scrape_result() | Error.t() | map(),
+          [{:inet.ip_address(), :inet | :inet6}],
+          :inet.port_number(),
+          Torrent.hash()
+        ) :: scrape_result() | Error.t()
+  defp finalize_udp_scrape_attempt(result, rest, port, hash) do
+    case result do
+      %Error{} when rest != [] ->
+        udp_scrape_hosts(rest, port, hash)
+
+      %Error{} = err ->
+        err
+
+      %{^hash => stats} ->
+        Map.take(stats, [:seeders, :leechers, :completed])
+
+      _ ->
+        %Error{reason: :scrape_no_data}
     end
   end
 
@@ -246,12 +284,14 @@ defmodule Tracker do
           keyword()
         ) :: %{Torrent.hash() => scrape_stats()} | Error.t()
   defp scrape_hash_chunks(socket, ip, port, connection_id, hashes, opts) do
-    hashes
-    |> Enum.chunk_every(UDP.max_scrape_hashes())
-    |> Enum.reduce_while(%{}, fn chunk, acc ->
-      merge_udp_scrape_chunk(socket, ip, port, connection_id, chunk, opts, acc)
-    end)
-    |> case do
+    result =
+      hashes
+      |> Enum.chunk_every(UDP.max_scrape_hashes())
+      |> Enum.reduce_while(%{}, fn chunk, acc ->
+        merge_udp_scrape_chunk(socket, ip, port, connection_id, chunk, opts, acc)
+      end)
+
+    case result do
       %Error{} = error -> error
       map -> map
     end
@@ -277,30 +317,50 @@ defmodule Tracker do
   defp do_http_scrape(base_url, hash) do
     info_hash_query = URI.encode_query(%{"info_hash" => hash})
     url = append_query(base_url, info_hash_query)
-
-    http_opts = [
-      timeout: @scrape_http_timeout_ms,
-      recv_timeout: @scrape_http_timeout_ms,
-      hackney: [pool: false]
-    ]
+    http_opts = scrape_http_opts()
 
     try do
-      case HTTPoison.get(url, [], http_opts) do
-        {:ok, %HTTPoison.Response{status_code: code, body: body}} when code in 200..299 ->
-          decode_http_scrape_body(body, hash)
-
-        {:ok, %HTTPoison.Response{status_code: code, body: body}} ->
-          decode_http_error_response(body, code)
-
-        {:error, %HTTPoison.Error{reason: reason}} ->
-          %Error{reason: reason}
-      end
+      url
+      |> HTTPoison.get([], http_opts)
+      |> decode_http_scrape_response(hash)
     rescue
       _e in [CaseClauseError] -> %Error{reason: :badarg}
     catch
       :exit, reason -> %Error{reason: reason}
       :error, :badarg -> %Error{reason: :badarg}
     end
+  end
+
+  @spec scrape_http_opts() :: keyword()
+  defp scrape_http_opts do
+    [
+      timeout: @scrape_http_timeout_ms,
+      recv_timeout: @scrape_http_timeout_ms,
+      hackney: [pool: false]
+    ]
+  end
+
+  @spec decode_http_scrape_response(
+          {:ok, HTTPoison.Response.t()} | {:error, HTTPoison.Error.t()},
+          Torrent.hash()
+        ) :: scrape_result() | Error.t()
+  defp decode_http_scrape_response(
+         {:ok, %HTTPoison.Response{status_code: code, body: body}},
+         hash
+       )
+       when code in 200..299 do
+    decode_http_scrape_body(body, hash)
+  end
+
+  defp decode_http_scrape_response(
+         {:ok, %HTTPoison.Response{status_code: code, body: body}},
+         _hash
+       ) do
+    decode_http_error_response(body, code)
+  end
+
+  defp decode_http_scrape_response({:error, %HTTPoison.Error{reason: reason}}, _hash) do
+    %Error{reason: reason}
   end
 
   @spec decode_http_scrape_body(binary(), Torrent.hash()) :: scrape_result() | Error.t()
@@ -394,8 +454,13 @@ defmodule Tracker do
     case URI.parse(announce).host do
       host when is_binary(host) ->
         case resolve_hosts(host) do
-          {:ok, hosts} -> hosts |> Enum.map(&elem(&1, 1)) |> MapSet.new()
-          {:error, _reason} -> MapSet.new([:inet, :inet6])
+          {:ok, hosts} ->
+            hosts
+            |> Enum.map(&elem(&1, 1))
+            |> MapSet.new()
+
+          {:error, _reason} ->
+            MapSet.new([:inet, :inet6])
         end
 
       nil ->
@@ -534,41 +599,12 @@ defmodule Tracker do
   @spec http_announce(binary(), :inet | :inet6, :inet.ip_address(), request_opts()) ::
           Response.t() | Error.t()
   defp http_announce(url, family, ip, opts) do
-    timeout_ms = Keyword.get(opts, :http_timeout_ms, @timeout)
-
-    http_opts = [
-      timeout: timeout_ms,
-      recv_timeout: timeout_ms,
-      hackney: http_hackney_opts(family, ip)
-    ]
+    http_opts = announce_http_opts(family, ip, opts)
 
     try do
-      case HTTPoison.get(url, [], http_opts) do
-        {:ok, %HTTPoison.Response{status_code: code, body: body, headers: headers}}
-        when code in 200..299 ->
-          case decode_tracker_body(body, url, family, ip, headers, http_opts, 0) do
-            %Response{peers: peers} = response ->
-              v6 = Enum.count(peers, &ipv6_peer?/1)
-
-              Logger.debug(
-                "[tracker_announce] http family=#{family} local=#{Acceptor.format_ip(ip)} peers=#{length(peers)} ipv6_peers=#{v6}"
-              )
-
-              response
-
-            %Error{} = error ->
-              error
-          end
-
-        {:ok, %HTTPoison.Response{status_code: code, body: body}} ->
-          decode_http_error_response(body, code)
-
-        {:error, %HTTPoison.Error{reason: reason}} ->
-          %Error{reason: reason}
-
-        other ->
-          %Error{reason: other}
-      end
+      url
+      |> HTTPoison.get([], http_opts)
+      |> decode_http_announce_response(url, family, ip, http_opts)
     rescue
       e in CaseClauseError ->
         if badarg_clause?(e) do
@@ -583,6 +619,65 @@ defmodule Tracker do
       :error, :badarg ->
         %Error{reason: :badarg}
     end
+  end
+
+  @spec announce_http_opts(:inet | :inet6, :inet.ip_address(), request_opts()) :: keyword()
+  defp announce_http_opts(family, ip, opts) do
+    timeout_ms = Keyword.get(opts, :http_timeout_ms, @timeout)
+
+    [
+      timeout: timeout_ms,
+      recv_timeout: timeout_ms,
+      hackney: http_hackney_opts(family, ip)
+    ]
+  end
+
+  @spec decode_http_announce_response(
+          {:ok, HTTPoison.Response.t()} | {:error, HTTPoison.Error.t()} | term(),
+          binary(),
+          :inet | :inet6,
+          :inet.ip_address(),
+          keyword()
+        ) :: Response.t() | Error.t()
+  defp decode_http_announce_response(
+         {:ok, %HTTPoison.Response{status_code: code, body: body, headers: headers}},
+         url,
+         family,
+         ip,
+         http_opts
+       )
+       when code in 200..299 do
+    case decode_tracker_body(body, url, family, ip, headers, http_opts, 0) do
+      %Response{peers: peers} = response ->
+        v6 = Enum.count(peers, &ipv6_peer?/1)
+
+        Logger.debug(
+          "[tracker_announce] http family=#{family} local=#{Acceptor.format_ip(ip)} peers=#{length(peers)} ipv6_peers=#{v6}"
+        )
+
+        response
+
+      %Error{} = error ->
+        error
+    end
+  end
+
+  defp decode_http_announce_response(
+         {:ok, %HTTPoison.Response{status_code: code, body: body}},
+         _url,
+         _family,
+         _ip,
+         _http_opts
+       ) do
+    decode_http_error_response(body, code)
+  end
+
+  defp decode_http_announce_response({:error, %HTTPoison.Error{reason: reason}}, _, _, _, _) do
+    %Error{reason: reason}
+  end
+
+  defp decode_http_announce_response(other, _, _, _, _) do
+    %Error{reason: other}
   end
 
   # BEP 7 requires the tracker connection's source to be the address being
@@ -623,7 +718,12 @@ defmodule Tracker do
   rescue
     _e in [Bento.SyntaxError] ->
       content_type = header_value(headers, "content-type")
-      ip_str = ip |> :inet.ntoa() |> List.to_string()
+
+      ip_str =
+        ip
+        |> :inet.ntoa()
+        |> List.to_string()
+
       preview = binary_part(body, 0, min(byte_size(body), 500))
 
       Logger.debug(
@@ -735,7 +835,12 @@ defmodule Tracker do
 
   @spec decode_http_error_response(binary(), non_neg_integer()) :: Error.t()
   defp decode_http_error_response(body, status_code) do
-    case body |> Bento.decode!() |> decode_http_response() do
+    result =
+      body
+      |> Bento.decode!()
+      |> decode_http_response()
+
+    case result do
       %Error{} = error -> error
       _response -> %Error{reason: {:http_status, status_code}}
     end
@@ -1207,10 +1312,12 @@ defmodule Tracker do
     # Dictionary-model hostnames are deliberately not resolved here. Tracker
     # responses are untrusted and resolving an unbounded list would put
     # synchronous DNS work on the announce decode path.
-    ip
-    |> String.to_charlist()
-    |> :inet.parse_address()
-    |> case do
+    parsed =
+      ip
+      |> String.to_charlist()
+      |> :inet.parse_address()
+
+    case parsed do
       {:ok, addr} -> {:ok, addr}
       {:error, _} -> :error
     end

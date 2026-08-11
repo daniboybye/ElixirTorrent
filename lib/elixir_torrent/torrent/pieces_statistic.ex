@@ -35,16 +35,18 @@ defmodule Torrent.PiecesStatistic do
   def choice_piece(hash, :random, opts) do
     exclude = MapSet.new(Keyword.get(opts, :exclude, []))
 
-    table_ref(hash)
-    |> :ets.select([
-      {{:"$0", :"$1", :"$2"},
-       [
-         {:andalso, {:>, :"$1", 0},
-          {:orelse, {:"=:=", :"$2", nil}, {:"=:=", :"$2", :allowed_fast}}}
-       ], [:"$0"]}
-    ])
-    |> Enum.reject(&MapSet.member?(exclude, &1))
-    |> case do
+    indices =
+      table_ref(hash)
+      |> :ets.select([
+        {{:"$0", :"$1", :"$2"},
+         [
+           {:andalso, {:>, :"$1", 0},
+            {:orelse, {:"=:=", :"$2", nil}, {:"=:=", :"$2", :allowed_fast}}}
+         ], [:"$0"]}
+      ])
+      |> Enum.reject(&MapSet.member?(exclude, &1))
+
+    case indices do
       [] -> nil
       indices -> Enum.random(indices)
     end
@@ -58,11 +60,16 @@ defmodule Torrent.PiecesStatistic do
         nil
 
       list ->
-        list
-        |> Enum.reject(fn {index, _} -> MapSet.member?(exclude, index) end)
-        |> case do
-          [] -> nil
-          filtered -> filtered |> Enum.random() |> elem(0)
+        filtered = Enum.reject(list, fn {index, _} -> MapSet.member?(exclude, index) end)
+
+        case filtered do
+          [] ->
+            nil
+
+          filtered ->
+            filtered
+            |> Enum.random()
+            |> elem(0)
         end
     end
   end
@@ -161,6 +168,7 @@ defmodule Torrent.PiecesStatistic do
   end
 
   # nil when the torrent's table is missing (magnet handoff window, shutdown).
+  @spec get_status(Torrent.hash(), Torrent.index()) :: status() | nil
   def get_status(hash, index) do
     case table_ref_safe(hash) do
       nil -> nil
@@ -170,8 +178,10 @@ defmodule Torrent.PiecesStatistic do
     ArgumentError -> nil
   end
 
+  @spec have?(Torrent.hash(), Torrent.index()) :: boolean()
   def have?(hash, index), do: get_status(hash, index) === :complete
 
+  @spec i(Torrent.hash()) :: :ok
   def i(hash), do: :ets.i(table_ref(hash))
 
   # def pieces_for_check(hash) do

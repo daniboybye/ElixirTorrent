@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Runtime pin moved to Elixir 1.20.3 + OTP 29.0.5 (ERTS 17.0.5)
+- Hackney 4.7.2, H2 0.11.0, QUIC 1.8.0, WebTransport 0.4.4 (HTTP stack behind HTTPoison, used by HTTP trackers, scrape, and BEP 19 web seeds)
+
 ## 0.6.0 - 2026-08-04
 
 ### Added

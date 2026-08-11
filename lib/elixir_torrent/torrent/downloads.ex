@@ -7,6 +7,7 @@ defmodule Torrent.Downloads do
 
   alias __MODULE__.Piece
 
+  @spec child_spec(Torrent.hash()) :: Supervisor.child_spec()
   def child_spec(hash) do
     %{
       id: __MODULE__,
@@ -25,7 +26,7 @@ defmodule Torrent.Downloads do
     :exit, _ -> :ok
   end
 
-  @spec piece(Torrent.hash(), Torrent.index(), (-> :ok), (-> :ok)) :: :ok
+  @spec piece(Torrent.hash(), Torrent.index(), Piece.callback(), Piece.callback()) :: :ok
   def piece(hash, index, downloaded, requests_are_dealt) do
     case DynamicSupervisor.start_child(via(hash), {Piece, [index]}) do
       {:ok, pid} ->

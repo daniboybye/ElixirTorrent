@@ -1,8 +1,7 @@
 defmodule Torrent.ModelEndgameTest do
   use ExUnit.Case, async: false
 
-  alias Torrent.Bitfield
-  alias Torrent.Model
+  alias Torrent.{Bitfield, Model}
 
   setup do
     {:ok, _} = Application.ensure_all_started(:elixir_torrent)

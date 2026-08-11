@@ -47,7 +47,12 @@ defmodule HTTPTrackerIPv6Test do
       assert %Tracker.Response{} = result
       assert_receive {:http_announce_source, @loopback_v6, target}, 5_000
 
-      query = target |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      query =
+        target
+        |> URI.parse()
+        |> Map.fetch!(:query)
+        |> URI.decode_query()
+
       refute Map.has_key?(query, "ip")
       refute Map.has_key?(query, "ipv6")
 
@@ -81,36 +86,9 @@ defmodule HTTPTrackerIPv6Test do
   defp start_ipv6_http_tracker(parent) do
     pid =
       spawn_link(fn ->
-        {:ok, listen} =
-          :gen_tcp.listen(0, [
-            :binary,
-            :inet6,
-            active: false,
-            reuseaddr: true,
-            ipv6_v6only: true,
-            ip: @loopback_v6
-          ])
-
-        {:ok, port} = :inet.port(listen)
+        {listen, port} = open_ipv6_http_listener()
         send(parent, {:http_tracker_ready, port, self()})
-
-        {:ok, socket} = :gen_tcp.accept(listen, 5_000)
-        {:ok, {source_ip, _source_port}} = :inet.peername(socket)
-        {:ok, request} = recv_http_headers(socket, "")
-        [request_line | _] = String.split(request, "\r\n")
-        ["GET", target, _version] = String.split(request_line, " ")
-        send(parent, {:http_announce_source, source_ip, target})
-
-        body = Bento.encode!(%{"interval" => 1_200, "peers" => <<>>})
-
-        :ok =
-          :gen_tcp.send(
-            socket,
-            "HTTP/1.1 200 OK\r\ncontent-length: #{byte_size(body)}\r\nconnection: close\r\n\r\n#{body}"
-          )
-
-        :gen_tcp.close(socket)
-        :gen_tcp.close(listen)
+        serve_ipv6_http_tracker_request(listen, parent)
       end)
 
     receive do
@@ -118,6 +96,41 @@ defmodule HTTPTrackerIPv6Test do
     after
       5_000 -> flunk("IPv6 HTTP tracker failed to start")
     end
+  end
+
+  defp open_ipv6_http_listener do
+    {:ok, listen} =
+      :gen_tcp.listen(0, [
+        :binary,
+        :inet6,
+        active: false,
+        reuseaddr: true,
+        ipv6_v6only: true,
+        ip: @loopback_v6
+      ])
+
+    {:ok, port} = :inet.port(listen)
+    {listen, port}
+  end
+
+  defp serve_ipv6_http_tracker_request(listen, parent) do
+    {:ok, socket} = :gen_tcp.accept(listen, 5_000)
+    {:ok, {source_ip, _source_port}} = :inet.peername(socket)
+    {:ok, request} = recv_http_headers(socket, "")
+    [request_line | _] = String.split(request, "\r\n")
+    ["GET", target, _version] = String.split(request_line, " ")
+    send(parent, {:http_announce_source, source_ip, target})
+
+    body = Bento.encode!(%{"interval" => 1_200, "peers" => <<>>})
+
+    :ok =
+      :gen_tcp.send(
+        socket,
+        "HTTP/1.1 200 OK\r\ncontent-length: #{byte_size(body)}\r\nconnection: close\r\n\r\n#{body}"
+      )
+
+    :gen_tcp.close(socket)
+    :gen_tcp.close(listen)
   end
 
   defp recv_http_headers(socket, acc) do

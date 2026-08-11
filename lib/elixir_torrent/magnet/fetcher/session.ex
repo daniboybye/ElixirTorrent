@@ -3,9 +3,9 @@ defmodule Magnet.Fetcher.Session do
 
   use GenServer
 
-  require Logger
-
   alias Magnet.Fetcher
+
+  require Logger
 
   @type progress :: %{
           round: pos_integer(),
@@ -15,11 +15,12 @@ defmodule Magnet.Fetcher.Session do
           status: String.t()
         }
 
+  @spec start_link({Magnet.t(), pid(), reference()}) :: GenServer.on_start()
   def start_link({%Magnet{} = magnet, caller, ref}) when is_pid(caller) and is_reference(ref) do
     GenServer.start_link(__MODULE__, {magnet, caller, ref})
   end
 
-  @impl true
+  @impl GenServer
   def init({%Magnet{} = magnet, caller, ref}) do
     Process.flag(:trap_exit, true)
     hash_hex = Torrent.hex_encoded_hash(magnet.hash)
@@ -62,7 +63,7 @@ defmodule Magnet.Fetcher.Session do
     end
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:run_round, state) do
     if fetch_expired?(state) do
       hash_hex = Torrent.hex_encoded_hash(state.magnet.hash)
@@ -80,37 +81,7 @@ defmodule Magnet.Fetcher.Session do
 
   def handle_info({:round_result, result}, state) do
     state = %{state | round_worker: nil}
-    round = state.round
-    hash_hex = Torrent.hex_encoded_hash(state.magnet.hash)
-
-    case result do
-      {:ok, path, trackers, private?} ->
-        Logger.info("[magnet_fetch] metadata_ok hash=#{hash_hex} round=#{round}")
-        Fetcher.announce_stopped(state.magnet.hash, trackers)
-
-        if not private? do
-          :ok = Fetcher.announce_dht_for_metadata(state.magnet.hash)
-        end
-
-        :ok = Fetcher.on_metadata_ok(state.magnet, path)
-        notify_done(state, {:ok, path})
-        {:stop, :normal, state}
-
-      {:error, :info_hash_mismatch} ->
-        notify_done(state, {:error, :info_hash_mismatch})
-        {:stop, :normal, state}
-
-      {:error, _reason} ->
-        backoff = Fetcher.round_backoff_ms(round, elem(result, 1))
-
-        Logger.debug(
-          "[magnet_fetch] round_retry hash=#{hash_hex} round=#{round} backoff_ms=#{backoff}"
-        )
-
-        timer = Process.send_after(self(), :run_round, backoff)
-
-        {:noreply, %{state | round_timer: timer}}
-    end
+    handle_round_result(result, state)
   end
 
   def handle_info(
@@ -132,7 +103,7 @@ defmodule Magnet.Fetcher.Session do
     {:noreply, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info({:upgrade_magnet, %Magnet{} = incoming}, state) do
     merged = Magnet.merge_trackers(state.magnet, incoming)
     before = length(state.magnet.trackers)
@@ -145,15 +116,16 @@ defmodule Magnet.Fetcher.Session do
         "[magnet_fetch] upgrade_trackers hash=#{hash_hex} before=#{before} after=#{after_count}"
       )
 
-      state = cancel_round_timer(%{state | magnet: merged, round_timer: nil})
+      cancel_round_timer(state)
+      updated = %{state | magnet: merged, round_timer: nil}
       send(self(), :run_round)
-      {:noreply, state}
+      {:noreply, updated}
     else
       {:noreply, state}
     end
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:cancel, state) do
     cancel_round_timer(state)
     kill_round_worker(state)
@@ -164,7 +136,7 @@ defmodule Magnet.Fetcher.Session do
     {:stop, :normal, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info({:DOWN, _, :process, pid, _}, %{caller: pid} = state) do
     hash_hex = Torrent.hex_encoded_hash(state.magnet.hash)
 
@@ -175,10 +147,47 @@ defmodule Magnet.Fetcher.Session do
     {:noreply, %{state | caller: nil}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(_message, state), do: {:noreply, state}
 
-  @impl true
+  @spec handle_round_result(term(), map()) ::
+          {:stop, :normal, map()} | {:noreply, map()}
+  defp handle_round_result({:ok, path, trackers, private?}, state) do
+    round = state.round
+    hash_hex = Torrent.hex_encoded_hash(state.magnet.hash)
+
+    Logger.info("[magnet_fetch] metadata_ok hash=#{hash_hex} round=#{round}")
+    Fetcher.announce_stopped(state.magnet.hash, trackers)
+
+    if not private? do
+      :ok = Fetcher.announce_dht_for_metadata(state.magnet.hash)
+    end
+
+    :ok = Fetcher.on_metadata_ok(state.magnet, path)
+    notify_done(state, {:ok, path})
+    {:stop, :normal, state}
+  end
+
+  defp handle_round_result({:error, :info_hash_mismatch}, state) do
+    notify_done(state, {:error, :info_hash_mismatch})
+    {:stop, :normal, state}
+  end
+
+  defp handle_round_result({:error, _reason} = result, state) do
+    round = state.round
+    hash_hex = Torrent.hex_encoded_hash(state.magnet.hash)
+    backoff = Fetcher.round_backoff_ms(round, elem(result, 1))
+
+    Logger.debug(
+      "[magnet_fetch] round_retry hash=#{hash_hex} round=#{round} backoff_ms=#{backoff}"
+    )
+
+    timer = Process.send_after(self(), :run_round, backoff)
+
+    {:noreply, %{state | round_timer: timer}}
+  end
+
+  @impl GenServer
   def terminate(_reason, state) do
     cancel_round_timer(state)
     kill_round_worker(state)

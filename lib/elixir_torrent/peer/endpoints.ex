@@ -3,9 +3,9 @@ defmodule Peer.Endpoints do
 
   use GenServer
 
-  require Logger
-
   alias Torrent.Swarm
+
+  require Logger
 
   @table :elixir_torrent_peer_endpoints
   @peer_id_table :elixir_torrent_peer_ids
@@ -14,6 +14,7 @@ defmodule Peer.Endpoints do
   # trade), so back it off to break the connect→drop→re-dial reconnect loop.
   @churn_threshold_ms 30_000
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     %{
       id: __MODULE__,
@@ -21,6 +22,7 @@ defmodule Peer.Endpoints do
     }
   end
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
@@ -69,14 +71,14 @@ defmodule Peer.Endpoints do
     :exit, _ -> []
   end
 
-  @impl true
+  @impl GenServer
   def init(_) do
     table = :ets.new(@table, [:set, :protected, read_concurrency: true])
     peer_ids = :ets.new(@peer_id_table, [:set, :protected, read_concurrency: true])
     {:ok, %{table: table, peer_ids: peer_ids, monitors: %{}}}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call(
         {:claim_peer_id, hash, peer_id, ip, port, pid},
         _,
@@ -112,17 +114,7 @@ defmodule Peer.Endpoints do
         %{table: table, monitors: monitors} = state
       ) do
     key = endpoint_key(hash, ip, port)
-
-    monitors =
-      case :ets.lookup(table, key) do
-        [{^key, old_pid}] when old_pid != pid and is_pid(old_pid) ->
-          if Process.alive?(old_pid), do: Peer.disconnect(old_pid)
-          drop_monitors_for_key(monitors, key)
-
-        _ ->
-          monitors
-      end
-
+    monitors = drop_old_endpoint_monitors(table, monitors, key, pid)
     ref = Process.monitor(pid)
     :ets.insert(table, {key, pid})
     now = System.monotonic_time(:millisecond)
@@ -178,7 +170,7 @@ defmodule Peer.Endpoints do
     {:reply, endpoints, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     case Map.pop(state.monitors, ref) do
       {nil, _} ->
@@ -208,6 +200,18 @@ defmodule Peer.Endpoints do
   @spec endpoint_key(Torrent.hash(), :inet.ip_address(), :inet.port_number()) ::
           {Torrent.hash(), :inet.ip_address(), :inet.port_number()}
   defp endpoint_key(hash, ip, port), do: {hash, ip, port}
+
+  @spec drop_old_endpoint_monitors(:ets.table(), map(), term(), pid()) :: map()
+  defp drop_old_endpoint_monitors(table, monitors, key, pid) do
+    case :ets.lookup(table, key) do
+      [{^key, old_pid}] when old_pid != pid and is_pid(old_pid) ->
+        if Process.alive?(old_pid), do: Peer.disconnect(old_pid)
+        drop_monitors_for_key(monitors, key)
+
+      _ ->
+        monitors
+    end
+  end
 
   @spec drop_peer_id(:ets.table(), {Torrent.hash(), :inet.ip_address(), :inet.port_number()}) ::
           :ok

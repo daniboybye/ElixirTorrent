@@ -10,6 +10,7 @@ defmodule Torrent.Swarm do
 
   require Logger
 
+  @spec child_spec(Torrent.hash()) :: Supervisor.child_spec()
   def child_spec(hash) do
     %{
       id: __MODULE__,
@@ -51,6 +52,7 @@ defmodule Torrent.Swarm do
     do_assign_peer_to_piece?(hash, key, index, active_indices)
   end
 
+  @spec assign_peer_to_piece?(Torrent.hash(), Peer.key(), Torrent.index()) :: boolean()
   def assign_peer_to_piece?(hash, key, index) do
     do_assign_peer_to_piece?(hash, key, index, Downloads.active_indices(hash))
   end
@@ -193,22 +195,31 @@ defmodule Torrent.Swarm do
 
   @spec do_unchoke(Torrent.hash()) :: :ok
   defp do_unchoke(hash) do
-    ranks =
-      hash
-      |> peer_pids()
-      |> Enum.flat_map(&safe_rank/1)
-      |> Enum.sort_by(&elem(&1, 0), &(&2 > &1))
-
+    ranks = sorted_peer_ranks(hash)
     {unchoking, choking} = split_unchoke_slots(ranks)
+    log_unchoke_cycle(hash, unchoking, choking, ranks)
+    apply_choke_cycle(hash, unchoking, choking)
+  end
 
+  defp sorted_peer_ranks(hash) do
+    hash
+    |> peer_pids()
+    |> Enum.flat_map(&safe_rank/1)
+    |> Enum.sort_by(&elem(&1, 0), &(&2 > &1))
+  end
+
+  defp log_unchoke_cycle(hash, unchoking, choking, ranks) do
     if unchoking != [] or choking != [] do
       Logger.debug(
         "[peer_upload] hash=#{Torrent.hex_encoded_hash(hash)} unchoke_cycle unchoking=#{length(unchoking)} choking=#{length(choking)} interested=#{length(ranks)}"
       )
     end
+  end
 
+  defp apply_choke_cycle(hash, unchoking, choking) do
     Enum.each(unchoking, fn {_, id} -> safe_peer_op(fn -> Peer.unchoke(hash, id) end) end)
     Enum.each(choking, fn {_, id} -> safe_peer_op(fn -> Peer.choke(hash, id) end) end)
+    :ok
   end
 
   @spec torrent_offers_pieces?(Torrent.hash()) :: boolean()

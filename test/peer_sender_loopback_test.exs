@@ -2,7 +2,11 @@ defmodule PeerSenderLoopbackTest do
   # Loopback TCP + Registry-backed Sender/Controller stubs; not async-safe.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Magnet.UtMetadata.Extension, as: UtMetadataExtension
+  alias Peer.{HashWire, LTEP}
+  alias Peer.LTEP.Session
   alias PeerWireTest.ControllerCapture
 
   @piece_len Torrent.Downloads.piece_max_length()
@@ -12,6 +16,76 @@ defmodule PeerSenderLoopbackTest do
     {:ok, _} = Application.ensure_all_started(:elixir_torrent)
     Process.flag(:trap_exit, true)
     :ok
+  end
+
+  describe "Peer.LTEP recv_extended via Sender key" do
+    test "returns message id 20, extended id, and payload when Sender is inactive" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = Peer.Sender.deactivate(key)
+      payload = "d2:id1i1ee"
+      wire = LTEP.extended_message_wire(7, payload)
+      assert :ok = :gen_tcp.send(server, wire)
+
+      assert {:ok, 20, 7, ^payload} = LTEP.recv_extended(key, @timeout)
+    end
+
+    test "rejects length prefix below 2 without reading a body" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = Peer.Sender.deactivate(key)
+      assert :ok = :gen_tcp.send(server, <<1::32>>)
+      assert {:error, :invalid_message} = LTEP.recv_extended(key, @timeout)
+    end
+
+    test "rejects length prefix above max_message_size without reading a body" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = Peer.Sender.deactivate(key)
+      oversized = LTEP.max_message_size() + 1
+      assert :ok = :gen_tcp.send(server, <<oversized::32>>)
+      assert {:error, :invalid_message} = LTEP.recv_extended(key, @timeout)
+    end
+  end
+
+  describe "Peer.LTEP handshake_exchange via Sender key" do
+    test "merges peer handshake after optional preamble wire messages" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = Peer.Sender.deactivate(key)
+
+      exchange =
+        Task.async(fn ->
+          LTEP.handshake_exchange(key, Session.new([UtMetadataExtension]), timeout: @timeout)
+        end)
+
+      assert {:ok, <<len::32>>} = :gen_tcp.recv(server, 4, @timeout)
+      assert {:ok, our_hs_msg} = :gen_tcp.recv(server, len, @timeout)
+      assert <<20, 0, _our_hs::binary>> = our_hs_msg
+
+      assert :ok = :gen_tcp.send(server, frame_payload(<<0>>))
+
+      peer_hs =
+        Bento.encode!(%{
+          "m" => %{"ut_metadata" => 4},
+          "metadata_size" => 1024,
+          "v" => "loopback"
+        })
+
+      assert :ok = :gen_tcp.send(server, LTEP.extended_message_wire(0, peer_hs))
+
+      assert {:ok, session} = Task.await(exchange, @timeout)
+      assert Session.peer_extension_id(session, "ut_metadata") == 4
+      assert Session.peer_handshake(session).metadata_size == 1024
+    end
   end
 
   describe "inbound wire framing and dispatch (active TCP)" do
@@ -400,8 +474,10 @@ defmodule PeerSenderLoopbackTest do
 
       # Declares a 10-byte piece body but only 2 bytes ever arrive -- the frame never
       # completes, mirroring a peer trickling a near-ceiling frame in one byte at a time.
-      assert :ok = :gen_tcp.send(server, <<0, 0, 0, 10, 7, 0>>)
-      state = await_state(sender_pid, &is_reference(&1.frame_stall_ref))
+      state =
+        send_tcp_and_sync_sender(server, client, sender_pid, <<0, 0, 0, 10, 7, 0>>)
+
+      assert is_reference(state.frame_stall_ref)
 
       down_ref = Process.monitor(sender_pid)
       send(sender_pid, {:frame_stall, state.frame_stall_ref})
@@ -415,14 +491,15 @@ defmodule PeerSenderLoopbackTest do
 
       on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
 
-      assert :ok = :gen_tcp.send(server, <<0, 0, 0, 10, 7, 0>>)
-      state = await_state(sender_pid, &is_reference(&1.frame_stall_ref))
+      state =
+        send_tcp_and_sync_sender(server, client, sender_pid, <<0, 0, 0, 10, 7, 0>>)
+
+      assert is_reference(state.frame_stall_ref)
       ref = state.frame_stall_ref
 
       # More dribble for the SAME frame -- still incomplete afterwards.
-      assert :ok = :gen_tcp.send(server, <<0, 0>>)
-
-      state2 = await_state(sender_pid, &(byte_size(&1.buffer) == byte_size(state.buffer) + 2))
+      state2 = send_tcp_and_sync_sender(server, client, sender_pid, <<0, 0>>)
+      assert byte_size(state2.buffer) == byte_size(state.buffer) + 2
       assert state2.frame_stall_ref == ref
 
       # The watchdog scheduled on the FIRST delivery still fires and disconnects the
@@ -443,14 +520,17 @@ defmodule PeerSenderLoopbackTest do
       # at first. (Not a `piece` frame here: completing one calls into
       # Peer.Controller.valid_piece_block?/4, which needs a live Torrent.Model this
       # loopback harness never starts.)
-      assert :ok = :gen_tcp.send(server, <<0, 0, 0, 5, 4, 0>>)
-      await_state(sender_pid, &is_reference(&1.frame_stall_ref))
+      state =
+        send_tcp_and_sync_sender(server, client, sender_pid, <<0, 0, 0, 5, 4, 0>>)
+
+      assert is_reference(state.frame_stall_ref)
 
       assert :ok = :gen_tcp.send(server, <<0, 0, 0>>)
       assert_receive {:controller, :handle_have, [0]}, @timeout
 
-      state = await_state(sender_pid, &is_nil(&1.frame_stall_ref))
-      assert state.buffer == <<>>
+      completed_state = :sys.get_state(sender_pid)
+      assert completed_state.frame_stall_ref == nil
+      assert completed_state.buffer == <<>>
       assert Process.alive?(sender_pid)
     end
 
@@ -493,6 +573,66 @@ defmodule PeerSenderLoopbackTest do
 
       assert :ok = Peer.Sender.allowed_fast(key, 2)
       assert wire_message(server) == <<0x11, 2::32>>
+    end
+
+    test "public wrappers and full BEP 3/6/52 outbound matrix" do
+      hash = :crypto.strong_rand_bytes(20)
+      id = :crypto.strong_rand_bytes(20)
+      {client, server, listen, key, sender_pid} = start_sender_pair(hash, id)
+      bitfield = <<0xC0>>
+      block = :crypto.strong_rand_bytes(64)
+      root = :crypto.strong_rand_bytes(32)
+
+      req = %HashWire{
+        pieces_root: root,
+        base_layer: 0,
+        index: 0,
+        length: 2,
+        proof_layers: 1
+      }
+
+      req_body = HashWire.encode_request(req)
+      digests = :crypto.strong_rand_bytes(96)
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      start_bitfield_model(hash, bitfield)
+
+      assert :ok = Peer.Sender.interested(key, false)
+      assert wire_message(server) == <<3>>
+
+      assert :ok = Peer.Sender.choke(key)
+      assert wire_message(server) == <<0>>
+
+      assert :ok = Peer.Sender.have_all(key)
+      assert wire_message(server) == <<0x0E>>
+
+      assert :ok = Peer.Sender.have_none(key)
+      assert wire_message(server) == <<0x0F>>
+
+      assert :ok = Peer.Sender.bitfield(key)
+      assert wire_message(server) == <<5, bitfield::binary>>
+
+      assert :ok = Peer.Sender.piece(key, 1, 128, block)
+      assert wire_message(server) == <<7, 1::32, 128::32, block::binary>>
+
+      assert :ok = Peer.Sender.cancel(key, 2, 0, @piece_len)
+      assert wire_message(server) == <<8, 2::32, 0::32, @piece_len::32>>
+
+      assert :ok = Peer.Sender.port(key, 6881)
+      assert wire_message(server) == <<9, 6881::16>>
+
+      assert :ok = Peer.Sender.suggest_piece(key, 3)
+      assert wire_message(server) == <<0x0D, 3::32>>
+
+      assert :ok = Peer.Sender.hash_request(key, req)
+      assert wire_message(server) == <<21, req_body::binary>>
+
+      assert :ok = Peer.Sender.hashes(key, req, digests)
+      assert wire_message(server) == <<22, req_body::binary, digests::binary>>
+
+      assert :ok = Peer.Sender.hash_reject(key, req)
+      assert wire_message(server) == <<23, req_body::binary>>
     end
 
     test "send_operations batches choke, not_interested, and cancel" do
@@ -556,14 +696,232 @@ defmodule PeerSenderLoopbackTest do
       assert :ok = Peer.Sender.socket_send_raw(key, raw)
       assert {:ok, ^raw} = :gen_tcp.recv(server, byte_size(raw), @timeout)
     end
+
+    test "deactivate on an already inactive Sender is idempotent" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = Peer.Sender.deactivate(key)
+      assert :ok = Peer.Sender.deactivate(key)
+      assert Process.alive?(sender_pid)
+    end
+
+    test "inactive socket_recv stitches partial kernel and follow-up reads" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = Peer.Sender.deactivate(key)
+      assert :ok = :gen_tcp.send(server, <<1, 2, 3, 4>>)
+
+      recv_task =
+        Task.async(fn ->
+          Peer.Sender.socket_recv(key, 10, @timeout)
+        end)
+
+      assert :ok = :gen_tcp.send(server, <<5, 6, 7, 8, 9, 10>>)
+      assert {:ok, <<1, 2, 3, 4, 5, 6, 7, 8, 9, 10>>} = Task.await(recv_task, @timeout)
+    end
+
+    test "socket_recv on a stopped Sender returns noproc" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      TestSupport.Sync.safe_stop(sender_pid, 500)
+      assert {:error, :noproc} = Peer.Sender.socket_recv(key, 4, 100)
+    end
+  end
+
+  describe "socket lifecycle and transport error branches" do
+    test "activate surfaces setopts errors on a closed socket" do
+      {client, server, listen, key, sender_pid} = start_inactive_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      :gen_tcp.close(client)
+
+      assert {:error, activate_reason} = Peer.Sender.activate(key)
+      assert is_atom(activate_reason)
+      assert :ok = Peer.Sender.deactivate(key)
+    end
+
+    test "deactivate returns setopts error after the socket was closed while active" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      :gen_tcp.close(client)
+
+      assert {:error, reason} = Peer.Sender.deactivate(key)
+      assert is_atom(reason)
+    end
+
+    test "GenServer timeout emits a zero-byte keepalive frame" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      send(sender_pid, :timeout)
+      assert {:ok, <<0, 0, 0, 0>>} = :gen_tcp.recv(server, 4, @timeout)
+    end
+
+    test "tcp_error stops the Sender with connection_closed" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      ref = Process.monitor(sender_pid)
+      send(sender_pid, {:tcp_error, client, :econnreset})
+
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :connection_closed}},
+                     @timeout
+    end
+
+    test "outbound send stops cleanly when the peer socket is closed" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      :gen_tcp.close(client)
+      ref = Process.monitor(sender_pid)
+      assert :ok = Peer.Sender.unchoke(key)
+
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, :normal}, @timeout
+    end
+
+    test "send_operations stops cleanly when the socket is already closed" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      :gen_tcp.close(server)
+      ref = Process.monitor(sender_pid)
+
+      assert :ok =
+               Peer.Sender.send_operations(key, [
+                 :choke,
+                 :not_interested,
+                 {:cancel, 0, 0, @piece_len}
+               ])
+
+      # Both reasons are correct here: the sender may observe the already-closed
+      # socket before or after it processes the stop, so it exits :normal or
+      # tears the connection down with {:shutdown, :connection_closed}.
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, reason}, @timeout
+      assert reason in [:normal, {:shutdown, :connection_closed}]
+    end
+
+    test "abnormal terminate logs a warning" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      log =
+        capture_log([level: :warning], fn ->
+          ref = Process.monitor(sender_pid)
+          assert :ok = GenServer.stop(sender_pid, {:error, :coverage_test}, 5_000)
+          assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:error, :coverage_test}}, @timeout
+        end)
+
+      assert log =~ "[peer_sender]"
+      assert log =~ "coverage_test"
+    end
+
+    test "inactive mode buffers tcp deliveries without dispatching to Controller" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = Peer.Sender.deactivate(key)
+      assert :ok = :gen_tcp.send(server, frame_payload(<<2>>))
+      TestSupport.Sync.sync(sender_pid)
+      refute_received {:controller, _, _}
+
+      assert {:ok, <<0, 0, 0, 1, 2>>} = Peer.Sender.socket_recv(key, 5, @timeout)
+    end
+  end
+
+  describe "inbound parse edge cases" do
+    test "zero-length wire frame is ignored and connection stays up" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = :gen_tcp.send(server, <<0, 0, 0, 0>>)
+      TestSupport.Sync.sync(sender_pid)
+      assert Process.alive?(sender_pid)
+
+      assert :ok = :gen_tcp.send(server, frame_payload(<<1>>))
+      assert_receive {:controller, :handle_unchoke, []}, @timeout
+    end
+
+    test "inbound piece dispatches to Controller with exact index/begin/block" do
+      hash = :crypto.strong_rand_bytes(20)
+      id = :crypto.strong_rand_bytes(20)
+      {client, server, listen, key, sender_pid} = start_sender_pair(hash, id)
+      block = :crypto.strong_rand_bytes(128)
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      start_downloads_model(hash, 4)
+
+      assert :ok =
+               :gen_tcp.send(
+                 server,
+                 frame_payload(<<7, 2::32, 64::32, block::binary>>)
+               )
+
+      assert_receive {:controller, :handle_piece, [2, 64, 128]}, @timeout
+    end
+
+    test "malformed BEP 52 hash_request body is a protocol error" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = :gen_tcp.send(server, frame_payload(<<21, 0::160>>))
+
+      ref = Process.monitor(sender_pid)
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
+    end
+
+    test "malformed BEP 52 hash_reject body is a protocol error" do
+      {client, server, listen, key, sender_pid} = start_sender_pair()
+
+      on_exit(fn -> cleanup(client, server, listen, sender_pid, key) end)
+
+      assert :ok = :gen_tcp.send(server, frame_payload(<<23, 0::160>>))
+
+      ref = Process.monitor(sender_pid)
+      assert_receive {:DOWN, ^ref, :process, ^sender_pid, {:shutdown, :protocol_error}}, @timeout
+    end
   end
 
   ## helpers -----------------------------------------------------------------
 
-  defp start_sender_pair do
+  defp start_sender_pair(hash \\ nil, id \\ nil) do
+    {client, server, listen} = loopback_sockets()
+    hash = hash || :crypto.strong_rand_bytes(20)
+    id = id || :crypto.strong_rand_bytes(20)
+    start_sender_pair_with_sockets(client, server, listen, hash, id)
+  end
+
+  defp start_inactive_sender_pair do
     {client, server, listen} = loopback_sockets()
     hash = :crypto.strong_rand_bytes(20)
     id = :crypto.strong_rand_bytes(20)
+    key = Peer.make_key(hash, id)
+
+    assert {:ok, _capture} = ControllerCapture.start_link(key, self())
+    assert {:ok, sender_pid} = Peer.Sender.start_link([hash, id, client])
+    assert :ok = Peer.Transport.controlling_process(client, sender_pid)
+
+    {client, server, listen, key, sender_pid}
+  end
+
+  defp start_sender_pair_with_sockets(client, server, listen, hash, id) do
     key = Peer.make_key(hash, id)
 
     assert {:ok, _capture} = ControllerCapture.start_link(key, self())
@@ -574,15 +932,60 @@ defmodule PeerSenderLoopbackTest do
     {client, server, listen, key, sender_pid}
   end
 
+  defp start_bitfield_model(hash, bitfield) do
+    torrent = %Torrent{
+      hash: hash,
+      metadata: %{"info" => %{"name" => "sender-bitfield", "piece length" => @piece_len}},
+      left: @piece_len,
+      last_index: 0,
+      last_piece_length: @piece_len,
+      bitfield: bitfield
+    }
+
+    {:ok, model} = Torrent.Model.start_link(torrent)
+
+    on_exit(fn ->
+      TestSupport.Sync.safe_stop(model, 500)
+    end)
+
+    :ok
+  end
+
+  defp start_downloads_model(hash, pieces_count) do
+    torrent = %Torrent{
+      hash: hash,
+      metadata: %{"info" => %{"name" => "sender-piece", "piece length" => @piece_len}},
+      left: pieces_count * @piece_len,
+      last_index: pieces_count - 1,
+      last_piece_length: @piece_len,
+      bitfield: Torrent.Bitfield.make(pieces_count)
+    }
+
+    {:ok, model} = Torrent.Model.start_link(torrent)
+
+    on_exit(fn ->
+      TestSupport.Sync.safe_stop(model, 500)
+    end)
+
+    :ok
+  end
+
   defp loopback_sockets do
     {:ok, listen} =
       :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
 
     {:ok, port} = :inet.port(listen)
-    parent = self()
+    spawn_loopback_acceptor(listen, self(), @timeout)
 
+    {:ok, client} =
+      :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], @timeout)
+
+    await_loopback_server(client, listen, @timeout)
+  end
+
+  defp spawn_loopback_acceptor(listen, parent, timeout) do
     spawn(fn ->
-      case :gen_tcp.accept(listen, @timeout) do
+      case :gen_tcp.accept(listen, timeout) do
         {:ok, server} ->
           _ = :gen_tcp.controlling_process(server, parent)
           send(parent, {:loopback_server, server})
@@ -591,10 +994,9 @@ defmodule PeerSenderLoopbackTest do
           send(parent, {:loopback_accept_error, error})
       end
     end)
+  end
 
-    {:ok, client} =
-      :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], @timeout)
-
+  defp await_loopback_server(client, listen, timeout) do
     receive do
       {:loopback_server, server} ->
         {client, server, listen}
@@ -604,7 +1006,7 @@ defmodule PeerSenderLoopbackTest do
         :gen_tcp.close(listen)
         flunk("accept failed: #{inspect(error)}")
     after
-      @timeout -> flunk("accept timed out")
+      timeout -> flunk("accept timed out")
     end
   end
 
@@ -612,22 +1014,12 @@ defmodule PeerSenderLoopbackTest do
     <<byte_size(body)::32, body::binary>>
   end
 
-  # TCP delivery into the Sender's mailbox is async, so a bare :sys.get_state right
-  # after :gen_tcp.send can race ahead of it. Poll instead of asserting on one read.
-  defp await_state(pid, pred, deadline \\ System.monotonic_time(:millisecond) + 2_000) do
-    state = :sys.get_state(pid)
-
-    cond do
-      pred.(state) ->
-        state
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        flunk("condition not met before timeout, last state: #{inspect(state)}")
-
-      true ->
-        Process.sleep(5)
-        await_state(pid, pred, deadline)
-    end
+  defp send_tcp_and_sync_sender(server, client, sender_pid, data) do
+    1 = :erlang.trace(sender_pid, true, [:receive])
+    assert :ok = :gen_tcp.send(server, data)
+    assert_receive {:trace, ^sender_pid, :receive, {:tcp, ^client, ^data}}, @timeout
+    _ = :erlang.trace(sender_pid, false, [:receive])
+    :sys.get_state(sender_pid)
   end
 
   defp wire_message(server) do
@@ -672,27 +1064,5 @@ defmodule PeerSenderLoopbackTest do
     after
       0 -> :ok
     end
-  end
-end
-
-defmodule PeerWireTest.ControllerCapture do
-  @moduledoc false
-  use GenServer
-
-  def start_link(key, test_pid) do
-    GenServer.start_link(__MODULE__, {key, test_pid},
-      name: {:via, Registry, {Registry, {key, Peer.Controller}}}
-    )
-  end
-
-  def whereis(key), do: GenServer.whereis({:via, Registry, {Registry, {key, Peer.Controller}}})
-
-  @impl true
-  def init({key, test_pid}), do: {:ok, {key, test_pid}}
-
-  @impl true
-  def handle_cast({fun, args}, {key, test_pid}) when is_atom(fun) and is_list(args) do
-    send(test_pid, {:controller, fun, args})
-    {:noreply, {key, test_pid}}
   end
 end

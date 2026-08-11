@@ -37,7 +37,7 @@ defmodule Torrent.Session do
       if File.regular?(file) do
         file
         |> File.read!()
-        |> :erlang.binary_to_term()
+        |> :erlang.binary_to_term([:safe])
         |> then(&{:ok, &1})
       else
         :error

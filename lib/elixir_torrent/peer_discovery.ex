@@ -14,6 +14,7 @@ defmodule PeerDiscovery do
 
   require Logger
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     children = [
       {
@@ -42,6 +43,7 @@ defmodule PeerDiscovery do
     }
   end
 
+  @spec register(pid(), Torrent.t()) :: DynamicSupervisor.on_start_child()
   def register(pid, torrent) do
     DynamicSupervisor.start_child(
       AnnouncesSupervisor,

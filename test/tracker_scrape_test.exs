@@ -46,5 +46,12 @@ defmodule TrackerScrapeTest do
       hash = :crypto.strong_rand_bytes(20)
       assert %Tracker.Error{reason: :not_scrapeable} = Tracker.scrape("ftp://x/announce", hash)
     end
+
+    test "UDP scrape returns DNS error for unresolvable host without network I/O hang" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      assert %Tracker.Error{reason: {:dns, _host, _reason}, retry_in: "never"} =
+               Tracker.scrape("udp://dead-tracker.invalid/announce", hash)
+    end
   end
 end

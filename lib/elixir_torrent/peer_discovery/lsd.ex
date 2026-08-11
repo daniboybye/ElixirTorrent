@@ -16,9 +16,9 @@ defmodule PeerDiscovery.LSD do
 
   use GenServer
 
-  require Logger
-
   alias PeerDiscovery.Announce
+
+  require Logger
 
   # BEP 14 § "Discovery" — well-known multicast groups and port. TTL 4 keeps
   # the packet inside the local administrative zone (default was 1, which
@@ -38,11 +38,12 @@ defmodule PeerDiscovery.LSD do
   # (each Infohash line is ~50 bytes; 20 hashes ≈ 1 KB payload).
   @max_hashes_per_message 20
 
+  @spec start_link(term()) :: GenServer.on_start()
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, [], name: __MODULE__)
   end
 
-  @impl true
+  @impl GenServer
   def init(_) do
     # Random cookie lets us drop the multicast loopback of our own messages
     # without a race-prone source-address check (the wire header claims what
@@ -68,7 +69,7 @@ defmodule PeerDiscovery.LSD do
     {:ok, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:announce, state) do
     state = refresh_interfaces(state)
 
@@ -93,7 +94,7 @@ defmodule PeerDiscovery.LSD do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
-  @impl true
+  @impl GenServer
   def terminate(_reason, %{sockets: sockets}) do
     close_sockets(sockets)
     :ok

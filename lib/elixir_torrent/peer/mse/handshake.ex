@@ -23,8 +23,7 @@ defmodule Peer.MSE.Handshake do
 
   import Bitwise, only: [|||: 2]
 
-  alias Peer.MSE
-  alias Peer.Transport
+  alias Peer.{MSE, Transport}
 
   @max_pad 512
   # Bound the pre-sync scan so a hostile or mismatched peer can't make us read forever.
@@ -139,20 +138,38 @@ defmodule Peer.MSE.Handshake do
     # `prefix` is any bytes of Ya already consumed while sniffing plaintext-vs-MSE.
     # Step 2 (Yb + PadB) must go out before we block reading step 3, otherwise
     # both sides wait for each other (the initiator holds step 3 until it has Yb).
-    with {:ok, rest} <- recv_exact(socket, MSE.key_len() - byte_size(prefix), timeout),
-         ya = prefix <> rest,
+    with {:ok, ya} <- recv_initiator_public_key(socket, prefix, timeout),
          :ok <- Transport.send(socket, [keys.public, pad()]) do
-      s = MSE.shared_secret(ya, keys.private)
+      respond_after_yb(socket, keys, ya, resolve, timeout)
+    end
+  end
 
-      # Sync on the cleartext HASH('req1', S), skipping PadA.
-      with :ok <- scan_for(socket, MSE.req1(s), timeout),
-           {:ok, req2_3} <- recv_exact(socket, 20, timeout),
-           info_hash when is_binary(info_hash) <- resolve.(s, req2_3) do
-        finish_respond(socket, s, info_hash, timeout)
-      else
-        nil -> {:error, :unknown_info_hash}
-        {:error, _} = error -> error
-      end
+  @spec recv_initiator_public_key(Transport.socket(), binary(), timeout()) ::
+          {:ok, binary()} | {:error, term()}
+  defp recv_initiator_public_key(socket, prefix, timeout) do
+    with {:ok, rest} <- recv_exact(socket, MSE.key_len() - byte_size(prefix), timeout) do
+      {:ok, prefix <> rest}
+    end
+  end
+
+  @spec respond_after_yb(
+          Transport.socket(),
+          term(),
+          binary(),
+          (binary(), binary() -> Torrent.hash() | nil),
+          timeout()
+        ) :: {:ok, result()} | {:error, term()}
+  defp respond_after_yb(socket, keys, ya, resolve, timeout) do
+    s = MSE.shared_secret(ya, keys.private)
+
+    # Sync on the cleartext HASH('req1', S), skipping PadA.
+    with :ok <- scan_for(socket, MSE.req1(s), timeout),
+         {:ok, req2_3} <- recv_exact(socket, 20, timeout),
+         info_hash when is_binary(info_hash) <- resolve.(s, req2_3) do
+      finish_respond(socket, s, info_hash, timeout)
+    else
+      nil -> {:error, :unknown_info_hash}
+      {:error, _} = error -> error
     end
   end
 

@@ -105,6 +105,28 @@ defmodule UTP.Packet do
 
   @spec decode(binary()) :: {:ok, t(), binary(), [extension()]} | {:error, decode_error()}
   def decode(data) when byte_size(data) >= @header_size do
+    {type_ver, extension, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr, rest} =
+      parse_header_bytes(data)
+
+    with {:ok, version} <- version_ok(type_ver),
+         {:ok, extensions, payload} <- decode_extensions(extension, rest) do
+      header =
+        build_header(
+          {type_ver, extension, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr},
+          version,
+          extensions
+        )
+
+      {:ok, header, payload, extensions}
+    end
+  end
+
+  def decode(_), do: {:error, :too_short}
+
+  @spec parse_header_bytes(binary()) ::
+          {byte(), byte(), 0..65_535, 0..4_294_967_295, 0..4_294_967_295, 0..4_294_967_295,
+           0..65_535, 0..65_535, binary()}
+  defp parse_header_bytes(data) do
     <<
       type_ver,
       extension,
@@ -118,26 +140,39 @@ defmodule UTP.Packet do
 
     rest = binary_part(data, @header_size, byte_size(data) - @header_size)
 
-    with {:ok, version} <- version_ok(type_ver),
-         {:ok, extensions, payload} <- decode_extensions(extension, rest) do
-      header = %__MODULE__{
-        type: type(type_ver),
-        version: version,
-        extension: extension,
-        conn_id: conn_id,
-        timestamp: timestamp,
-        timestamp_difference: timestamp_diff,
-        wnd_size: wnd_size,
-        seq_nr: seq_nr,
-        ack_nr: ack_nr,
-        extensions: extensions
-      }
-
-      {:ok, header, payload, extensions}
-    end
+    {type_ver, extension, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr, rest}
   end
 
-  def decode(_), do: {:error, :too_short}
+  @type parsed_header :: {
+          byte(),
+          byte(),
+          0..65_535,
+          0..4_294_967_295,
+          0..4_294_967_295,
+          0..4_294_967_295,
+          0..65_535,
+          0..65_535
+        }
+
+  @spec build_header(parsed_header(), byte(), [extension()]) :: t()
+  defp build_header(
+         {type_ver, extension, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr},
+         version,
+         extensions
+       ) do
+    %__MODULE__{
+      type: type(type_ver),
+      version: version,
+      extension: extension,
+      conn_id: conn_id,
+      timestamp: timestamp,
+      timestamp_difference: timestamp_diff,
+      wnd_size: wnd_size,
+      seq_nr: seq_nr,
+      ack_nr: ack_nr,
+      extensions: extensions
+    }
+  end
 
   @spec selective_ack_acks(t(), [extension()]) :: [0..65_535]
   def selective_ack_acks(%__MODULE__{ack_nr: ack_nr}, extensions) do
@@ -151,21 +186,30 @@ defmodule UTP.Packet do
   @spec parse_selective_ack(0..65_535, binary()) :: [0..65_535]
   def parse_selective_ack(ack_nr, bitmask) when is_binary(bitmask) do
     bitmask
-    |> :binary.bin_to_list()
-    |> Enum.with_index()
-    |> Enum.flat_map(fn {byte, byte_idx} ->
-      sack_byte_seqs(ack_nr, byte, byte_idx)
-    end)
+    |> parse_selective_ack_bytes(ack_nr, 0, [])
+    |> Enum.reverse()
   end
 
-  defp sack_byte_seqs(ack_nr, byte, byte_idx) do
-    Enum.flat_map(0..7, fn bit_idx ->
+  defp parse_selective_ack_bytes(<<>>, _ack_nr, _byte_idx, acc), do: acc
+
+  defp parse_selective_ack_bytes(<<byte, rest::binary>>, ack_nr, byte_idx, acc) do
+    acc = parse_selective_ack_bits(byte, ack_nr, byte_idx, 0, acc)
+    parse_selective_ack_bytes(rest, ack_nr, byte_idx + 1, acc)
+  end
+
+  # uTP SACK bitmask: bytes in order, bits LSB-first within each byte; offsets
+  # wrap at 16 bits via seq_add/2.
+  defp parse_selective_ack_bits(_byte, _ack_nr, _byte_idx, 8, acc), do: acc
+
+  defp parse_selective_ack_bits(byte, ack_nr, byte_idx, bit_idx, acc) do
+    acc =
       if Bitwise.band(byte, Bitwise.bsl(1, bit_idx)) != 0 do
-        [seq_add(ack_nr, 2 + byte_idx * 8 + bit_idx)]
+        [seq_add(ack_nr, 2 + byte_idx * 8 + bit_idx) | acc]
       else
-        []
+        acc
       end
-    end)
+
+    parse_selective_ack_bits(byte, ack_nr, byte_idx, bit_idx + 1, acc)
   end
 
   @spec seq_add(0..65_535, integer()) :: 0..65_535

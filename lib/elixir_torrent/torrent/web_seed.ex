@@ -38,9 +38,9 @@ defmodule Torrent.WebSeed do
   use GenServer
   use Via
 
-  require Logger
-
   alias Torrent.{Bitfield, Downloads, FileHandle, Model, Swarm}
+
+  require Logger
 
   # Bound on concurrent piece fetches — webseeds are a background source,
   # not a stampede. Each in-flight piece opens one direct hackney connection
@@ -82,7 +82,7 @@ defmodule Torrent.WebSeed do
     GenServer.start_link(__MODULE__, hash, name: via(hash))
   end
 
-  @impl true
+  @impl GenServer
   def init(hash) do
     case load_config(hash) do
       {:ok, state} ->
@@ -101,7 +101,7 @@ defmodule Torrent.WebSeed do
     end
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:tick, %__MODULE__{} = state) do
     state = maybe_pick(state)
     Process.send_after(self(), :tick, @tick_ms)
@@ -202,15 +202,16 @@ defmodule Torrent.WebSeed do
   defp eligible_url(%__MODULE__{urls: urls, url_state: st, disabled_urls: disabled_urls}) do
     now = System.monotonic_time(:millisecond)
 
-    urls
-    |> Enum.filter(fn url ->
-      not MapSet.member?(disabled_urls, url) and
-        case Map.get(st, url) do
-          nil -> true
-          %{next_ok_at_ms: t} -> t <= now
-        end
-    end)
-    |> case do
+    candidates =
+      Enum.filter(urls, fn url ->
+        not MapSet.member?(disabled_urls, url) and
+          case Map.get(st, url) do
+            nil -> true
+            %{next_ok_at_ms: t} -> t <= now
+          end
+      end)
+
+    case candidates do
       [] -> nil
       list -> Enum.random(list)
     end
@@ -221,7 +222,11 @@ defmodule Torrent.WebSeed do
   # peer swarm already handles rarest-first; webseeds fill in.
   defp pick_index(%__MODULE__{hash: hash, last_index: last_index, tasks: tasks}) do
     bitfield = Model.get(hash, :bitfield)
-    in_flight = tasks |> Map.values() |> MapSet.new(fn {_ref, index, _url} -> index end)
+
+    in_flight =
+      tasks
+      |> Map.values()
+      |> MapSet.new(fn {_ref, index, _url} -> index end)
 
     Enum.find(0..last_index, fn index ->
       not Bitfield.have?(bitfield, index) and
@@ -290,8 +295,9 @@ defmodule Torrent.WebSeed do
   defp fetch_range(%__MODULE__{info: info} = state, url, begin_byte, end_byte, expected_len) do
     segments = span_files(info, begin_byte, end_byte)
 
-    do_fetch_segments(state, url, segments, [])
-    |> case do
+    result = do_fetch_segments(state, url, segments, [])
+
+    case result do
       {:ok, iodata} ->
         actual_len = IO.iodata_length(iodata)
 
@@ -315,9 +321,18 @@ defmodule Torrent.WebSeed do
          acc
        ) do
     file_url = file_url(state, url, path)
-
     range_hdr = "bytes=#{offset}-#{offset + length - 1}"
 
+    case fetch_segment_range(file_url, range_hdr, length) do
+      {:ok, body} ->
+        do_fetch_segments(state, url, rest, [body | acc])
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp fetch_segment_range(file_url, range_hdr, length) do
     http_opts = [
       timeout: @request_timeout_ms,
       recv_timeout: @recv_timeout_ms,
@@ -329,7 +344,7 @@ defmodule Torrent.WebSeed do
     case HTTPoison.get(file_url, [{"Range", range_hdr}, {"Accept", "*/*"}], http_opts) do
       {:ok, %HTTPoison.Response{status_code: code, body: body}} when code in [200, 206] ->
         if byte_size(body) == length do
-          do_fetch_segments(state, url, rest, [body | acc])
+          {:ok, body}
         else
           {:error, {:segment_short, byte_size(body), length}}
         end
@@ -362,29 +377,36 @@ defmodule Torrent.WebSeed do
   end
 
   def span_files(%{"files" => files}, begin_byte, end_byte) do
-    {segments, _} =
-      Enum.reduce(files, {[], 0}, fn %{"length" => file_len, "path" => path}, {acc, cursor} ->
-        file_begin = cursor
-        file_end = cursor + file_len - 1
-        cursor = cursor + file_len
+    files
+    |> Enum.reduce({[], 0}, &accumulate_file_span(&1, &2, begin_byte, end_byte))
+    |> elem(0)
+    |> Enum.reverse()
+  end
 
-        cond do
-          file_end < begin_byte ->
-            {acc, cursor}
+  defp accumulate_file_span(
+         %{"length" => file_len, "path" => path},
+         {acc, cursor},
+         begin_byte,
+         end_byte
+       ) do
+    file_begin = cursor
+    file_end = cursor + file_len - 1
+    cursor = cursor + file_len
 
-          file_begin > end_byte ->
-            {acc, cursor}
+    cond do
+      file_end < begin_byte ->
+        {acc, cursor}
 
-          true ->
-            overlap_begin = max(begin_byte, file_begin)
-            overlap_end = min(end_byte, file_end)
-            offset = overlap_begin - file_begin
-            length = overlap_end - overlap_begin + 1
-            {[%{path: path, offset: offset, length: length} | acc], cursor}
-        end
-      end)
+      file_begin > end_byte ->
+        {acc, cursor}
 
-    Enum.reverse(segments)
+      true ->
+        overlap_begin = max(begin_byte, file_begin)
+        overlap_end = min(end_byte, file_end)
+        offset = overlap_begin - file_begin
+        length = overlap_end - overlap_begin + 1
+        {[%{path: path, offset: offset, length: length} | acc], cursor}
+    end
   end
 
   # Compute the per-file URL. Path segments are URL-encoded; slashes join.

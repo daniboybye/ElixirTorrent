@@ -649,7 +649,12 @@ defmodule TorrentStorageCoverageBatchTest do
     test "sort_peers_seeders_first ranks seeders ahead of leechers" do
       hash = :crypto.strong_rand_bytes(20)
       torrent = endgame_torrent(hash)
-      seeder_bf = Bitfield.make(4) |> Bitfield.set(0, 1) |> Bitfield.set(1, 1)
+
+      seeder_bf =
+        Bitfield.make(4)
+        |> Bitfield.set(0, 1)
+        |> Bitfield.set(1, 1)
+
       leech_bf = Bitfield.make(4) |> Bitfield.set(0, 1)
 
       with_model(torrent, fn _ ->
@@ -696,7 +701,10 @@ defmodule TorrentStorageCoverageBatchTest do
         downloaded: 2 * 16_384,
         last_index: 1,
         last_piece_length: 16_384,
-        bitfield: Bitfield.make(2) |> Bitfield.set(0, 1) |> Bitfield.set(1, 1),
+        bitfield:
+          Bitfield.make(2)
+          |> Bitfield.set(0, 1)
+          |> Bitfield.set(1, 1),
         peer_status: nil
       }
 
@@ -934,11 +942,19 @@ defmodule TorrentStorageCoverageBatchTest do
   defp random_piece, do: :crypto.strong_rand_bytes(@piece_len)
 
   defp build_tiny_torrent(piece_bins, opts \\ []) do
-    piece_bins =
-      Enum.map(piece_bins, fn bin ->
-        if byte_size(bin) == @piece_len, do: bin, else: pad_piece(bin)
-      end)
+    piece_bins = normalize_piece_bins(piece_bins)
+    {info_map, info_blob, hash} = build_tiny_info(piece_bins, opts)
+    torrent = build_tiny_torrent_struct(info_map, info_blob, hash, piece_bins, opts)
+    {torrent, piece_bins}
+  end
 
+  defp normalize_piece_bins(piece_bins) do
+    Enum.map(piece_bins, fn bin ->
+      if byte_size(bin) == @piece_len, do: bin, else: pad_piece(bin)
+    end)
+  end
+
+  defp build_tiny_info(piece_bins, opts) do
     pieces_hash =
       piece_bins
       |> Enum.map(fn bin -> :crypto.hash(:sha, bin) end)
@@ -955,6 +971,11 @@ defmodule TorrentStorageCoverageBatchTest do
 
     info_blob = Bento.encode!(info_map)
     hash = Keyword.get(opts, :hash, :crypto.hash(:sha, info_blob))
+    {info_map, info_blob, hash}
+  end
+
+  defp build_tiny_torrent_struct(info_map, info_blob, hash, piece_bins, opts) do
+    total_len = length(piece_bins) * @piece_len
 
     metadata =
       %{"info" => info_map}
@@ -962,7 +983,7 @@ defmodule TorrentStorageCoverageBatchTest do
 
     bitfield = Keyword.get(opts, :bitfield, Bitfield.make(length(piece_bins)))
 
-    torrent = %Torrent{
+    %Torrent{
       hash: hash,
       metadata: metadata,
       info_blob: info_blob,
@@ -974,8 +995,6 @@ defmodule TorrentStorageCoverageBatchTest do
       download_dir: File.cwd!(),
       peer_status: nil
     }
-
-    {torrent, piece_bins}
   end
 
   defp maybe_put_url_list(meta, nil), do: meta
@@ -1371,10 +1390,14 @@ defmodule TorrentStorageCoverageBatchTest.MockPeer do
   @moduledoc false
   use GenServer
 
+  @type t :: %{controller: pid()}
+
+  @spec start_link(Torrent.hash(), Peer.id()) :: GenServer.on_start()
   def start_link(hash, id) do
     GenServer.start_link(__MODULE__, {hash, id})
   end
 
+  @spec init({Torrent.hash(), Peer.id()}) :: {:ok, t()}
   def init({hash, id}) do
     key = Peer.make_key(hash, id)
     Registry.register(Registry, {key, Peer}, nil)
@@ -1390,5 +1413,7 @@ defmodule TorrentStorageCoverageBatchTest.MockPeer do
     {:ok, %{controller: ctrl}}
   end
 
+  @spec handle_info({:DOWN, reference(), :process, pid(), term()}, t()) ::
+          {:stop, :normal, t()}
   def handle_info({:DOWN, _, :process, _ctrl, _}, state), do: {:stop, :normal, state}
 end

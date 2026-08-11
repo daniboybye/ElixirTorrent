@@ -3,6 +3,17 @@ defmodule Torrent.Downloads.Piece.State do
   Pure state and transitions for a single-piece download worker.
   """
 
+  alias Torrent.{
+    Downloads.Piece,
+    Downloads.Piece.Request,
+    FileHandle,
+    Model,
+    PiecesStatistic,
+    Swarm
+  }
+
+  require Logger
+
   @enforce_keys [:index, :hash, :waiting]
   defstruct [
     :index,
@@ -15,17 +26,6 @@ defmodule Torrent.Downloads.Piece.State do
     monitoring: %{},
     requests: []
   ]
-
-  alias Torrent.{
-    Downloads.Piece,
-    Downloads.Piece.Request,
-    FileHandle,
-    Model,
-    PiecesStatistic,
-    Swarm
-  }
-
-  require Logger
 
   @type timer :: reference() | nil
   @type waiting() :: list(Request.subpiece())
@@ -58,6 +58,7 @@ defmodule Torrent.Downloads.Piece.State do
 
   @compile {:inline, subpieces: 2}
 
+  @spec make({Torrent.hash(), Torrent.index()}) :: t()
   def make({hash, index}) do
     %__MODULE__{
       index: index,
@@ -66,6 +67,7 @@ defmodule Torrent.Downloads.Piece.State do
     }
   end
 
+  @spec download(t(), Piece.callback(), Piece.callback()) :: t()
   def download(%__MODULE__{waiting: [], requests: []} = state, _, _) do
     state.requests_are_dealt.()
     state
@@ -127,7 +129,7 @@ defmodule Torrent.Downloads.Piece.State do
     Enum.count(state.requests, &(&1.subpiece == subpiece))
   end
 
-  # @spec request(t(), Peer.id(), Piece.callback()) :: t()
+  @spec request(t(), Peer.id(), Piece.callback_peer_request()) :: t()
   def request(%__MODULE__{waiting: []} = state, _, _), do: state
 
   def request(state, peer_id, callback) do
@@ -196,32 +198,48 @@ defmodule Torrent.Downloads.Piece.State do
 
   defp do_response(%__MODULE__{} = state, peer_id, begin, block, subpiece) do
     length = byte_size(block)
-
     {list, requests} = Enum.split_with(state.requests, &(&1.subpiece == subpiece))
 
     if Enum.empty?(list) and not Enum.member?(state.waiting, subpiece) do
-      # Endgame: a corrupt block may arrive first and drop the subpiece from
-      # `waiting`; accept later duplicates so a good copy can overwrite disk.
-      if state.mode == :endgame do
-        FileHandle.write(state.hash, state.index, begin, block)
-      end
-
-      state
+      handle_untracked_response(state, begin, block)
     else
+      handle_tracked_response(state, peer_id, begin, block, subpiece, list, requests, length)
+    end
+  end
+
+  defp handle_untracked_response(%__MODULE__{} = state, begin, block) do
+    # Endgame: a corrupt block may arrive first and drop the subpiece from
+    # `waiting`; accept later duplicates so a good copy can overwrite disk.
+    if state.mode == :endgame do
       FileHandle.write(state.hash, state.index, begin, block)
+    end
 
-      Enum.each(list, &cancel_duplicate_request(state, peer_id, begin, length, &1))
+    state
+  end
 
-      state = %__MODULE__{
-        state
-        | requests: requests,
-          waiting: List.delete(state.waiting, subpiece)
-      }
+  defp handle_tracked_response(
+         %__MODULE__{} = state,
+         peer_id,
+         begin,
+         block,
+         subpiece,
+         list,
+         requests,
+         length
+       ) do
+    FileHandle.write(state.hash, state.index, begin, block)
 
-      with %__MODULE__{mode: :endgame, waiting: []} <- state do
-        state.requests_are_dealt.()
-        state
-      end
+    Enum.each(list, &cancel_duplicate_request(state, peer_id, begin, length, &1))
+
+    state = %__MODULE__{
+      state
+      | requests: requests,
+        waiting: List.delete(state.waiting, subpiece)
+    }
+
+    with %__MODULE__{mode: :endgame, waiting: []} <- state do
+      state.requests_are_dealt.()
+      state
     end
   end
 

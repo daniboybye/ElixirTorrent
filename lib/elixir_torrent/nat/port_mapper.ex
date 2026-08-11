@@ -19,6 +19,7 @@ defmodule NAT.PortMapper do
   # and stops the pointless work.
   @method_max_failures 5
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
     %{
       id: __MODULE__,
@@ -26,11 +27,12 @@ defmodule NAT.PortMapper do
     }
   end
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @impl true
+  @impl GenServer
   def init(_opts) do
     Process.send_after(self(), :map_ports, @startup_delay_ms)
     # NAT-type detection is one-shot: mapping behaviour is a stable property of
@@ -45,45 +47,16 @@ defmodule NAT.PortMapper do
      }}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:detect_nat_type, state) do
     # STUN queries block up to a few seconds each; keep them off the GenServer.
     Task.start(&log_nat_type/0)
     {:noreply, state}
   end
 
-  def handle_info(:map_ports, %{failures: failures, dead_methods: dead} = state) do
-    port = Acceptor.port()
-    gateway = NAT.NATPMP.default_gateway()
-    local_ip = Acceptor.primary_ips().inet || Acceptor.ip()
-
-    Logger.debug(
-      "[nat] mapping attempt port=#{port} local_ip=#{inspect(local_ip)} gateway=#{inspect(gateway)} skip=#{inspect(MapSet.to_list(dead))}"
-    )
-
-    summary = map_all(port, dead)
+  def handle_info(:map_ports, state) do
+    {summary, method_failures, dead, failures, next_ms} = run_map_ports_cycle(state)
     mapped = mapped_count(summary)
-    log_summary(summary, port, dead)
-
-    {method_failures, dead} = update_method_state(state, summary)
-
-    {failures, next_ms} =
-      cond do
-        mapped >= @min_mapped ->
-          {0, @refresh_ms}
-
-        # All viable methods are dead — nothing more we can do this run. Sleep
-        # a full refresh interval (still keeps the timer alive in case ports
-        # get manually opened / a NAT-PMP-capable router replaces the current
-        # one and the process is restarted).
-        all_methods_dead?(dead) ->
-          Logger.debug("[nat] all_methods_dead — sleeping until next refresh")
-          {0, @refresh_ms}
-
-        true ->
-          failures = failures + 1
-          {failures, retry_delay_ms(failures)}
-      end
 
     if mapped < @min_mapped and not all_methods_dead?(dead) do
       Logger.debug("[nat] retry_scheduled failures=#{failures} delay_ms=#{next_ms}")
@@ -93,6 +66,47 @@ defmodule NAT.PortMapper do
 
     {:noreply,
      %{state | failures: failures, method_failures: method_failures, dead_methods: dead}}
+  end
+
+  @spec run_map_ports_cycle(map()) ::
+          {map(), %{atom() => non_neg_integer()}, MapSet.t(), non_neg_integer(), pos_integer()}
+  defp run_map_ports_cycle(%{failures: failures, dead_methods: dead} = state) do
+    port = Acceptor.port()
+    gateway = NAT.NATPMP.default_gateway()
+    local_ip = Acceptor.primary_ips().inet || Acceptor.ip()
+
+    Logger.debug(
+      "[nat] mapping attempt port=#{port} local_ip=#{inspect(local_ip)} gateway=#{inspect(gateway)} skip=#{inspect(MapSet.to_list(dead))}"
+    )
+
+    summary = map_all(port, dead)
+    log_summary(summary, port, dead)
+
+    {method_failures, dead} = update_method_state(state, summary)
+    {failures, next_ms} = map_ports_retry_schedule(failures, mapped_count(summary), dead)
+
+    {summary, method_failures, dead, failures, next_ms}
+  end
+
+  @spec map_ports_retry_schedule(non_neg_integer(), non_neg_integer(), MapSet.t()) ::
+          {non_neg_integer(), pos_integer()}
+  defp map_ports_retry_schedule(failures, mapped, dead) do
+    cond do
+      mapped >= @min_mapped ->
+        {0, @refresh_ms}
+
+      # All viable methods are dead — nothing more we can do this run. Sleep
+      # a full refresh interval (still keeps the timer alive in case ports
+      # get manually opened / a NAT-PMP-capable router replaces the current
+      # one and the process is restarted).
+      all_methods_dead?(dead) ->
+        Logger.debug("[nat] all_methods_dead — sleeping until next refresh")
+        {0, @refresh_ms}
+
+      true ->
+        failures = failures + 1
+        {failures, retry_delay_ms(failures)}
+    end
   end
 
   @spec log_nat_type() :: :ok

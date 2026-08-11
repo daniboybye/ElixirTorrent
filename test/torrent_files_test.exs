@@ -1,8 +1,7 @@
 defmodule Torrent.FilesTest do
   use ExUnit.Case, async: true
 
-  alias Torrent.Bitfield
-  alias Torrent.Files
+  alias Torrent.{Bitfield, Files}
 
   test "single-file torrent progress from bitfield" do
     torrent = %Torrent{

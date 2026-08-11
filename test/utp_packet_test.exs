@@ -79,4 +79,11 @@ defmodule UTPPacketTest do
     assert Packet.seq_before?(5, 10)
     assert Packet.seq_after?(10, 5)
   end
+
+  test "parse_selective_ack preserves byte order, LSB-first bits, and 16-bit wrap" do
+    assert Packet.parse_selective_ack(10, <<0x01>>) == [12]
+    assert Packet.parse_selective_ack(10, <<0x03>>) == [12, 13]
+    assert Packet.parse_selective_ack(65_534, <<0x01>>) == [0]
+    assert Packet.parse_selective_ack(10, <<0x01, 0x02>>) == [12, Packet.seq_add(10, 11)]
+  end
 end
