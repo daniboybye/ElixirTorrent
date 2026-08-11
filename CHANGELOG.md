@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.2 - 2026-08-11
+
+### Fixed
+
+- Release pipeline: publishing to Hex.pm is now idempotent (skips cleanly if the tag's version is already on Hex.pm instead of failing), and cosign's release-signing step retries on transient OIDC-token fetch failures instead of falling through to an interactive device-code flow that stalls CI. No runtime/library changes.
+
 ## 0.6.1 - 2026-08-11
 
 ### Changed

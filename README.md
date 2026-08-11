@@ -1,6 +1,6 @@
 # ElixirTorrent
 
-[![GitHub release](https://img.shields.io/badge/release-0.6.1-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent/releases/tag/0.6.1) [![Changelog](https://img.shields.io/badge/changelog-blue)](https://hexdocs.pm/elixir_torrent/changelog.html) [![Hex.pm](https://img.shields.io/hexpm/v/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent/0.6.1) [![HexDocs](https://img.shields.io/badge/hexdocs-0.6.1-8E44AD)](https://hexdocs.pm/elixir_torrent/0.6.1) [![Hex.pm Downloads](https://img.shields.io/hexpm/dt/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent) [![License](https://img.shields.io/hexpm/l/elixir_torrent.svg)](https://github.com/daniboybye/ElixirTorrent/blob/master/LICENSE)
+[![GitHub release](https://img.shields.io/badge/release-0.6.2-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent/releases/tag/0.6.2) [![Changelog](https://img.shields.io/badge/changelog-blue)](https://hexdocs.pm/elixir_torrent/changelog.html) [![Hex.pm](https://img.shields.io/hexpm/v/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent/0.6.2) [![HexDocs](https://img.shields.io/badge/hexdocs-0.6.2-8E44AD)](https://hexdocs.pm/elixir_torrent/0.6.2) [![Hex.pm Downloads](https://img.shields.io/hexpm/dt/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent) [![License](https://img.shields.io/hexpm/l/elixir_torrent.svg)](https://github.com/daniboybye/ElixirTorrent/blob/master/LICENSE)
 
 [![build](https://img.shields.io/github/actions/workflow/status/daniboybye/ElixirTorrent/build-and-publish.yml?branch=master&label=build&logo=github)](https://github.com/daniboybye/ElixirTorrent/actions/workflows/build-and-publish.yml) [![codecov](https://codecov.io/gh/daniboybye/ElixirTorrent/branch/master/graph/badge.svg)](https://codecov.io/gh/daniboybye/ElixirTorrent) [![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/daniboybye/ElixirTorrent?label=openssf%20scorecard)](https://scorecard.dev/viewer/?uri=github.com/daniboybye/ElixirTorrent) [![BEPs](https://img.shields.io/badge/BEPs-23%20implemented-E8A33D)](#protocol-support-beps) [![Last commit](https://img.shields.io/github/last-commit/daniboybye/ElixirTorrent/master)](https://github.com/daniboybye/ElixirTorrent/commits/master)
 
@@ -28,7 +28,7 @@ Add `elixir_torrent` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:elixir_torrent, "~> 0.6.1"}
+    {:elixir_torrent, "~> 0.6.2"}
   ]
 end
 ```
@@ -161,7 +161,7 @@ Full reference: [`hexdocs.pm/elixir_torrent/ElixirTorrent.html`](https://hexdocs
 | `stop_all_and_serialize/0` | Graceful stop + persist for every torrent |
 | `remove/2` | Stop and drop from session; optional `delete_data: true` |
 | `get/2` | Low-level field access (prefer `stats/2`) |
-| `version/0` | Version-derived client peer ID prefix (`ET0-6-1`, BEP 20) |
+| `version/0` | Version-derived client peer ID prefix (`ET0-6-2`, BEP 20) |
 
 ## Protocol support (BEPs)
 
@@ -190,7 +190,7 @@ Status meanings:
 | [BEP 15](https://www.bittorrent.org/beps/bep_0015.html) | UDP tracker protocol | **Full** | Connect, announce, scrape, error packets; 60 s connection_id cache; full 15×2ⁿ s long-announce ladder reconnects after expiry, while scrape and under-target fast-fail use intentionally shorter ladders; compact IPv4/IPv6 peers |
 | [BEP 16](https://www.bittorrent.org/beps/bep_0016.html) | Superseeding | **Full** | Automatically enters initial-seed mode when a live download completes with no confirmed remote seed: one rare fabricated `have` per peer, assignment rotation on propagation, hidden-piece rejection, and normal seeding restored for a complete remote bitfield or after restart |
 | [BEP 19](https://www.bittorrent.org/beps/bep_0019.html) | WebSeed — HTTP/FTP seeding (GetRight-style) | **Partial** | HTTP/HTTPS `Range` fetches for v1/hybrid torrents share the peer verify/write path, with corrupt mirrors disabled per session; FTP, GetRight gap scheduling, and pure-v2 mapping are not implemented; BEP 17 is not planned |
-| [BEP 20](https://www.bittorrent.org/beps/bep_0020.html) | Peer ID conventions | **Full** | Version-derived prefix (`ET0-6-1` for package 0.6.1); one runtime-generated 20-byte identity per application instance |
+| [BEP 20](https://www.bittorrent.org/beps/bep_0020.html) | Peer ID conventions | **Full** | Version-derived prefix (`ET0-6-2` for package 0.6.2); one runtime-generated 20-byte identity per application instance |
 | [BEP 23](https://www.bittorrent.org/beps/bep_0023.html) | Compact peer lists | **Full** | Compact IPv4 peers and dictionary-model IP literals; malformed values are ignored, while legacy dictionary hostnames are intentionally not DNS-resolved; combined with BEP 7 for `peers6` |
 | [BEP 24](https://www.bittorrent.org/beps/bep_0024.html) | Tracker returns external IP | **Partial** | Decodes `external ip` from HTTP responses; not used for listen-address selection |
 | [BEP 29](https://www.bittorrent.org/beps/bep_0029.html) | Micro Transport Protocol (uTP) | **Substantially Full** | SYN/STATE/DATA/FIN, LEDBAT, cumulative and selective ACK with SACK fast-loss recovery, owner-buffer-aware receive windows, type-preserving retransmission, symmetric FIN close, and dead zero-window probing; TCP-first dial with uTP fallback over DHT's shared UDP socket |

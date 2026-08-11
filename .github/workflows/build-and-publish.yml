@@ -158,7 +158,13 @@ jobs:
       - name: Publish package and docs to Hex.pm
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-        run: mix hex.publish --yes
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/}"
+          if curl -sf "https://hex.pm/api/packages/elixir_torrent/releases/${TAG_VERSION}" > /dev/null; then
+            echo "elixir_torrent ${TAG_VERSION} is already on Hex.pm; skipping (safe retry after a downstream failure)."
+          else
+            mix hex.publish --yes
+          fi
 
       - name: Build package tarball for release signing
         run: mix hex.build
@@ -169,10 +175,18 @@ jobs:
       - name: Sign package tarball (keyless, via GitHub OIDC)
         run: |
           TARBALL=$(ls elixir_torrent-*.tar)
-          cosign sign-blob --yes \
-            --output-signature "$TARBALL.sig" \
-            --output-certificate "$TARBALL.pem" \
-            "$TARBALL"
+          for attempt in 1 2 3; do
+            if cosign sign-blob --yes \
+                --output-signature "$TARBALL.sig" \
+                --output-certificate "$TARBALL.pem" \
+                "$TARBALL"; then
+              exit 0
+            fi
+            echo "cosign sign-blob attempt $attempt/3 failed, retrying in 15s..." >&2
+            sleep 15
+          done
+          echo "cosign sign-blob failed after 3 attempts" >&2
+          exit 1
 
       - name: Attach signed artifact to the GitHub Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
