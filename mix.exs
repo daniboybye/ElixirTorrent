@@ -78,11 +78,12 @@ defmodule ElixirTorrent.MixProject do
 
   defp aliases do
     [
+      sobelow: ["sobelow --exit medium --threshold medium --skip --no-router"],
       quality: [
         "compile --warnings-as-errors",
         "dialyzer",
         "credo --all",
-        "sobelow --exit --threshold medium --skip --no-router"
+        "sobelow"
       ],
       "deps.patch-test": [
         "cmd elixir scripts/patch-propcheck.exs",

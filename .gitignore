@@ -20,7 +20,7 @@ erl_crash.dump
 *.ez
 
 # Ignore package tarball (built via "mix hex.build").
-bittorrent-*.tar
+elixir_torrent-*.tar
 
 # Local session state, DHT node id persistence, and downloaded data (engine default layout).
 /.elixir_torrent/
