@@ -4,9 +4,9 @@
 
 [![build](https://img.shields.io/github/actions/workflow/status/daniboybye/ElixirTorrent/build-and-publish.yml?branch=master&label=build&logo=github)](https://github.com/daniboybye/ElixirTorrent/actions/workflows/build-and-publish.yml) [![codecov](https://codecov.io/gh/daniboybye/ElixirTorrent/branch/master/graph/badge.svg)](https://codecov.io/gh/daniboybye/ElixirTorrent) [![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/daniboybye/ElixirTorrent?label=openssf%20scorecard)](https://scorecard.dev/viewer/?uri=github.com/daniboybye/ElixirTorrent) [![BEPs](https://img.shields.io/badge/BEPs-23%20implemented-E8A33D)](#protocol-support-beps) [![Last commit](https://img.shields.io/github/last-commit/daniboybye/ElixirTorrent/master)](https://github.com/daniboybye/ElixirTorrent/commits/master)
 
-[![Elixir](https://img.shields.io/badge/elixir-%7E%3E%201.20-4B275F?logo=elixir)](https://elixir-lang.org) [![OTP](https://img.shields.io/badge/OTP-29-A90533?logo=erlang)](https://www.erlang.org)
-
 [![GitHub](https://img.shields.io/badge/source-ElixirTorrent-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent) [![Web UI](https://img.shields.io/badge/Web%20UI-ElixirTorrentWebUI-181717?logo=github)](https://github.com/daniboybye/ElixirTorrentWebUI) [![macOS](https://img.shields.io/badge/macOS-releases-silver?logo=apple)](https://github.com/daniboybye/ElixirTorrentWebUI/releases)
+
+[![Elixir](https://img.shields.io/badge/elixir-%7E%3E%201.20-4B275F?logo=elixir)](https://elixir-lang.org) [![OTP](https://img.shields.io/badge/OTP-29-A90533?logo=erlang)](https://www.erlang.org)
 
 BitTorrent client **engine** for Elixir/OTP — embed downloads in your own app with a small, stable public API.
 
