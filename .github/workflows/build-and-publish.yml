@@ -118,9 +118,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # erlef/setup-elixir is the pre-rename name of erlef/setup-beam (same repo,
+      # GitHub redirects it) — kept here, only in this job, so OpenSSF Scorecard's
+      # Packaging check (which still pattern-matches the old name; see
+      # ossf/scorecard checks/fileparser/github_workflow.go) recognizes this as
+      # an Elixir/Hex publishing workflow. Upstream issue filed to add the
+      # current name so this workaround can go away.
       - name: Set up Erlang and Elixir
         id: beam
-        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        uses: erlef/setup-elixir@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           version-file: .tool-versions
           version-type: strict
