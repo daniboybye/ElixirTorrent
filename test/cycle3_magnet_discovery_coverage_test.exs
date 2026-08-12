@@ -16,6 +16,8 @@ defmodule Cycle3MagnetDiscoveryCoverageTest do
   """
   use ExUnit.Case, async: false
 
+  alias DHT.{Compact, KRPC, RoutingTables}
+
   setup do
     {:ok, _} = Application.ensure_all_started(:elixir_torrent)
 
@@ -82,7 +84,156 @@ defmodule Cycle3MagnetDiscoveryCoverageTest do
     assert Map.values(peers) == [%Peer{ip: {198, 51, 100, 3}, port: 51_413}]
   end
 
+  test "a peer the DHT returns on a quick retry ends the ladder and joins the round" do
+    hash = :crypto.strong_rand_bytes(20)
+    dht_peer = %Peer{ip: {203, 0, 113, 7}, port: 51_413}
+
+    put_retry_ladder(dht_retry_delays_ms: [0])
+    seed_only_dht_node(hash, start_fake_dht_node(hash, dht_peer))
+
+    magnet = %Magnet{hash: hash, trackers: [], display_name: "dht-quick"}
+
+    assert {peers, 1, []} = Magnet.Fetcher.discover_and_merge_peers(magnet, [], %{})
+    assert Map.values(peers) == [dht_peer]
+  end
+
+  test "with the quick ladder exhausted the deep dig is what finds the peer" do
+    hash = :crypto.strong_rand_bytes(20)
+    dht_peer = %Peer{ip: {203, 0, 113, 8}, port: 6_881}
+
+    # An empty quick ladder is the "every quick attempt came back empty" case
+    # collapsed to zero wall clock: `dht_peers_with_retry` falls straight through
+    # to the inline deep retry, which is the branch that rescues a round when
+    # BEP 5 peers only propagate after the quick window has closed.
+    put_retry_ladder(dht_retry_delays_ms: [])
+    seed_only_dht_node(hash, start_fake_dht_node(hash, dht_peer))
+
+    magnet = %Magnet{hash: hash, trackers: [], display_name: "dht-deep"}
+
+    assert {peers, 1, []} = Magnet.Fetcher.discover_and_merge_peers(magnet, [], %{})
+    assert Map.values(peers) == [dht_peer]
+
+    # Deep ran inline, so nothing was left for the background task to redo.
+    refute Magnet.Fetcher.dht_background_pending?(hash)
+  end
+
   ## helpers -----------------------------------------------------------------
+
+  defp put_retry_ladder(overrides) do
+    fetcher = Application.get_env(:elixir_torrent, :magnet_fetcher, [])
+    Application.put_env(:elixir_torrent, :magnet_fetcher, Keyword.merge(fetcher, overrides))
+
+    dht = Application.get_env(:elixir_torrent, :dht, [])
+
+    # The fake node answers immediately; this only bounds the failure case.
+    Application.put_env(:elixir_torrent, :dht, Keyword.put(dht, :lookup_timeout_ms, 2_000))
+  end
+
+  # Replace the routing table with exactly one node, so the lookup's shortlist is
+  # the fake node and nothing else — no queries fly at whatever real nodes this
+  # host happened to restore from disk, and the lookup converges as soon as that
+  # one node answers.
+  #
+  # The socket is swapped too. The DHT binds the fixed BitTorrent port with
+  # SO_REUSEPORT, so if a real ElixirTorrent instance is running on this machine
+  # the kernel hands it an arbitrary share of the datagrams sent to that port and
+  # the fake node's replies never come back. An ephemeral socket is ours alone.
+  defp seed_only_dht_node(hash, port) do
+    previous = :sys.get_state(DHT)
+
+    contact = %{id: hash, ip: {127, 0, 0, 1}, port: port}
+    socket = private_dht_socket()
+
+    :sys.replace_state(DHT, fn state ->
+      tables = RoutingTables.insert(RoutingTables.new(state.node_id), contact)
+      %{state | routing_tables: tables, bootstrapped?: true, socket_v4: socket, socket_v6: nil}
+    end)
+
+    on_exit(fn ->
+      try do
+        :sys.replace_state(DHT, fn state ->
+          %{
+            state
+            | routing_tables: previous.routing_tables,
+              bootstrapped?: previous.bootstrapped?,
+              socket_v4: previous.socket_v4,
+              socket_v6: previous.socket_v6
+          }
+        end)
+      catch
+        :exit, _ -> :ok
+      end
+
+      :gen_udp.close(socket)
+    end)
+
+    :ok
+  end
+
+  # Owned by the DHT process and armed the way its own sockets are, so the real
+  # `handle_info({:udp, ...})` clause matches and re-arms it.
+  defp private_dht_socket do
+    {:ok, socket} = :gen_udp.open(0, [:binary, :inet, active: false, ip: {127, 0, 0, 1}])
+    :ok = :gen_udp.controlling_process(socket, Process.whereis(DHT))
+    :ok = :inet.setopts(socket, active: :once)
+    socket
+  end
+
+  # A minimal BEP 5 node on loopback that hands out `peer` to every get_peers.
+  # BEP 42 exempts loopback from the node-id/IP check, so the real DHT accepts
+  # its responses as trusted.
+  defp start_fake_dht_node(node_id, %Peer{ip: ip, port: peer_port}) do
+    {:ok, socket} = :gen_udp.open(0, [:binary, :inet, active: false, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(socket)
+    value = Compact.encode_peer(ip, peer_port)
+
+    # A passive socket may only be read by its controlling process, so the node
+    # waits to be handed ownership before its first recv.
+    pid =
+      spawn(fn ->
+        receive do
+          :owned -> fake_node_loop(socket, node_id, value)
+        end
+      end)
+
+    :ok = :gen_udp.controlling_process(socket, pid)
+    send(pid, :owned)
+
+    on_exit(fn ->
+      Process.exit(pid, :kill)
+      :gen_udp.close(socket)
+    end)
+
+    port
+  end
+
+  defp fake_node_loop(socket, node_id, value) do
+    case :gen_udp.recv(socket, 0, 10_000) do
+      {:ok, {ip, port, packet}} ->
+        with {:ok, {:query, query}} <- KRPC.decode(packet) do
+          :gen_udp.send(socket, ip, port, fake_node_reply(query, node_id, value))
+        end
+
+        fake_node_loop(socket, node_id, value)
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  defp fake_node_reply(%{method: :get_peers} = query, node_id, value) do
+    KRPC.encode_response(%{
+      transaction_id: query.transaction_id,
+      node_id: node_id,
+      token: "tok",
+      values: [value]
+    })
+  end
+
+  # ping / find_node / announce_peer: acknowledge without widening the shortlist.
+  defp fake_node_reply(query, node_id, _value) do
+    KRPC.encode_response(%{transaction_id: query.transaction_id, node_id: node_id})
+  end
 
   # BEP 23 compact response: 6 bytes per IPv4 peer.
   defp compact_peer_response do
