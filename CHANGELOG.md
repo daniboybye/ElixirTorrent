@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.4 - 2026-08-12
+
+### Added
+
+- Test coverage for paths that previously only ran against a live network or a hostile peer: address classification and the NAT-PMP codec, the `Peer.Controller.State` wire state machine including BEP 16 super-seed bookkeeping, the BEP 3 choke algorithm and swarm teardown, DHT (BEP 5) degraded-mode callbacks, ut_pex (BEP 11/40) ordering, tracker announce edge cases, BEP 9 metadata fetch, STUN parsing, dial backoff sweeps, and BEP 52 v2 padding-gap reads/writes.
+
+### Changed
+
+- `Acceptor.compute_all_global_ips/1` is now a public arity-1 function taking the `:inet.getifaddrs()` result, so the rules deciding which addresses may be advertised to trackers, DHT and PEX can be evaluated against a supplied interface list rather than the host's own.
+- `Magnet.Fetcher`'s BEP 5 retry windows (`dht_retry_delays_ms/0`, `dht_deep_retry_delay_ms/0`) are read through the existing fetcher config override instead of compile-time attributes, so the propagation waits are adjustable without changing the retry shape. Defaults unchanged.
+
 ## 0.6.3 - 2026-08-11
 
 ### Fixed
