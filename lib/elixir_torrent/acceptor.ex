@@ -138,30 +138,37 @@ defmodule Acceptor do
 
   @doc false
   @spec compute_all_global_ips() :: ip_snapshot()
-  def compute_all_global_ips do
-    case :inet.getifaddrs() do
-      {:ok, ifs} ->
-        ips =
-          ifs
-          |> Enum.flat_map(fn {_ifname, props} ->
-            props
-            |> Keyword.get_values(:addr)
-            |> Enum.filter(&is_tuple/1)
-          end)
+  def compute_all_global_ips, do: compute_all_global_ips(:inet.getifaddrs())
 
-        v6_all = Enum.filter(ips, &global_ipv6?/1)
+  # Split from the getifaddrs call so the address-classification rules (which
+  # decide what we may advertise to trackers, DHT and PEX) can be exercised
+  # against a synthetic interface list instead of whatever this host happens to
+  # be plugged into.
+  @doc false
+  @spec compute_all_global_ips({:ok, [{charlist(), keyword()}]} | {:error, term()}) ::
+          ip_snapshot()
+  def compute_all_global_ips({:ok, ifs}) do
+    ips =
+      ifs
+      |> Enum.flat_map(fn {_ifname, props} ->
+        props
+        |> Keyword.get_values(:addr)
+        |> Enum.filter(&is_tuple/1)
+      end)
 
-        %{
-          inet: Enum.find(ips, &global_ipv4?/1),
-          inet6: List.first(v6_all),
-          inet6_all: v6_all,
-          multicast_interfaces: multicast_interfaces_from(ifs)
-        }
+    v6_all = Enum.filter(ips, &global_ipv6?/1)
 
-      {:error, reason} ->
-        Logger.warning("getifaddrs failed: #{inspect(reason)}")
-        %{inet: nil, inet6: nil, inet6_all: [], multicast_interfaces: %{inet: [], inet6: []}}
-    end
+    %{
+      inet: Enum.find(ips, &global_ipv4?/1),
+      inet6: List.first(v6_all),
+      inet6_all: v6_all,
+      multicast_interfaces: multicast_interfaces_from(ifs)
+    }
+  end
+
+  def compute_all_global_ips({:error, reason}) do
+    Logger.warning("getifaddrs failed: #{inspect(reason)}")
+    %{inet: nil, inet6: nil, inet6_all: [], multicast_interfaces: %{inet: [], inet6: []}}
   end
 
   @doc false
