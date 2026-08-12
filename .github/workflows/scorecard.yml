@@ -40,6 +40,13 @@ jobs:
           results_file: results.sarif
           results_format: sarif
           publish_results: true
+          # The default GITHUB_TOKEN cannot read classic branch protection rules
+          # (no "administration" scope exists for it), so Branch-Protection fails
+          # with an internal error. A fine-grained PAT with Administration:
+          # Read-only, stored as the SCORECARD_TOKEN secret, fixes that. Falls
+          # back to github.token — the action's own default — when the secret is
+          # absent, so every other check keeps working either way.
+          repo_token: ${{ secrets.SCORECARD_TOKEN || github.token }}
 
       - name: Upload SARIF artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
