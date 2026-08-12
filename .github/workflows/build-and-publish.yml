@@ -113,6 +113,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      attestations: write
 
     steps:
       - name: Check out repository
@@ -194,9 +195,21 @@ jobs:
           echo "cosign sign-blob failed after 3 attempts" >&2
           exit 1
 
+      - name: Generate SLSA build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v4.2.2
+        with:
+          subject-path: elixir_torrent-*.tar
+
+      - name: Export provenance as an in-toto JSONL release asset
+        env:
+          BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: bash scripts/export-provenance.sh "$BUNDLE"
+
       - name: Attach signed artifact to the GitHub Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
             elixir_torrent-*.tar
             elixir_torrent-*.tar.sigstore.json
+            elixir_torrent-*.tar.intoto.jsonl
