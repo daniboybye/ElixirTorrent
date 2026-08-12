@@ -482,9 +482,17 @@ defmodule Magnet.Fetcher do
   @dht_deep_retry_delay_ms 13_000
   @dht_bg_table :magnet_fetcher_dht_background
 
+  # Both windows are how long we let BEP 5 peers propagate before giving up on
+  # a round; they are configurable so a test can collapse the wall clock without
+  # changing the retry *shape*.
   @doc false
-  @spec dht_deep_retry_delay_ms() :: pos_integer()
-  def dht_deep_retry_delay_ms, do: @dht_deep_retry_delay_ms
+  @spec dht_deep_retry_delay_ms() :: non_neg_integer()
+  def dht_deep_retry_delay_ms,
+    do: fetcher_cfg(:dht_deep_retry_delay_ms, @dht_deep_retry_delay_ms)
+
+  @doc false
+  @spec dht_retry_delays_ms() :: [non_neg_integer()]
+  def dht_retry_delays_ms, do: fetcher_cfg(:dht_retry_delays_ms, @dht_retry_delays_ms)
 
   @spec dht_peers_with_retry(Torrent.hash(), keyword()) :: [Peer.t()]
   defp dht_peers_with_retry(hash, opts) do
@@ -503,7 +511,7 @@ defmodule Magnet.Fetcher do
   defp dht_peers_quick_retries(hash) do
     hash_hex = Torrent.hex_encoded_hash(hash)
 
-    Enum.reduce_while(@dht_retry_delays_ms, [], fn delay, _acc ->
+    Enum.reduce_while(dht_retry_delays_ms(), [], fn delay, _acc ->
       case dht_get_peers_after_delay(hash, delay) do
         [] ->
           {:cont, []}
@@ -521,10 +529,11 @@ defmodule Magnet.Fetcher do
 
     # BEP 5 — announce_peer plants us on nearby nodes, but get_peers right after
     # often returns empty: peers need a propagation window before they show up.
-    peers = dht_get_peers_after_delay(hash, @dht_deep_retry_delay_ms)
+    deep_delay = dht_deep_retry_delay_ms()
+    peers = dht_get_peers_after_delay(hash, deep_delay)
 
     if peers != [] do
-      log_dht_peers_found(hash_hex, peers, @dht_deep_retry_delay_ms, deep: true)
+      log_dht_peers_found(hash_hex, peers, deep_delay, deep: true)
     end
 
     peers
@@ -640,8 +649,10 @@ defmodule Magnet.Fetcher do
   defp dht_await_timeout_ms do
     # Quick retries only — deep retry runs inline when trackers are empty, or in
     # background when tracker peers already unblock the round.
-    Enum.sum(@dht_retry_delays_ms) +
-      length(@dht_retry_delays_ms) * DHTConfig.lookup_timeout_ms() + 5_000
+    delays = dht_retry_delays_ms()
+
+    Enum.sum(delays) +
+      length(delays) * DHTConfig.lookup_timeout_ms() + 5_000
   end
 
   @spec collect_tracker_peers(Magnet.t(), keyword()) :: {[Peer.t()], [String.t()]}
