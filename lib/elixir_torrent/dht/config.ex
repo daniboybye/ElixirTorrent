@@ -30,6 +30,20 @@ defmodule DHT.Config do
     |> Keyword.get(:bootstrap_routers, @bootstrap_routers)
   end
 
+  @doc """
+  Whether the routing table is loaded from and saved to `DHT.RoutingStore`.
+
+  Off in `:test`: the persisted table holds real internet nodes, and the boot
+  bootstrap lookup would start querying them immediately. Disabling the save
+  side too keeps a test run from overwriting a developer's warm table with the
+  empty one the suite runs on.
+  """
+  @spec routing_store?() :: boolean()
+  def routing_store? do
+    Application.get_env(:elixir_torrent, :dht, [])
+    |> Keyword.get(:routing_store, true)
+  end
+
   @doc "Overall get_peers lookup timeout in milliseconds."
   @spec lookup_timeout_ms() :: pos_integer()
   def lookup_timeout_ms do
