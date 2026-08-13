@@ -32,8 +32,24 @@ defmodule NAT.PortMapper do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  @doc """
+  Whether NAT-PMP / UPnP mapping and STUN NAT-type detection may run.
+
+  Off in `:test`: every one of those paths sends UDP to the LAN gateway, an
+  SSDP multicast group, or a public STUN server.
+  """
+  @spec enabled?() :: boolean()
+  def enabled? do
+    Application.get_env(:elixir_torrent, :nat, [])
+    |> Keyword.get(:enabled, true)
+  end
+
   @impl GenServer
   def init(_opts) do
+    if enabled?(), do: schedule_startup(), else: :ignore
+  end
+
+  defp schedule_startup do
     Process.send_after(self(), :map_ports, @startup_delay_ms)
     # NAT-type detection is one-shot: mapping behaviour is a stable property of
     # the NAT, so we classify it once shortly after boot and log the verdict.
