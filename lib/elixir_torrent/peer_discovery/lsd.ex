@@ -43,8 +43,24 @@ defmodule PeerDiscovery.LSD do
     GenServer.start_link(__MODULE__, [], name: __MODULE__)
   end
 
+  @doc """
+  Whether BEP 14 Local Service Discovery may open multicast sockets.
+
+  Off in `:test`, where announcing to `239.192.152.143` would put this machine's
+  info-hashes on the LAN.
+  """
+  @spec enabled?() :: boolean()
+  def enabled? do
+    Application.get_env(:elixir_torrent, :lsd, [])
+    |> Keyword.get(:enabled, true)
+  end
+
   @impl GenServer
   def init(_) do
+    if enabled?(), do: init_sockets(), else: :ignore
+  end
+
+  defp init_sockets do
     # Random cookie lets us drop the multicast loopback of our own messages
     # without a race-prone source-address check (the wire header claims what
     # the sender chose, but the LAN interface can rewrite it).
@@ -311,7 +327,15 @@ defmodule PeerDiscovery.LSD do
           :gen_udp.socket() | nil
   defp open_socket(_family, []), do: nil
 
+  # Joining the BEP 14 group is an IGMP/MLD membership on a real LAN interface,
+  # so a disabled LSD must not reach here even when something drives the server
+  # callbacks directly (`refresh_interfaces/1` reopens sockets from the live
+  # interface list).
   defp open_socket(family, interfaces) do
+    if enabled?(), do: do_open_socket(family, interfaces)
+  end
+
+  defp do_open_socket(family, interfaces) do
     opts = [
       :binary,
       {:active, true},
