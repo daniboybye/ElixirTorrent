@@ -182,7 +182,7 @@ defmodule DHT do
   @impl GenServer
   def terminate(_reason, %__MODULE__{routing_tables: tables}) when is_map(tables) do
     # Persist on clean shutdown so a quit-then-relaunch keeps the routing table.
-    RoutingStore.save(tables)
+    save_routing_tables(tables)
     :ok
   end
 
@@ -247,7 +247,7 @@ defmodule DHT do
 
   def handle_info(:persist_routing, state) do
     schedule_persist(@persist_ms)
-    RoutingStore.save(state.routing_tables)
+    save_routing_tables(state.routing_tables)
     {:noreply, state}
   end
 
@@ -1591,13 +1591,25 @@ defmodule DHT do
     with {:ok, socket_v4, socket_v6, port} <- open_sockets(),
          :ok <- bind_socket(socket_v4),
          :ok <- maybe_bind_socket(socket_v6) do
-      tables = RoutingStore.load(RoutingTables.new(node_id))
+      tables = restore_routing_tables(node_id)
       tokens = Token.new()
       init_schedules()
       activate_udp_sockets(socket_v4, socket_v6)
       log_dht_listen(socket_v4, socket_v6, port, tables)
       {:ok, init_state(socket_v4, socket_v6, node_id, port, tables, tokens)}
     end
+  end
+
+  @spec save_routing_tables(RoutingTables.t()) :: :ok
+  defp save_routing_tables(tables) do
+    if Config.routing_store?(), do: RoutingStore.save(tables), else: :ok
+  end
+
+  @spec restore_routing_tables(RoutingTable.node_id()) :: RoutingTables.t()
+  defp restore_routing_tables(node_id) do
+    empty = RoutingTables.new(node_id)
+
+    if Config.routing_store?(), do: RoutingStore.load(empty), else: empty
   end
 
   @spec init_schedules() :: :ok
