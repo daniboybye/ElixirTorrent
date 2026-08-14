@@ -621,7 +621,7 @@ defmodule Acceptor.Connection.Handshakes do
   @spec connect_transport(:tcp | :utp, :inet.ip_address(), :inet.port_number(), keyword()) ::
           {:ok, Peer.Transport.socket(), :tcp | :utp} | {:error, term()}
   defp connect_transport(:tcp, ip, port, opts) do
-    case safe_connect(ip, port, opts) do
+    case dial_scope_guard(ip, fn -> safe_connect(ip, port, opts) end) do
       {:ok, socket} ->
         :ok = Acceptor.apply_tcp_performance(socket)
         Logger.debug("[peer_dial] connect_won transport=tcp endpoint=#{inspect({ip, port})}")
@@ -645,14 +645,33 @@ defmodule Acceptor.Connection.Handshakes do
 
   defp safe_utp_connect(ip, port) do
     if ipv6_dialable?(ip) do
-      try do
-        UTP.Dispatcher.connect(ip, port, [], @utp_connect_timeout_ms)
-      catch
-        :exit, _ -> {:error, :timeout}
-      end
+      dial_scope_guard(ip, fn -> utp_connect(ip, port) end)
     else
       {:error, :eafnosupport}
     end
+  end
+
+  defp utp_connect(ip, port) do
+    UTP.Dispatcher.connect(ip, port, [], @utp_connect_timeout_ms)
+  catch
+    :exit, _ -> {:error, :timeout}
+  end
+
+  # The last gate before a packet leaves this machine. Peer *selection* is
+  # deliberately untouched — `connectable_peer?/2` still answers the protocol
+  # question "may we dial this endpoint at all", because PEX advertisement and
+  # hole-punch decisions read it too; this only refuses to open the connection.
+  #
+  # `:this_host` is what `:test` sets: fixtures decoded from tracker/DHT/PEX
+  # payloads carry real addresses, and without this a fixture peer becomes a
+  # genuine connection attempt to a stranger. It still permits every address
+  # this machine owns (loopback and the interface addresses the acceptor binds),
+  # which is what loopback fixtures actually dial, and those packets never reach
+  # the wire. Production leaves `:dial_scope` at `:any` and pays one keyword
+  # lookup per dial.
+  @spec dial_scope_guard(:inet.ip_address(), (-> term())) :: term()
+  defp dial_scope_guard(ip, connect) do
+    if Acceptor.dial_scope_allows?(ip), do: connect.(), else: {:error, :dial_scope}
   end
 
   @spec connectable_peer?(Peer.t()) :: boolean()

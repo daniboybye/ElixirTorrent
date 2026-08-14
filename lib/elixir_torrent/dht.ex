@@ -199,7 +199,7 @@ defmodule DHT do
 
   def handle_call({:send_udp, ip, port, data}, _from, state) do
     socket = socket_for_dest(state, ip)
-    {:reply, :gen_udp.send(socket, ip, port, data), state}
+    {:reply, send_datagram(socket, ip, port, data), state}
   end
 
   def handle_call({:get_peers, hash, timeout}, from, state) do
@@ -652,7 +652,7 @@ defmodule DHT do
       {:ok, new_state} ->
         socket = socket_for_dest(new_state, node.ip)
         packet = KRPC.encode_query(query)
-        _ = :gen_udp.send(socket, node.ip, node.port, packet)
+        _ = send_datagram(socket, node.ip, node.port, packet)
         {:ok, tid, new_state}
     end
   end
@@ -1256,7 +1256,7 @@ defmodule DHT do
   defp send_response(state, ip, port, response) do
     socket = socket_for_dest(state, ip)
     response = Map.put(response, :ip, compact_endpoint(ip, port))
-    _ = :gen_udp.send(socket, ip, port, KRPC.encode_response(response))
+    _ = send_datagram(socket, ip, port, KRPC.encode_response(response))
     :ok
   end
 
@@ -1273,8 +1273,25 @@ defmodule DHT do
         ip: compact_endpoint(ip, port)
       })
 
-    _ = :gen_udp.send(socket, ip, port, packet)
+    _ = send_datagram(socket, ip, port, packet)
     :ok
+  end
+
+  # Every KRPC datagram leaves through here — queries, responses, errors, and the
+  # uTP traffic that shares this socket via `send_udp/3`. Under
+  # `:network, dial_scope: :this_host` (what `:test` sets) a destination that is
+  # not one of this machine's own addresses is dropped instead of sent: driving
+  # the server callbacks with a fixture source address otherwise makes the node
+  # answer a synthetic query with a real packet to a stranger. Production leaves
+  # the scope at `:any`.
+  @spec send_datagram(port(), :inet.ip_address(), :inet.port_number(), iodata()) ::
+          :ok | {:error, term()}
+  defp send_datagram(socket, ip, port, data) do
+    if Acceptor.dial_scope_allows?(ip) do
+      :gen_udp.send(socket, ip, port, data)
+    else
+      {:error, :dial_scope}
+    end
   end
 
   @spec register_pending(t(), binary(), map()) ::
