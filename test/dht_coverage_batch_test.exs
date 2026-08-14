@@ -44,12 +44,20 @@ defmodule DHT.CoverageBatchTest do
       assert rotated.tokens.current_secret != tokens_before.current_secret
       assert rotated.tokens.previous_secret == tokens_before.current_secret
 
-      tmp = System.tmp_dir!()
+      # A unique directory: RoutingStore.path/0 is cwd-relative, and a leftover
+      # file from an earlier run would make this assertion pass without the
+      # write ever happening.
+      tmp = Path.join(System.tmp_dir!(), "dht_persist_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
       prev_cwd = File.cwd!()
       File.cd!(tmp)
 
-      on_exit(fn -> File.cd!(prev_cwd) end)
+      on_exit(fn ->
+        File.cd!(prev_cwd)
+        File.rm_rf(tmp)
+      end)
 
+      refute File.regular?(RoutingStore.path())
       assert {:noreply, ^rotated} = DHT.handle_info(:persist_routing, rotated)
       assert File.regular?(RoutingStore.path())
 
