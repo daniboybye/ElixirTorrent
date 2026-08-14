@@ -294,41 +294,25 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
     @tag race_group: :network
     test "live acceptor port accepts inbound plaintext handshake" do
       hash = :crypto.strong_rand_bytes(20)
-      remote_id = <<7::160>>
+      # Fresh per run: Acceptor.BlackList is a process-wide MapSet with no
+      # expiry, so a hard-coded id can be poisoned for the rest of the BEAM by
+      # any other test that trips a protocol error on the same id.
+      remote_id = :crypto.strong_rand_bytes(20)
 
       with_torrent_stack(hash, fn _hash ->
-        port = Acceptor.port()
-        parent = self()
-        close_gate = make_ref()
+        {sock, responder_id} = live_acceptor_handshake!(Acceptor.port(), hash, remote_id)
 
-        connector =
-          Task.async(fn ->
-            {:ok, sock} =
-              :gen_tcp.connect(
-                {127, 0, 0, 1},
-                port,
-                [:binary, active: false],
-                @timeout
-              )
+        # Proves it was *our* acceptor that answered, not another BitTorrent
+        # client sharing the port (see live_acceptor_handshake!/3).
+        assert responder_id == Peer.id()
 
-            assert :ok = :gen_tcp.send(sock, bt_handshake(hash, remote_id))
+        # BEP 3: the first wire message after the handshake (bitfield/have_none).
+        assert {:ok, <<wire_len::32>>} = :gen_tcp.recv(sock, 4, @timeout)
+        assert {:ok, _wire_body} = :gen_tcp.recv(sock, wire_len, @timeout)
 
-            assert {:ok, <<19, "BitTorrent protocol"::binary, _::binary>>} =
-                     :gen_tcp.recv(sock, 68, @timeout)
-
-            assert {:ok, <<wire_len::32>>} = :gen_tcp.recv(sock, 4, @timeout)
-            assert {:ok, _wire_body} = :gen_tcp.recv(sock, wire_len, @timeout)
-            send(parent, {:live_acceptor_handshake_complete, self()})
-            receive do: (^close_gate -> :ok)
-            :gen_tcp.close(sock)
-          end)
-
-        assert_receive {:live_acceptor_handshake_complete, connector_pid}, @timeout
-        assert connector.pid == connector_pid
         await_peer_protocol(hash, remote_id)
         await_swarm_count(hash, 1)
-        send(connector.pid, close_gate)
-        assert :ok = Task.await(connector, @timeout + 2_000)
+        :gen_tcp.close(sock)
       end)
     end
   end
@@ -1363,6 +1347,54 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
 
   defp await_loopback_accept(%Task{pid: pid}) do
     assert_receive {:loopback_accepted, ^pid}, @timeout
+  end
+
+  @live_acceptor_attempts 10
+
+  # Completes a BEP 3 plaintext handshake against the process-wide acceptor and
+  # returns the socket plus the peer id that answered.
+  #
+  # Binding a port on this host does not grant exclusive ownership of the
+  # connections to it: other BitTorrent clients bind the same 6881+ range (three
+  # processes were observed sharing `*:6881`), so a connection to our listen port
+  # can be delivered to one of them. A foreign listener has never heard of this
+  # test's random info-hash, so it closes without replying.
+  #
+  # Retrying is sound *because the responder identifies itself*: our acceptor is
+  # the only listener that both knows `hash` and answers with `Peer.id/0`. A
+  # genuine regression in the accept/handshake path still fails the test — it
+  # just fails after the attempts are spent, and the flunk carries every
+  # attempt's outcome so one run is enough to diagnose it.
+  defp live_acceptor_handshake!(port, hash, remote_id) do
+    case live_acceptor_attempts(port, hash, remote_id, @live_acceptor_attempts, []) do
+      {:ok, sock, responder_id} ->
+        {sock, responder_id}
+
+      {:error, reasons} ->
+        flunk(
+          "no ElixirTorrent acceptor answered the BEP 3 handshake on the live port in " <>
+            "#{@live_acceptor_attempts} attempts; outcomes (newest first): #{inspect(reasons)}"
+        )
+    end
+  end
+
+  defp live_acceptor_attempts(_port, _hash, _remote_id, 0, reasons), do: {:error, reasons}
+
+  defp live_acceptor_attempts(port, hash, remote_id, attempts, reasons) do
+    {:ok, sock} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], @timeout)
+    :ok = :gen_tcp.send(sock, bt_handshake(hash, remote_id))
+
+    case :gen_tcp.recv(sock, 68, @timeout) do
+      {:ok,
+       <<19, "BitTorrent protocol", _reserved::binary-size(8), ^hash::binary-size(20),
+         responder_id::binary-size(20)>>} ->
+        {:ok, sock, responder_id}
+
+      other ->
+        :gen_tcp.close(sock)
+        reasons = [inspect(other, limit: 3) | reasons]
+        live_acceptor_attempts(port, hash, remote_id, attempts - 1, reasons)
+    end
   end
 
   defp with_torrent_stack(hash, fun) do
