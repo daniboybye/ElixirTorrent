@@ -277,6 +277,36 @@ defmodule Acceptor do
     end
   end
 
+  @doc """
+  Whether an outbound packet to `ip` is permitted by the configured dial scope.
+
+  `:elixir_torrent, :network, :dial_scope` is `:any` in production. `:test` sets
+  `:this_host`, which permits only addresses this machine owns — loopback and
+  the interface addresses the acceptor binds. Fixtures decoded from tracker/DHT/
+  PEX payloads carry real addresses, and a test that drives a dial or answers a
+  synthetic KRPC query would otherwise put a packet on the wire.
+
+  This is a destination policy, not a protocol rule: peer *selection*
+  (`Handshakes.connectable_peer?/2`) is unaffected, because PEX advertisement
+  and hole-punch read it too.
+  """
+  @spec dial_scope_allows?(:inet.ip_address()) :: boolean()
+  def dial_scope_allows?(ip) do
+    case Keyword.get(Application.get_env(:elixir_torrent, :network, []), :dial_scope, :any) do
+      :this_host -> this_host_ip?(ip)
+      _ -> true
+    end
+  end
+
+  @spec this_host_ip?(:inet.ip_address()) :: boolean()
+  defp this_host_ip?({127, _, _, _}), do: true
+  defp this_host_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+
+  defp this_host_ip?(ip) do
+    %{inet: v4, inet6_all: v6_all} = all_global_ips()
+    ip == v4 or ip in v6_all
+  end
+
   @doc false
   @spec ipv4_binary() :: <<_::32>> | nil
   def ipv4_binary do
