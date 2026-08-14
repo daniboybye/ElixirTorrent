@@ -45,10 +45,21 @@ defmodule Cycle3MagnetDiscoveryCoverageTest do
 
   test "a trackerless magnet digs into the DHT inline" do
     hash = :crypto.strong_rand_bytes(20)
+    # A node that knows nobody, so "the round found nothing" is guaranteed by
+    # construction. Against the open DHT it is not: nodes exist that answer
+    # get_peers for *any* info-hash with injected values, so a random hash can
+    # and does come back with a peer.
+    seed_only_dht_node(hash, start_fake_dht_node(hash, nil))
+
     magnet = %Magnet{hash: hash, trackers: [], display_name: "no-trackers"}
 
     assert {peers, 0, []} = Magnet.Fetcher.discover_and_merge_peers(magnet, [], %{})
     assert peers == %{}
+
+    # The round talked to the fake node and nobody else. Without this the test
+    # silently degrades back into a live-network test if the isolation in
+    # seed_only_dht_node/2 ever stops holding.
+    assert RoutingTables.node_count(:sys.get_state(DHT).routing_tables) == 1
 
     # Nothing was deferred to the background: the inline deep retry already ran.
     refute Magnet.Fetcher.dht_background_pending?(hash)
@@ -72,6 +83,7 @@ defmodule Cycle3MagnetDiscoveryCoverageTest do
 
   test "x.pe endpoints from the magnet itself are merged with what discovery found" do
     hash = :crypto.strong_rand_bytes(20)
+    seed_only_dht_node(hash, start_fake_dht_node(hash, nil))
 
     magnet = %Magnet{
       hash: hash,
@@ -179,13 +191,13 @@ defmodule Cycle3MagnetDiscoveryCoverageTest do
     socket
   end
 
-  # A minimal BEP 5 node on loopback that hands out `peer` to every get_peers.
-  # BEP 42 exempts loopback from the node-id/IP check, so the real DHT accepts
-  # its responses as trusted.
-  defp start_fake_dht_node(node_id, %Peer{ip: ip, port: peer_port}) do
+  # A minimal BEP 5 node on loopback that hands out `peer` to every get_peers,
+  # or knows nobody when `peer` is nil. BEP 42 exempts loopback from the
+  # node-id/IP check, so the real DHT accepts its responses as trusted.
+  defp start_fake_dht_node(node_id, peer) do
     {:ok, socket} = :gen_udp.open(0, [:binary, :inet, active: false, ip: {127, 0, 0, 1}])
     {:ok, port} = :inet.port(socket)
-    value = Compact.encode_peer(ip, peer_port)
+    value = compact_value(peer)
 
     # A passive socket may only be read by its controlling process, so the node
     # waits to be handed ownership before its first recv.
@@ -219,6 +231,21 @@ defmodule Cycle3MagnetDiscoveryCoverageTest do
       {:error, _} ->
         :ok
     end
+  end
+
+  defp compact_value(nil), do: nil
+  defp compact_value(%Peer{ip: ip, port: port}), do: Compact.encode_peer(ip, port)
+
+  # BEP 5: a node with no peers for the info-hash answers with `nodes` instead
+  # of `values`. Empty `nodes` is the honest "and I know nobody closer either",
+  # which converges the lookup immediately instead of widening the shortlist.
+  defp fake_node_reply(%{method: :get_peers} = query, node_id, nil) do
+    KRPC.encode_response(%{
+      transaction_id: query.transaction_id,
+      node_id: node_id,
+      token: "tok",
+      nodes: <<>>
+    })
   end
 
   defp fake_node_reply(%{method: :get_peers} = query, node_id, value) do
