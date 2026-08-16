@@ -24,6 +24,7 @@ defmodule ElixirTorrent do
   ## Public functions
 
     * `download/2` — start a download from a local `.torrent` path; optional `:download_dir`
+    * `download_magnet/2` — start from a magnet URI (BEP 9 metadata fetch, then a normal session)
     * `stats/2` — runtime stats as a map (preferred over `get/2`)
     * `list/0` — info hashes for all active torrent processes
     * `list_files/1` — per-file download progress
@@ -34,7 +35,8 @@ defmodule ElixirTorrent do
     * `version/0` — peer ID prefix advertised to peers (BEP 20)
     * `main/1` — escript CLI entrypoint
 
-  See the [README](readme.html) for a full quick-start guide.
+  See the [README](readme.html) for a full quick-start guide, and
+  [Protocol support](protocol.html) for the per-BEP status of the engine.
   """
 
   @package_version Mix.Project.config() |> Keyword.fetch!(:version)
