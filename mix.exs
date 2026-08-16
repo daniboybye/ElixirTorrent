@@ -98,7 +98,8 @@ defmodule ElixirTorrent.MixProject do
 
   @spec description() :: String.t()
   defp description do
-    "BitTorrent engine for Elixir — download, seed, session persistence, and a stable OTP public API."
+    "BitTorrent client engine for Elixir/OTP — download and seed with DHT, " <>
+      "magnet links, peer exchange, BitTorrent v2 and MSE/PE encryption, behind a small public API."
   end
 
   @spec source_url() :: String.t()
@@ -132,7 +133,10 @@ defmodule ElixirTorrent.MixProject do
         "mix.exs",
         "mix.lock",
         "README.md",
+        "PROTOCOL.md",
         "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
         "LICENSE",
         ".formatter.exs"
       ]
@@ -145,10 +149,11 @@ defmodule ElixirTorrent.MixProject do
       main: "readme",
       name: "ElixirTorrent",
       source_ref: "#{@version}",
-      extras: ["README.md", "CHANGELOG.md"],
+      extras: ["README.md", "PROTOCOL.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md"],
       groups_for_extras: [
         Introduction: ~r/README.md/,
-        Project: ~r/CHANGELOG.md/
+        Protocol: ~r/PROTOCOL.md/,
+        Project: ~r/(CHANGELOG|CONTRIBUTING|SECURITY).md/
       ],
       groups_for_modules: [
         "Public API": [ElixirTorrent, Torrents]
