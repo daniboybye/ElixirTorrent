@@ -714,6 +714,16 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
     end
 
     test "apply_tcp_performance and open_udp succeed on this host" do
+      # `open_udp/1` collapses every failure to a bare `:error`, which is all the
+      # callers need but leaves a failing run on a machine we cannot attach to
+      # with no clue at all. Open the same socket directly first: `:gen_udp` then
+      # names the option or address the platform refused, and the wrapper
+      # assertion below only has to confirm it agrees.
+      for family <- [:inet, :inet6] do
+        assert {:ok, raw} = :gen_udp.open(0, Acceptor.socket_options(family))
+        :gen_udp.close(raw)
+      end
+
       assert {:ok, udp} = Acceptor.open_udp(:inet)
       :gen_udp.close(udp)
       assert {:ok, udp6} = Acceptor.open_udp(:inet6)
@@ -1308,6 +1318,110 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
                  UtHolepunch.decode(extract_extended_payload(wire))
 
         :gen_tcp.close(socket)
+        :gen_tcp.close(listen)
+      end)
+    end
+  end
+
+  describe "outbound dialling across MSE RC4 backends" do
+    setup do
+      on_exit(fn -> Application.delete_env(:elixir_torrent, :mse_rc4) end)
+      :ok
+    end
+
+    test "with MSE disabled, :prefer degrades and the first bytes on the wire are plaintext" do
+      # The whole MSE handshake is RC4-encrypted, so a node that cannot do RC4
+      # must not open with `Ya` — it would never get a taggable {:mse, _} error
+      # back and the plaintext retry would never run. Before Peer.MSE.RC4 that
+      # was the state of every OpenSSL-3-without-legacy build; :disabled is now
+      # the only way to reach it, which is what makes this branch testable here.
+      Application.put_env(:elixir_torrent, :mse_outbound, :prefer)
+      Application.put_env(:elixir_torrent, :mse_rc4, :disabled)
+
+      hash = :crypto.strong_rand_bytes(20)
+      remote_id = <<7::160>>
+
+      with_torrent_stack(hash, fn _hash ->
+        {:ok, listen, port, ip} = listen_on_loopback()
+        parent = self()
+        close_gate = make_ref()
+
+        server =
+          Task.async(fn ->
+            send(parent, {:dial_server_ready, self()})
+            {:ok, sock} = :gen_tcp.accept(listen, @timeout)
+
+            # No MSE `Ya` first: the very first byte is the BT pstrlen.
+            first = :gen_tcp.recv(sock, 68, @timeout)
+            send(parent, {:dial_server_first_bytes, first})
+
+            assert {:ok, <<19, "BitTorrent protocol"::binary, _::binary>>} = first
+            assert :ok = :gen_tcp.send(sock, bt_handshake(hash, remote_id))
+
+            receive do
+              ^close_gate -> :ok
+            end
+
+            :gen_tcp.close(sock)
+          end)
+
+        assert_receive {:dial_server_ready, _}, @timeout
+        _result = Handshakes.dial_peers([%Peer{ip: ip, port: port}], hash)
+
+        assert_receive {:dial_server_first_bytes,
+                        {:ok, <<19, "BitTorrent protocol"::binary, _::binary>>}},
+                       @timeout + 5_000
+
+        send(server.pid, close_gate)
+        assert :ok = Task.await(server, @timeout + 5_000)
+        :gen_tcp.close(listen)
+      end)
+    end
+
+    test "with the pure RC4 backend, :prefer still completes a real MSE handshake" do
+      # The counterpart of the test above: forcing :pure on a host that has
+      # libcrypto RC4 is how the Windows code path gets exercised here.
+      Application.put_env(:elixir_torrent, :mse_outbound, :prefer)
+      Application.put_env(:elixir_torrent, :mse_rc4, :pure)
+
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_torrent_stack(hash, fn _hash ->
+        {:ok, listen, port, ip} = listen_on_loopback()
+        parent = self()
+        close_gate = make_ref()
+
+        server =
+          Task.async(fn ->
+            send(parent, {:dial_server_ready, self()})
+            {:ok, sock} = :gen_tcp.accept(listen, @timeout)
+
+            result =
+              Peer.MSE.Handshake.respond(sock, Peer.MSE.Handshake.resolver([hash]), @timeout)
+
+            send(parent, {:mse_responded, result})
+
+            receive do
+              ^close_gate -> :ok
+            end
+
+            :gen_tcp.close(sock)
+          end)
+
+        assert_receive {:dial_server_ready, _}, @timeout
+        _result = Handshakes.dial_peers([%Peer{ip: ip, port: port}], hash)
+
+        assert_receive {:mse_responded, {:ok, responded}}, @timeout + 5_000
+
+        # The IA carried inside the encrypted handshake is our BT handshake for
+        # this torrent — decrypted by an RC4 that libcrypto never provided.
+        assert {:pure, _} = responded.recv
+
+        assert <<19, "BitTorrent protocol"::binary, _reserved::64, ^hash::binary-size(20),
+                 _peer_id::binary-size(20)>> = responded.leftover
+
+        send(server.pid, close_gate)
+        assert :ok = Task.await(server, @timeout + 5_000)
         :gen_tcp.close(listen)
       end)
     end

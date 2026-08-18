@@ -368,7 +368,11 @@ defmodule DiscoveryCoverageBatchTest do
 
     on_exit(fn ->
       Process.exit(pid, :kill)
-      if Process.alive?(agent), do: Agent.stop(agent, :normal, 1_000)
+      # `Process.alive?` then `Agent.stop` is the TOCTOU shape `TESTING.md`
+      # forbids: the agent can exit in the window between the two, and the
+      # `:noproc` exit then fails the test from inside `on_exit`. `safe_stop/2`
+      # turns "already gone" into the `:ok` it means here.
+      TestSupport.Sync.safe_stop(agent, 1_000)
       :gen_tcp.close(listen)
     end)
 

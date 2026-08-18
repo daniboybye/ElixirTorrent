@@ -1553,7 +1553,15 @@ defmodule PeerControllerStateTest do
 
     assert [{task, _}] = Registry.lookup(Registry, key)
     ref = Process.monitor(task)
-    assert_receive {:DOWN, ^ref, :process, ^task, :normal}
+
+    # `Registry.lookup` followed by `Process.monitor` is a TOCTOU window: an
+    # upload task that already finished delivers `{:DOWN, ..., :noproc}` instead
+    # of `:normal`. Both answer the question this helper asks — the task ran to
+    # completion — and only an abnormal exit reason is a failure. Asserting
+    # `:normal` alone made the case flaky in proportion to how slow the machine
+    # is, which is exactly the wrong way round.
+    assert_receive {:DOWN, ^ref, :process, ^task, reason}
+    assert reason in [:normal, :noproc]
   end
 
   defp start_piece_worker(hash, index) do
