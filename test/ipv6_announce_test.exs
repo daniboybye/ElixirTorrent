@@ -50,16 +50,21 @@ defmodule IPv6AnnounceTest do
   end
 
   describe "resolve_hosts/1 dual-family DNS" do
-    test "returns both A and AAAA for localhost when available" do
-      case Tracker.resolve_hosts("localhost") do
-        {:ok, hosts} ->
-          families = Enum.map(hosts, &elem(&1, 1)) |> Enum.uniq()
-          assert :inet in families
+    test "returns both A and AAAA for localhost" do
+      # `test_helper.exs` seeds both loopback names into `inet_db`, so this no
+      # longer depends on what the platform's hosts file happens to contain —
+      # Windows ships those lines commented out. If it ever fails again, the
+      # network isolation shim is broken, and that must be loud rather than
+      # skipped.
+      assert {:ok, hosts} = Tracker.resolve_hosts("localhost")
 
-        {:error, :nxdomain} ->
-          # Some CI environments lack localhost DNS; skip assertion.
-          :ok
-      end
+      families =
+        hosts
+        |> Enum.map(&elem(&1, 1))
+        |> Enum.uniq()
+
+      assert :inet in families
+      assert :inet6 in families
     end
 
     test "fails only when both A and AAAA resolution fail" do

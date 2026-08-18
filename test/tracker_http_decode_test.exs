@@ -619,6 +619,7 @@ defmodule TrackerHTTPDecodeTest do
     test "resolve_hosts returns localhost addresses without DNS" do
       assert {:ok, hosts} = Tracker.resolve_hosts("localhost")
       assert Enum.all?(hosts, fn {_ip, family} -> family in [:inet, :inet6] end)
+      assert Enum.all?(hosts, fn {ip, _family} -> Acceptor.loopback_ip?(ip) end)
     end
 
     test "expected_dns_failure? recognizes common dead-tracker reasons" do
@@ -658,9 +659,10 @@ defmodule TrackerHTTPDecodeTest do
 
     {port, pid} = start_http_tracker(responder)
 
-    on_exit(fn ->
-      if Process.alive?(agent), do: Agent.stop(agent, :normal, 1_000)
-    end)
+    # `Process.alive?` then `Agent.stop` is a TOCTOU: the agent can exit in the
+    # window between them and the `:noproc` exit fails the test from inside
+    # `on_exit`. `safe_stop/2` treats "already gone" as the success it is.
+    on_exit(fn -> TestSupport.Sync.safe_stop(agent, 1_000) end)
 
     {port, pid}
   end

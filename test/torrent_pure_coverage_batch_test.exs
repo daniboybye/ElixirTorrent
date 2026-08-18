@@ -244,15 +244,23 @@ defmodule TorrentPureCoverageBatchTest do
 
       assert :error = Session.load(hash)
 
-      File.write!(Session.path(hash), :erlang.term_to_binary(%{}))
-      File.chmod!(Session.dir(), 0o500)
+      # `delete/1` swallows `:enoent` and surfaces everything else. Reaching the
+      # "everything else" branch used to mean chmod-ing the session directory to
+      # 0o500 — a POSIX-only trick: on Windows `File.chmod/2` only toggles a
+      # file's read-only attribute, a directory's mode bits do not gate deleting
+      # entries inside it, and `File.rm/1` then just succeeded. Putting a
+      # *directory* where the session file belongs fails `unlink` on every
+      # platform, so the branch is covered without depending on the permission
+      # model. The exact errno is the platform's business (`:eperm` on
+      # macOS/Linux, `:eacces` on Windows); the contract is only that it is not
+      # `:enoent` and is not swallowed.
+      File.rm(Session.path(hash))
+      File.mkdir_p!(Session.path(hash))
 
-      on_exit(fn ->
-        File.chmod!(Session.dir(), 0o700)
-        File.rm(Session.path(hash))
-      end)
+      on_exit(fn -> File.rm_rf!(Session.path(hash)) end)
 
-      assert {:error, :eacces} = Session.delete(hash)
+      assert {:error, reason} = Session.delete(hash)
+      assert reason in [:eperm, :eacces, :eisdir]
     end
   end
 

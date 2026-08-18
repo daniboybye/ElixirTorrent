@@ -12,7 +12,29 @@
 # loads /etc/resolv.conf on first use — which is how AAAA queries for fixture
 # tracker hostnames were still reaching the LAN router. Pointing it at an empty
 # file leaves it with no nameserver to ask, so it answers :nxdomain instead.
-:ok = :inet_db.set_resolv_conf(~c"/dev/null")
+#
+# A real empty file, not `/dev/null`: that path does not exist on Windows, where
+# `set_resolv_conf/1` then returns `:error` and this match brought the whole
+# suite down before the first test ran.
+empty_resolv_conf = Path.join(System.tmp_dir!(), "elixir_torrent_empty_resolv.conf")
+File.write!(empty_resolv_conf, "")
+:ok = :inet_db.set_resolv_conf(String.to_charlist(empty_resolv_conf))
+
+# `[:file]` lookup answers from the platform's hosts file, and that file is not
+# the same everywhere. On Unix `/etc/hosts` ships the `localhost` lines. On
+# Windows the corresponding lines in
+# `%SystemRoot%\system32\drivers\etc\hosts` are *commented out* by default:
+# the DNS Client service answers `localhost` internally, from the resolver we
+# have just disconnected. So `localhost` came back `:nxdomain` there while it
+# resolved on macOS.
+#
+# Seed the two loopback names into `inet_db`'s own host table instead of
+# relying on the file. `add_host/2` entries are consulted by the `:file` lookup
+# method ahead of the file-loaded ones, so this is platform-independent, and it
+# does not widen the isolation by one name: everything else still fails
+# `:nxdomain` with no packet sent.
+:ok = :inet_db.add_host({127, 0, 0, 1}, [~c"localhost"])
+:ok = :inet_db.add_host({0, 0, 0, 0, 0, 0, 0, 1}, [~c"localhost"])
 
 :ok = :logger.update_handler_config(:default, :level, :warning)
 ExUnit.start(capture_log: true)
