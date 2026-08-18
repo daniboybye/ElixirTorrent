@@ -463,8 +463,23 @@ defmodule Acceptor.Connection.Handshakes do
 
   # Runtime config (also flippable without a recompile) so the type checker
   # doesn't fold the value and flag the branch the default doesn't take.
+  #
+  # Degrades to :plaintext when MSE is unavailable. The MSE handshake is
+  # RC4-encrypted end to end — even the exchange that selects a plaintext data
+  # stream — so a node that cannot do RC4 cannot use the scheme at all, and
+  # dialling anyway would raise inside MSE.new_cipher/1 instead of returning a
+  # taggable {:mse, _} error, so the plaintext retry below would never fire.
+  # That is how an OpenSSL 3 build without the legacy provider ended up unable
+  # to reach any peer. Peer.MSE.RC4 removes that cause; the guard stays because
+  # `config :elixir_torrent, :mse_rc4, :disabled` is still a supported way to
+  # turn MSE off, and it is what makes this branch testable anywhere.
   @spec mse_outbound() :: :plaintext | :prefer
-  defp mse_outbound, do: Application.get_env(:elixir_torrent, :mse_outbound, @mse_outbound)
+  defp mse_outbound do
+    case Application.get_env(:elixir_torrent, :mse_outbound, @mse_outbound) do
+      :prefer -> if Peer.MSE.available?(), do: :prefer, else: :plaintext
+      other -> other
+    end
+  end
 
   # Connect + handshake, with a one-shot plaintext fallback: if MSE was preferred
   # but the encrypted handshake itself failed (peer speaks plaintext only, or
@@ -827,6 +842,18 @@ defmodule Acceptor.Connection.Handshakes do
   # the cipher-wrapped socket.
   @spec do_recv_mse(Peer.Transport.socket(), binary()) :: :ok
   defp do_recv_mse(socket, prefix) do
+    if Peer.MSE.available?() do
+      do_recv_mse_available(socket, prefix)
+    else
+      # MSE is switched off, so we cannot answer an encrypted inbound handshake.
+      # Drop it rather than raising out of the acceptor: the peer is free to
+      # come back in the clear, which do_recv_plaintext/1 handles.
+      safe_close(socket)
+    end
+  end
+
+  @spec do_recv_mse_available(Peer.Transport.socket(), binary()) :: :ok
+  defp do_recv_mse_available(socket, prefix) do
     resolver = Handshake.resolver(Torrents.list())
 
     case Handshake.respond(socket, resolver, @handshake_recv_timeout_ms, prefix) do
