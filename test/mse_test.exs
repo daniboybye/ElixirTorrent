@@ -62,8 +62,12 @@ defmodule Peer.MSETest do
 
       mse = MSE.crypt(MSE.new_cipher(key), <<0::800>>)
 
-      raw_ref = :crypto.crypto_init(:rc4, key, true)
-      raw = :crypto.crypto_update(raw_ref, :binary.copy(<<0>>, 1024 + 100))
+      # Reference keystream from an undiscarded cipher. Not `:crypto` directly:
+      # libcrypto has no RC4 on an OpenSSL 3 build without the legacy provider
+      # (Windows), and hardcoding it here made this test fail on the very
+      # platform the built-in implementation exists for.
+      raw_ref = Peer.MSE.RC4.new(key)
+      raw = Peer.MSE.RC4.crypt(raw_ref, :binary.copy(<<0>>, 1024 + 100))
       raw_after_discard = binary_part(raw, 1024, 100)
 
       assert binary_part(mse, 0, 100) == raw_after_discard
@@ -101,6 +105,26 @@ defmodule Peer.MSETest do
       assert byte_size(MSE.prime()) == 96
       assert MSE.crypto_plaintext() == 0x01
       assert MSE.crypto_rc4() == 0x02
+    end
+  end
+
+  describe "available?/0" do
+    test "MSE is available out of the box, whatever libcrypto offers" do
+      # This is the behaviour change: it used to answer
+      # `:rc4 in :crypto.supports(:ciphers)`, so a host without libcrypto RC4
+      # fell back to plaintext-only peering. Peer.MSE.RC4 removes that
+      # dependency, so the default answer is now unconditionally true.
+      assert MSE.available?()
+    end
+
+    test "is stable across calls" do
+      assert MSE.available?() == MSE.available?()
+    end
+
+    test "new_cipher/1 works regardless of what libcrypto offers" do
+      # The old contract was "available?/0 is true exactly when new_cipher/1
+      # does not raise". There is no longer a raising branch to pair with.
+      assert MSE.crypt(MSE.new_cipher(:binary.copy(<<1>>, 20)), "abc") != "abc"
     end
   end
 end
