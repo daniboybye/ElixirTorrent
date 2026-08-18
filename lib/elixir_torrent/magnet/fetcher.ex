@@ -1047,27 +1047,49 @@ defmodule Magnet.Fetcher do
 
   @spec finalize_piece_attempt(
           {:ok, {non_neg_integer(), binary(), pos_integer()}}
+          | {:error, term()}
           | {:error, :all_rejected, term() | nil}
         ) :: {:ok, {non_neg_integer(), binary(), pos_integer()}} | {:error, term()}
   defp finalize_piece_attempt({:ok, _} = ok), do: ok
+
+  # `reduce_piece_attempt/4` halts with a plain `{:error, reason}` when the
+  # failure is not worth trying the next peer for, so the 3-element accumulator
+  # is not the only shape that arrives here. Missing this clause turned every
+  # non-retryable peer error into a FunctionClauseError that took the whole
+  # magnet fetch down — invisible on macOS, where a peer that goes away reports
+  # `:closed` (retryable), and immediate on Windows, where the same event
+  # reports `:econnreset`/`:econnaborted`.
+  defp finalize_piece_attempt({:error, _reason} = error), do: error
 
   defp finalize_piece_attempt({:error, :all_rejected, nil}), do: {:error, :metadata_unavailable}
 
   defp finalize_piece_attempt({:error, :all_rejected, reason}),
     do: {:error, reason || :metadata_unavailable}
 
+  # "Retryable" here means: this peer is done, ask the next one in the pool.
+  # `:econnreset`/`:econnaborted`/`:etimedout` are the Windows spellings of the
+  # same event macOS reports as `:closed`/`:enotconn`/`:timeout` — a peer that
+  # dropped the connection mid-transfer. Treating them as fatal made a single
+  # rude peer abort a magnet fetch that other peers could have completed.
   @retryable_piece_errors [
     :closed,
     :choked,
     :timeout,
+    :etimedout,
     :einval,
     :enotconn,
+    :econnreset,
+    :econnaborted,
     :error,
     :invalid_piece_size
   ]
 
   @spec retryable_piece_error?(term()) :: boolean()
   defp retryable_piece_error?(reason), do: reason in @retryable_piece_errors
+
+  @doc false
+  @spec retryable_piece_error_for_test?(term()) :: boolean()
+  def retryable_piece_error_for_test?(reason), do: retryable_piece_error?(reason)
 
   @spec shuffle(list()) :: list()
   defp shuffle(list) do

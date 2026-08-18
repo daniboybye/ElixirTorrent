@@ -303,6 +303,43 @@ defmodule Magnet.ConnectionFetcherBatch4Test do
       ref = make_ref()
       assert {:error, :timeout} = Magnet.Fetcher.await(ref, 0)
     end
+
+    test "a non-retryable piece error is returned, not raised" do
+      # The per-peer reducer halts with a plain `{:error, reason}` as soon as a
+      # failure is not worth asking the next peer about; the accumulator it
+      # otherwise carries is a 3-tuple. `finalize_piece_attempt/1` only matched
+      # the accumulator, so every such error raised FunctionClauseError and took
+      # the whole magnet fetch down instead of failing it.
+      #
+      # `:no_ut_metadata` reaches it without a socket: the peer's BEP 10
+      # handshake never advertised `ut_metadata`, so there is no extension id to
+      # send a request on. On Windows the same clause was reached far more often
+      # through `:econnreset`, which is how a dropped peer reports there while
+      # macOS reports the retryable `:closed`.
+      conn = %Magnet.Connection{
+        socket: nil,
+        peer: %Peer{ip: {127, 0, 0, 1}, port: 1},
+        hash: <<41::160>>,
+        ltep: Session.new(),
+        metadata_size: 256
+      }
+
+      assert {:error, :no_ut_metadata} = Magnet.Fetcher.download_pieces([conn], <<41::160>>)
+    end
+
+    test "a peer that resets mid-transfer is retryable, so the next peer is tried" do
+      # `:econnreset`/`:econnaborted`/`:etimedout` are the Windows spellings of
+      # the disconnect macOS reports as `:closed`/`:enotconn`/`:timeout`. Left
+      # out of the retryable set, one rude peer aborted a fetch the rest of the
+      # pool could have finished.
+      for reason <- [:closed, :enotconn, :timeout, :econnreset, :econnaborted, :etimedout] do
+        assert Magnet.Fetcher.retryable_piece_error_for_test?(reason),
+               "expected #{inspect(reason)} to let the fetch move to the next peer"
+      end
+
+      refute Magnet.Fetcher.retryable_piece_error_for_test?(:no_ut_metadata)
+      refute Magnet.Fetcher.retryable_piece_error_for_test?(:info_hash_mismatch)
+    end
   end
 
   describe "Connection wire edge cases" do
