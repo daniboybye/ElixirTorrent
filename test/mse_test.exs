@@ -2,6 +2,7 @@ defmodule Peer.MSETest do
   use ExUnit.Case, async: true
 
   alias Peer.MSE
+  alias Peer.MSE.RC4
 
   describe "Diffie-Hellman key agreement" do
     test "both sides derive the same 96-byte shared secret" do
@@ -66,8 +67,8 @@ defmodule Peer.MSETest do
       # libcrypto has no RC4 on an OpenSSL 3 build without the legacy provider
       # (Windows), and hardcoding it here made this test fail on the very
       # platform the built-in implementation exists for.
-      raw_ref = Peer.MSE.RC4.new(key)
-      raw = Peer.MSE.RC4.crypt(raw_ref, :binary.copy(<<0>>, 1024 + 100))
+      raw_ref = RC4.new(key)
+      raw = RC4.crypt(raw_ref, :binary.copy(<<0>>, 1024 + 100))
       raw_after_discard = binary_part(raw, 1024, 100)
 
       assert binary_part(mse, 0, 100) == raw_after_discard
