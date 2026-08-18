@@ -396,6 +396,7 @@ defmodule Cycle2PureProtocolCoverageTest do
     test "handshake_exchange ignores zero-length keepalive frames" do
       {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, packet: :raw])
       {:ok, port} = :inet.port(listen)
+      close_gate = make_ref()
 
       accept =
         Task.async(fn ->
@@ -424,6 +425,21 @@ defmodule Cycle2PureProtocolCoverageTest do
             })
 
           :ok = :gen_tcp.send(socket, Peer.LTEP.extended_message_wire(0, peer_hs))
+
+          # Explicit close gate. This server never reads the client's own LTEP
+          # extended handshake, so its receive queue is non-empty when it closes,
+          # and closing with unread data queued is an *abortive* close: the stack
+          # sends RST instead of FIN. What that costs differs by platform. BSD
+          # and Linux hand the application the bytes already sitting in its
+          # receive buffer and only report the reset once the buffer runs dry;
+          # Winsock discards the buffer and fails the next `recv` outright with
+          # `:econnreset`. So the extended handshake written just above reached
+          # the client on macOS and vanished on Windows. Hold the socket open
+          # until the client says it is done reading.
+          receive do
+            ^close_gate -> :ok
+          end
+
           :gen_tcp.close(socket)
           :gen_tcp.close(listen)
           :ok
@@ -453,6 +469,8 @@ defmodule Cycle2PureProtocolCoverageTest do
 
       assert Session.peer_extension_id(session, "ut_metadata") == 2
       assert Session.local_reqq() >= 250
+
+      send(accept.pid, close_gate)
       :gen_tcp.close(client)
       assert :ok = Task.await(accept, @timeout)
     end
