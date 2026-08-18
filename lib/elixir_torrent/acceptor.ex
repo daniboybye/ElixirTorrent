@@ -82,8 +82,20 @@ defmodule Acceptor do
     bind_opts = if bind_ip, do: [ip: bind_ip], else: []
 
     case :gen_udp.open(0, socket_options(family) ++ bind_opts) do
-      {:ok, socket} -> {:ok, socket}
-      {:error, _} -> :error
+      {:ok, socket} ->
+        {:ok, socket}
+
+      # The caller only needs "no socket", but the reason is the only clue a
+      # host-specific failure (a family the machine has switched off, a source
+      # address that vanished between the getifaddrs snapshot and the bind)
+      # ever leaves behind, and it is otherwise unrecoverable from a test
+      # report on a machine we cannot attach to.
+      {:error, reason} ->
+        Logger.debug(
+          "[acceptor] udp_open_failed family=#{family} bind=#{if bind_ip, do: format_ip(bind_ip), else: "any"} reason=#{inspect(reason)}"
+        )
+
+        :error
     end
   end
 
@@ -297,6 +309,201 @@ defmodule Acceptor do
       _ -> true
     end
   end
+
+  @doc """
+  Whether `ip` is a loopback address (`127.0.0.0/8` or `::1`).
+
+  A loopback destination is reachable *only* from a loopback source. The route
+  to it leaves through the loopback interface, and that interface owns no other
+  address, so a socket bound to a LAN/global source address has no valid path to
+  it. Windows enforces that (strong host model, the default since Vista) and
+  fails the `connect`/`sendto` with `:eaddrnotavail`; macOS/BSD use the weak host
+  model and quietly let the packet through with a foreign source address. The
+  bind therefore has to be skipped for loopback destinations on every platform —
+  see `ARCHITECTURE.md` § "Outbound source binding".
+  """
+  @spec loopback_ip?(:inet.ip_address()) :: boolean()
+  def loopback_ip?({127, _, _, _}), do: true
+  def loopback_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  def loopback_ip?(_), do: false
+
+  @doc """
+  The local address the routing table picks for a packet aimed at `dest`.
+
+  Asks the kernel instead of guessing: a UDP socket is opened, `connect`ed to
+  the destination and `sockname`d. `connect/3` on a datagram socket only stores
+  the peer and runs the route lookup that fixes the local address — **no packet
+  is sent** — so this is a pure question to the routing table, cheap enough to
+  ask per announce.
+
+  Returns `nil` when the family is unavailable, when there is no route
+  (`:enetunreach`/`:ehostunreach`), or when the stack answers with the
+  unspecified address.
+  """
+  @spec route_source_ip(:inet.ip_address(), :inet.port_number()) :: :inet.ip_address() | nil
+  def route_source_ip(dest, port) when tuple_size(dest) in [4, 8] do
+    family = if tuple_size(dest) == 4, do: :inet, else: :inet6
+
+    case :gen_udp.open(0, [:binary, family, {:active, false}]) do
+      {:ok, socket} ->
+        try do
+          probe_route_source(socket, dest, probe_port(port))
+        after
+          :gen_udp.close(socket)
+        end
+
+      {:error, reason} ->
+        Logger.debug(
+          "[acceptor] route_probe_no_socket family=#{family} reason=#{inspect(reason)}"
+        )
+
+        nil
+    end
+  end
+
+  @spec probe_route_source(port(), :inet.ip_address(), :inet.port_number()) ::
+          :inet.ip_address() | nil
+  defp probe_route_source(socket, dest, port) do
+    with :ok <- :gen_udp.connect(socket, dest, port),
+         {:ok, {local, _port}} <- :inet.sockname(socket) do
+      if unspecified_ip?(local), do: nil, else: local
+    else
+      {:error, reason} ->
+        Logger.debug(
+          "[acceptor] route_probe_failed dest=#{format_ip(dest)} reason=#{inspect(reason)}"
+        )
+
+        nil
+    end
+  end
+
+  # A datagram socket cannot be connected to port 0 (`:eaddrnotavail` on
+  # macOS), and the port is irrelevant to the route lookup anyway.
+  @spec probe_port(term()) :: :inet.port_number()
+  defp probe_port(port) when is_integer(port) and port in 1..65_535, do: port
+  defp probe_port(_port), do: 1
+
+  @doc """
+  The source address to bind for an announce to `dest`, given the address BEP 7
+  would like us to advertise (`preferred`).
+
+  BEP 7 wants the tracker to see the announce arrive *from* the address we are
+  claiming, so the announce socket is bound to it. That bind is a promise the
+  routing table has to keep: the packet must leave through an interface that
+  owns the bound address. **Windows enforces this (strong host model) and fails
+  the `connect`/`sendto` with `:eaddrnotavail`; macOS/BSD are weak-host and emit
+  the packet with a source the outgoing interface does not own.** Picking the
+  source from a *list* of our addresses (`all_global_ips/0`) therefore breaks
+  every announce on Windows as soon as the machine is multi-homed — a VPN
+  tunnel, a second NIC, or phone tethering.
+
+  A `nil` destination means "not resolved here" (the HTTP path lets Hackney do
+  its own DNS); there is nothing to route against, so the BEP 7 bind is kept.
+  """
+  @spec announce_source_ip(
+          :inet.ip_address() | nil,
+          :inet.port_number(),
+          :inet.ip_address() | nil
+        ) :: :inet.ip_address() | nil
+  def announce_source_ip(nil, _port, preferred), do: preferred
+
+  def announce_source_ip(_dest, _port, nil), do: nil
+
+  def announce_source_ip(dest, port, preferred) do
+    if loopback_ip?(dest) do
+      nil
+    else
+      case route_source_ip(dest, port) do
+        # The common single-homed case: the stack would use exactly the address
+        # we want to announce. No getifaddrs walk needed.
+        ^preferred -> preferred
+        route_source -> select_source_ip(dest, preferred, route_source, :inet.getifaddrs())
+      end
+    end
+  end
+
+  @doc false
+  @spec select_source_ip(
+          :inet.ip_address(),
+          :inet.ip_address() | nil,
+          :inet.ip_address() | nil,
+          {:ok, [{charlist(), keyword()}]} | {:error, term()}
+        ) :: :inet.ip_address() | nil
+  def select_source_ip(dest, preferred, route_source, ifaddrs) do
+    cond do
+      # Loopback leaves through an interface that owns no global address.
+      loopback_ip?(dest) ->
+        nil
+
+      # Nothing to promise for this family, or a preference of the wrong
+      # family: let the stack choose and announce whatever it uses.
+      preferred == nil or not same_family?(dest, preferred) ->
+        nil
+
+      # The route lookup told us nothing (no route, or no socket of that
+      # family). Keep the BEP 7 bind rather than silently dropping it; the
+      # announce is already in trouble, and `Tracker` retries unbound if the
+      # bind is what the stack rejects.
+      route_source == nil ->
+        preferred
+
+      # The stack would use the address we want anyway.
+      route_source == preferred ->
+        preferred
+
+      # A different address on the *same* interface. The strong host model is
+      # satisfied — the interface that routes to `dest` owns `preferred` — and
+      # BEP 7's choice survives. This is the normal IPv6 case: RFC 6724 source
+      # selection prefers a temporary/privacy address, while we announce (and
+      # derive our BEP 42 DHT node id from) the address `all_global_ips/0`
+      # picked. Binding keeps both consistent.
+      same_interface?(ifaddrs, preferred, route_source) ->
+        preferred
+
+      # `preferred` lives on an interface that does not route to `dest` — VPN
+      # tunnel up, second NIC, tethering. Announce the address the route
+      # actually uses; it is a global address, so BEP 7 still holds, and it is
+      # the address the tracker would record for us in any case.
+      global_ip?(route_source) ->
+        route_source
+
+      # The route leaves from something we would never advertise (link-local,
+      # or a loopback source for a non-loopback destination). Bind nothing.
+      true ->
+        nil
+    end
+  end
+
+  @spec same_family?(:inet.ip_address(), :inet.ip_address()) :: boolean()
+  defp same_family?(a, b) when is_tuple(a) and is_tuple(b),
+    do: tuple_size(a) == tuple_size(b)
+
+  defp same_family?(_a, _b), do: false
+
+  # Two addresses share an interface when one `getifaddrs` entry lists both.
+  @spec same_interface?(
+          {:ok, [{charlist(), keyword()}]} | {:error, term()},
+          :inet.ip_address(),
+          :inet.ip_address()
+        ) :: boolean()
+  defp same_interface?({:ok, ifs}, a, b) do
+    Enum.any?(ifs, fn {_ifname, props} ->
+      addresses = Keyword.get_values(props, :addr)
+      a in addresses and b in addresses
+    end)
+  end
+
+  defp same_interface?(_ifaddrs, _a, _b), do: false
+
+  @spec unspecified_ip?(:inet.ip_address()) :: boolean()
+  defp unspecified_ip?({0, 0, 0, 0}), do: true
+  defp unspecified_ip?({0, 0, 0, 0, 0, 0, 0, 0}), do: true
+  defp unspecified_ip?(_), do: false
+
+  @spec global_ip?(term()) :: boolean()
+  defp global_ip?({_a, _b, _c, _d} = ip), do: global_ipv4?(ip)
+  defp global_ip?({_s1, _s2, _s3, _s4, _s5, _s6, _s7, _s8} = ip), do: global_ipv6?(ip)
+  defp global_ip?(_ip), do: false
 
   @spec this_host_ip?(:inet.ip_address()) :: boolean()
   defp this_host_ip?({127, _, _, _}), do: true

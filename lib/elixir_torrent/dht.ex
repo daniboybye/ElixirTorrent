@@ -1649,8 +1649,12 @@ defmodule DHT do
   defp log_dht_listen(_socket_v4, socket_v6, port, tables) do
     %{inet: ip4, inet6: ip6} = Acceptor.primary_ips()
 
+    # The IPv4 socket is deliberately opened on INADDR_ANY (`open_v4_socket/1`),
+    # so this line must not claim it is bound to the primary address — that
+    # misread once sent a Windows `:eaddrnotavail` investigation at the DHT
+    # socket instead of at the tracker announce, which is where the binds are.
     Logger.info(
-      "[dht] socket family=inet port=#{port} bind=#{if ip4, do: Acceptor.format_ip(ip4), else: "any"} want=#{inspect(dht_want())}"
+      "[dht] socket family=inet port=#{port} bind=any local=#{if ip4, do: Acceptor.format_ip(ip4), else: "none"} want=#{inspect(dht_want())}"
     )
 
     if socket_v6 && ip6 do
