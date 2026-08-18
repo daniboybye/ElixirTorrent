@@ -12,8 +12,17 @@ defmodule Peer.MSE do
   mandatory 1024-byte keystream discard. The handshake state machine that drives
   these over a connection lives separately.
 
+  RC4 comes either from `:crypto` or, where libcrypto refuses to provide it
+  (OpenSSL 3 keeps RC4 in an optional `legacy` provider that the Windows ERTS
+  build has no module for), from `Peer.MSE.RC4`. See `backend/0`; the choice is
+  invisible to callers.
+
   Reference: <https://wiki.vuze.com/w/Message_Stream_Encryption>.
   """
+
+  alias Peer.MSE.RC4
+
+  require Logger
 
   # Well-known MSE Diffie-Hellman parameters: the 768-bit MODP group, generator 2.
   @p String.to_integer(
@@ -25,6 +34,9 @@ defmodule Peer.MSE do
   @key_len 96
   @rc4_discard 1024
 
+  # Memoisation slot for the libcrypto RC4 probe.
+  @availability_key {__MODULE__, :rc4_available}
+
   # Verification constant (8 zero bytes) — lets the receiver confirm it derived
   # the right key: the first decrypted bytes after the hashes must equal this.
   @vc <<0::64>>
@@ -34,7 +46,8 @@ defmodule Peer.MSE do
   @crypto_rc4 0x02
 
   @type keypair :: %{private: binary(), public: binary()}
-  @type cipher :: :crypto.crypto_state()
+  @type cipher :: :crypto.crypto_state() | {:pure, RC4.t()}
+  @type backend :: :crypto | :pure | :disabled
 
   @doc "The verification constant (8 zero bytes)."
   @spec vc() :: binary()
@@ -99,19 +112,99 @@ defmodule Peer.MSE do
   def key_b(s, skey), do: hash("keyB", [s, skey])
 
   @doc """
+  Which RC4 implementation this node will use: `:crypto`, `:pure`, or
+  `:disabled`.
+
+  Resolved from `config :elixir_torrent, :mse_rc4`, which accepts:
+
+    * `:auto` (default) — `:crypto` when the linked libcrypto exposes RC4,
+      otherwise `:pure`;
+    * `:crypto` / `:pure` — force one implementation. Forcing `:pure` on a host
+      that has `:crypto` RC4 is how the fallback gets exercised in tests;
+    * `:disabled` — refuse MSE entirely and speak only plaintext.
+
+  The libcrypto probe is memoised (it cannot change while the VM is up); the
+  configured override is read each time, so it stays injectable.
+  """
+  @spec backend() :: backend()
+  def backend do
+    case Application.get_env(:elixir_torrent, :mse_rc4, :auto) do
+      :auto -> if crypto_has_rc4?(), do: :crypto, else: :pure
+      other when other in [:crypto, :pure, :disabled] -> other
+    end
+  end
+
+  @doc """
+  Whether this node will speak MSE at all.
+
+  Every MSE handshake is itself RC4-encrypted — even the exchange that ends up
+  selecting a *plaintext* data stream — so a node without RC4 cannot use the
+  scheme at all and must dial in the clear instead. Since `Peer.MSE.RC4` gives
+  us RC4 unconditionally, this is now false only when MSE is explicitly
+  disabled by configuration.
+  """
+  @spec available?() :: boolean()
+  def available?, do: backend() != :disabled
+
+  # OpenSSL 3 moved RC4 into the optional `legacy` provider. OTP's crypto NIF
+  # does try `OSSL_PROVIDER_load(NULL, "legacy")`, but tolerates the load
+  # failing, so on a build whose libcrypto ships no legacy module (the Windows
+  # ERTS, measured against OpenSSL 3.5.5) `:crypto.supports(:ciphers)` omits
+  # `:rc4` and `crypto_init/3` raises `:notsup`. Same OpenSSL version on macOS
+  # via Homebrew does have the module and does list `:rc4` — so this is a
+  # property of the individual build, not of the version.
+  @spec crypto_has_rc4?() :: boolean()
+  defp crypto_has_rc4? do
+    case :persistent_term.get(@availability_key, :unknown) do
+      :unknown ->
+        supported = :rc4 in :crypto.supports(:ciphers)
+
+        unless supported do
+          Logger.debug(
+            "MSE: libcrypto has no RC4 (OpenSSL 3 legacy provider unavailable); " <>
+              "using the built-in RC4 implementation"
+          )
+        end
+
+        :persistent_term.put(@availability_key, supported)
+        supported
+
+      cached ->
+        cached
+    end
+  end
+
+  @doc """
   Build an RC4 stream cipher from a derived key, discarding the first
-  #{@rc4_discard} bytes of keystream as MSE requires. The returned reference is
-  stateful — feed it the whole stream in order.
+  #{@rc4_discard} bytes of keystream as MSE requires. The returned value is a
+  stateful handle whose position advances in place — feed it the whole stream in
+  order, from one process at a time.
+
+  Uses whichever implementation `backend/0` selects; the two are
+  interchangeable, so a cipher built on one node decrypts a stream produced by
+  the other.
   """
   @spec new_cipher(binary()) :: cipher()
   def new_cipher(key) when is_binary(key) do
-    ref = :crypto.crypto_init(:rc4, key, true)
-    _ = :crypto.crypto_update(ref, :binary.copy(<<0>>, @rc4_discard))
-    ref
+    case backend() do
+      :crypto ->
+        ref = :crypto.crypto_init(:rc4, key, true)
+        _ = :crypto.crypto_update(ref, :binary.copy(<<0>>, @rc4_discard))
+        ref
+
+      # `:disabled` is enforced where connections are decided (see
+      # `Acceptor.Connection.Handshakes`), not here: a cipher asked for anyway
+      # should work rather than raise from inside a handshake.
+      _pure_or_disabled ->
+        state = RC4.new(key)
+        :ok = RC4.discard(state, @rc4_discard)
+        {:pure, state}
+    end
   end
 
   @doc "Encrypt/decrypt `data` through the (symmetric) RC4 stream `cipher`."
   @spec crypt(cipher(), iodata()) :: binary()
+  def crypt({:pure, state}, data), do: RC4.crypt(state, data)
   def crypt(cipher, data), do: :crypto.crypto_update(cipher, data)
 
   @doc "XOR two equal-length binaries."
