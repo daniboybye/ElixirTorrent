@@ -11,6 +11,11 @@ defmodule Tracker do
   @type announce :: binary()
   @type stats :: :auto | keyword()
   @type scrape_stats :: UDP.scrape_stats()
+  # Everything the BEP 7 source bind needs to know about an HTTP tracker: one
+  # destination address per family, the port, and whether the tracker resolved
+  # only to loopback.
+  @type dest_ctx ::
+          {%{optional(:inet | :inet6) => :inet.ip_address()}, :inet.port_number(), boolean()}
   @type scrape_result :: %{
           seeders: non_neg_integer(),
           leechers: non_neg_integer(),
@@ -103,7 +108,7 @@ defmodule Tracker do
 
         responses =
           hosts
-          |> Enum.filter(fn {_ip, family} -> Map.get(source_ips, family) != nil end)
+          |> Enum.filter(&udp_announceable?(&1, source_ips))
           |> Enum.map(&udp_announce_on_host(&1, source_ips, port, hash, stats, opts))
 
         merge_http_announces(responses)
@@ -118,6 +123,14 @@ defmodule Tracker do
     end
   end
 
+  # A tracker address is announceable when we hold a source address of its
+  # family to bind — or when it is loopback, which needs no source of ours at
+  # all and would otherwise be skipped on a machine that is offline or has no
+  # global address of that family.
+  @spec udp_announceable?({:inet.ip_address(), :inet | :inet6}, map()) :: boolean()
+  defp udp_announceable?({ip, family}, source_ips),
+    do: Acceptor.loopback_ip?(ip) or Map.get(source_ips, family) != nil
+
   @spec udp_announce_on_host(
           {:inet.ip_address(), :inet | :inet6},
           map(),
@@ -127,8 +140,30 @@ defmodule Tracker do
           request_opts()
         ) :: Response.t() | Error.t()
   defp udp_announce_on_host({ip, family}, source_ips, port, hash, stats, opts) do
-    source_ip = Map.fetch!(source_ips, family)
+    # BEP 7 wants the tracker to see the datagram arrive from the address we
+    # announce, but a bound source is only valid if the route to *this*
+    # destination leaves through an interface that owns it. `announce_source_ip/3`
+    # asks the routing table (see `Acceptor`); it drops the bind for loopback
+    # and swaps in the routed address when our preferred one lives on an
+    # interface that does not reach the tracker (VPN, second NIC, tethering).
+    source_ip = Acceptor.announce_source_ip(ip, port, Map.get(source_ips, family))
 
+    source_ip
+    |> udp_announce_bound({ip, family}, port, hash, stats, opts)
+    |> retry_unbound_source(source_ip, fn ->
+      udp_announce_bound(nil, {ip, family}, port, hash, stats, opts)
+    end)
+  end
+
+  @spec udp_announce_bound(
+          :inet.ip_address() | nil,
+          {:inet.ip_address(), :inet | :inet6},
+          :inet.port_number(),
+          Torrent.hash(),
+          stats(),
+          request_opts()
+        ) :: Response.t() | Error.t()
+  defp udp_announce_bound(source_ip, {ip, family}, port, hash, stats, opts) do
     case Acceptor.open_udp(family, source_ip) do
       {:ok, socket} ->
         try do
@@ -147,6 +182,49 @@ defmodule Tracker do
         %Error{reason: {:no_udp_socket, family}}
     end
   end
+
+  # Re-run an announce with no source bind when the stack rejected the bind.
+  #
+  # `Acceptor.announce_source_ip/3` already picks the source from the route, but
+  # the route it probed can be stale by the time the announce runs (a VPN coming
+  # up between the two), and the HTTP path only knows the addresses *we*
+  # resolved, not the one Hackney finally dials. Windows answers a bind that
+  # does not belong to the outgoing interface with `:eaddrnotavail`
+  # (WSAEADDRNOTAVAIL, 10049); losing the announce means losing every tracker
+  # peer, so retry once unbound. BEP 7 degrades to "whatever source the route
+  # picks" — which is still the address the tracker records for us.
+  @doc false
+  @spec retry_unbound_source(
+          Response.t() | Error.t(),
+          :inet.ip_address() | nil,
+          (-> Response.t() | Error.t())
+        ) :: Response.t() | Error.t()
+  def retry_unbound_source(result, nil, _retry), do: result
+
+  def retry_unbound_source(result, source, retry) when is_function(retry, 0) do
+    if bind_rejected?(result) do
+      Logger.debug(
+        "[tracker_announce] source_bind_rejected source=#{Acceptor.format_ip(source)} retry=unbound"
+      )
+
+      retry.()
+    else
+      result
+    end
+  end
+
+  @doc false
+  @spec bind_rejected?(term()) :: boolean()
+  def bind_rejected?(%Error{reason: reason}), do: bind_rejected_reason?(reason)
+  def bind_rejected?(_result), do: false
+
+  # `:eaddrnotavail` is the strong-host refusal itself; `{:no_udp_socket, _}` is
+  # the same refusal one layer earlier, when the bind failed at `open`.
+  @spec bind_rejected_reason?(term()) :: boolean()
+  defp bind_rejected_reason?(:eaddrnotavail), do: true
+  defp bind_rejected_reason?({:eaddrnotavail, _detail}), do: true
+  defp bind_rejected_reason?({:no_udp_socket, _family}), do: true
+  defp bind_rejected_reason?(_reason), do: false
 
   @doc false
   @spec request_with_event!(binary(), Torrent.hash(), request_opts()) ::
@@ -411,7 +489,7 @@ defmodule Tracker do
     url = append_query(announce, query)
 
     %{inet: ip4, inet6: ip6, inet6_all: v6_all} = Acceptor.all_global_ips()
-    tracker_families = http_tracker_families(announce)
+    {tracker_families, dest_ctx} = http_tracker_endpoints(announce)
     ipv4_announce = if MapSet.member?(tracker_families, :inet), do: ip4
 
     v6_announces =
@@ -423,16 +501,25 @@ defmodule Tracker do
       )
     end
 
-    responses =
-      []
-      |> maybe_http_announce(url, :inet, ipv4_announce, opts)
-      |> then(fn acc ->
-        Enum.reduce(v6_announces, acc, fn ip6_addr, a ->
-          [http_announce(url, :inet6, ip6_addr, opts) | a]
-        end)
-      end)
+    []
+    |> maybe_http_announce(url, :inet, ipv4_announce, dest_ctx, opts)
+    |> http_announce_ipv6(url, v6_announces, dest_ctx, opts)
+    |> merge_http_announces()
+  end
 
-    merge_http_announces(responses)
+  # BEP 7 announces once per announceable IPv6 address, each bound to that
+  # address (subject to the route check in `http_source_bind/3`).
+  @spec http_announce_ipv6(
+          list(Response.t() | Error.t()),
+          binary(),
+          [:inet.ip6_address()],
+          dest_ctx(),
+          request_opts()
+        ) :: list(Response.t() | Error.t())
+  defp http_announce_ipv6(acc, url, v6_announces, dest_ctx, opts) do
+    Enum.reduce(v6_announces, acc, fn ip6_addr, announces ->
+      [http_announce(url, :inet6, http_source_bind(dest_ctx, :inet6, ip6_addr), opts) | announces]
+    end)
   end
 
   @spec append_query(binary(), binary()) :: binary()
@@ -449,22 +536,68 @@ defmodule Tracker do
     URI.to_string(%{uri | query: query})
   end
 
-  @spec http_tracker_families(binary()) :: MapSet.t(:inet | :inet6)
-  defp http_tracker_families(announce) do
+  # Returns the address families the tracker answers on, plus everything the
+  # BEP 7 source bind needs about the destination: one address per family, the
+  # port, and whether every address it resolved to is loopback. See
+  # `http_hackney_opts/2` and `http_source_bind/3`.
+  #
+  # The per-family destination is the *first* address that family resolved to,
+  # while Hackney does its own DNS and may dial a different one. Addresses of
+  # one tracker host normally share a route, and `retry_unbound_source/3` is the
+  # net for the case where they do not.
+  @spec http_tracker_endpoints(binary()) :: {MapSet.t(:inet | :inet6), dest_ctx()}
+  defp http_tracker_endpoints(announce) do
+    port = http_tracker_port(announce)
+
     case URI.parse(announce).host do
-      host when is_binary(host) ->
-        case resolve_hosts(host) do
-          {:ok, hosts} ->
-            hosts
-            |> Enum.map(&elem(&1, 1))
-            |> MapSet.new()
+      host when is_binary(host) -> resolved_tracker_endpoints(resolve_hosts(host), port)
+      nil -> unresolved_tracker_endpoints(port)
+    end
+  end
 
-          {:error, _reason} ->
-            MapSet.new([:inet, :inet6])
-        end
+  @spec resolved_tracker_endpoints(
+          {:ok, [{:inet.ip_address(), :inet | :inet6}]} | {:error, term()},
+          :inet.port_number()
+        ) :: {MapSet.t(:inet | :inet6), dest_ctx()}
+  defp resolved_tracker_endpoints({:ok, hosts}, port) do
+    families =
+      hosts
+      |> Enum.map(&elem(&1, 1))
+      |> MapSet.new()
 
-      nil ->
-        MapSet.new([:inet, :inet6])
+    dests = Enum.reduce(hosts, %{}, fn {ip, family}, acc -> Map.put_new(acc, family, ip) end)
+    loopback? = Enum.all?(hosts, fn {ip, _family} -> Acceptor.loopback_ip?(ip) end)
+
+    {families, {dests, port, loopback?}}
+  end
+
+  defp resolved_tracker_endpoints({:error, _reason}, port),
+    do: unresolved_tracker_endpoints(port)
+
+  # No answer is no evidence: announce on both families and keep the BEP 7 bind,
+  # since Hackney resolves the name itself.
+  @spec unresolved_tracker_endpoints(:inet.port_number()) ::
+          {MapSet.t(:inet | :inet6), dest_ctx()}
+  defp unresolved_tracker_endpoints(port),
+    do: {MapSet.new([:inet, :inet6]), {%{}, port, false}}
+
+  # The address to bind for this announce. An unresolved destination (`nil`)
+  # keeps the BEP 7 bind — there is nothing to route against, and Hackney will
+  # resolve the name itself.
+  @spec http_source_bind(dest_ctx(), :inet | :inet6, :inet.ip_address()) ::
+          :inet.ip_address() | nil
+  defp http_source_bind({_dests, _port, true}, _family, _ip), do: nil
+
+  defp http_source_bind({dests, port, false}, family, ip),
+    do: Acceptor.announce_source_ip(Map.get(dests, family), port, ip)
+
+  # `URI.parse/1` fills the scheme default (80/443) when the announce URL omits
+  # the port. The value only steers the route probe, never a packet.
+  @spec http_tracker_port(binary()) :: :inet.port_number()
+  defp http_tracker_port(announce) do
+    case URI.parse(announce) do
+      %URI{port: port} when is_integer(port) and port in 1..65_535 -> port
+      _ -> 80
     end
   end
 
@@ -587,24 +720,35 @@ defmodule Tracker do
           binary(),
           :inet | :inet6,
           any(),
+          dest_ctx(),
           request_opts()
         ) ::
           list(Response.t() | Error.t())
-  defp maybe_http_announce(acc, _url, _family, nil, _opts), do: acc
+  defp maybe_http_announce(acc, _url, _family, nil, _dest_ctx, _opts), do: acc
 
-  defp maybe_http_announce(acc, url, family, ip, opts) do
-    [http_announce(url, family, ip, opts) | acc]
+  defp maybe_http_announce(acc, url, family, ip, dest_ctx, opts) do
+    [http_announce(url, family, http_source_bind(dest_ctx, family, ip), opts) | acc]
   end
 
-  @spec http_announce(binary(), :inet | :inet6, :inet.ip_address(), request_opts()) ::
+  # `source == nil` from here down means "no source bind"; the diagnostics
+  # render it as `auto` rather than printing an address the socket is not using.
+  @spec http_announce(binary(), :inet | :inet6, :inet.ip_address() | nil, request_opts()) ::
           Response.t() | Error.t()
-  defp http_announce(url, family, ip, opts) do
-    http_opts = announce_http_opts(family, ip, opts)
+  defp http_announce(url, family, source, opts) do
+    url
+    |> http_announce_bound(family, source, opts)
+    |> retry_unbound_source(source, fn -> http_announce_bound(url, family, nil, opts) end)
+  end
+
+  @spec http_announce_bound(binary(), :inet | :inet6, :inet.ip_address() | nil, request_opts()) ::
+          Response.t() | Error.t()
+  defp http_announce_bound(url, family, source, opts) do
+    http_opts = announce_http_opts(family, source, opts)
 
     try do
       url
       |> HTTPoison.get([], http_opts)
-      |> decode_http_announce_response(url, family, ip, http_opts)
+      |> decode_http_announce_response(url, family, source, http_opts)
     rescue
       e in CaseClauseError ->
         if badarg_clause?(e) do
@@ -621,7 +765,7 @@ defmodule Tracker do
     end
   end
 
-  @spec announce_http_opts(:inet | :inet6, :inet.ip_address(), request_opts()) :: keyword()
+  @spec announce_http_opts(:inet | :inet6, :inet.ip_address() | nil, request_opts()) :: keyword()
   defp announce_http_opts(family, ip, opts) do
     timeout_ms = Keyword.get(opts, :http_timeout_ms, @timeout)
 
@@ -636,7 +780,7 @@ defmodule Tracker do
           {:ok, HTTPoison.Response.t()} | {:error, HTTPoison.Error.t()} | term(),
           binary(),
           :inet | :inet6,
-          :inet.ip_address(),
+          :inet.ip_address() | nil,
           keyword()
         ) :: Response.t() | Error.t()
   defp decode_http_announce_response(
@@ -652,7 +796,7 @@ defmodule Tracker do
         v6 = Enum.count(peers, &ipv6_peer?/1)
 
         Logger.debug(
-          "[tracker_announce] http family=#{family} local=#{Acceptor.format_ip(ip)} peers=#{length(peers)} ipv6_peers=#{v6}"
+          "[tracker_announce] http family=#{family} source=#{format_source(ip)} peers=#{length(peers)} ipv6_peers=#{v6}"
         )
 
         response
@@ -684,10 +828,27 @@ defmodule Tracker do
   # announced. The family option must accompany an IPv6 bind tuple; without it
   # Hackney's TCP connect path treats the tuple as an IPv4 bind and raises badarg.
   #
+  # `nil` means "do not bind a source at all, let the routing table choose".
+  # The caller decides that: `Acceptor.announce_source_ip/3` binds our announced
+  # address only when the route to *this* tracker leaves through an interface
+  # that owns it, swaps in the routed address when it does not (VPN, second NIC,
+  # tethering) and binds nothing for a loopback tracker — 127.0.0.1/::1 is
+  # reachable only over the loopback interface, which owns no global address.
+  # Windows enforces that (strong host model) and fails the connect with
+  # `:eaddrnotavail`; macOS/BSD are weak-host and let it through, which is why
+  # the same code looked healthy there. BEP 7 is not weakened: whenever a global
+  # address is valid on the route, that address is what gets bound and seen.
+  #
   # `pool: false` isolates each announce. Hackney 4's named pool can terminate
   # when a request owner exits while its connection process is starting; one
   # torrent's normal shutdown must not break HTTP discovery for every torrent.
-  @spec http_hackney_opts(:inet | :inet6, :inet.ip_address()) :: keyword()
+  @spec http_hackney_opts(:inet | :inet6, :inet.ip_address() | nil) :: keyword()
+  defp http_hackney_opts(:inet, nil),
+    do: [pool: false, connect_options: [:inet]]
+
+  defp http_hackney_opts(:inet6, nil),
+    do: [pool: false, connect_options: [:inet6]]
+
   defp http_hackney_opts(:inet, ip),
     do: [pool: false, connect_options: [{:ip, ip}]]
 
@@ -695,8 +856,23 @@ defmodule Tracker do
     do: [pool: false, connect_options: [:inet6, {:ip, ip}]]
 
   @doc false
-  @spec http_hackney_opts_for_test(:inet | :inet6, :inet.ip_address()) :: keyword()
+  @spec http_hackney_opts_for_test(:inet | :inet6, :inet.ip_address() | nil) :: keyword()
   def http_hackney_opts_for_test(family, ip), do: http_hackney_opts(family, ip)
+
+  @doc false
+  @spec loopback_tracker_for_test(binary()) :: boolean()
+  def loopback_tracker_for_test(announce) do
+    {_families, {_dests, _port, loopback?}} = http_tracker_endpoints(announce)
+    loopback?
+  end
+
+  @doc false
+  @spec tracker_dest_ctx_for_test(binary()) :: dest_ctx()
+  def tracker_dest_ctx_for_test(announce), do: elem(http_tracker_endpoints(announce), 1)
+
+  @spec format_source(:inet.ip_address() | nil) :: String.t()
+  defp format_source(nil), do: "auto"
+  defp format_source(ip), do: Acceptor.format_ip(ip)
 
   @spec badarg_clause?(term()) :: boolean()
   defp badarg_clause?(%CaseClauseError{term: :badarg}), do: true
@@ -706,7 +882,7 @@ defmodule Tracker do
           binary(),
           binary(),
           :inet | :inet6,
-          :inet.ip_address(),
+          :inet.ip_address() | nil,
           list(),
           keyword(),
           0 | 1
@@ -719,15 +895,12 @@ defmodule Tracker do
     _e in [Bento.SyntaxError] ->
       content_type = header_value(headers, "content-type")
 
-      ip_str =
-        ip
-        |> :inet.ntoa()
-        |> List.to_string()
+      ip_str = format_source(ip)
 
       preview = binary_part(body, 0, min(byte_size(body), 500))
 
       Logger.debug(
-        "HTTP tracker returned non-bencode body url=#{url} family=#{family} ip=#{ip_str} content_type=#{inspect(content_type)} bytes=#{byte_size(body)} preview=#{inspect(preview)}"
+        "HTTP tracker returned non-bencode body url=#{url} family=#{family} source=#{ip_str} content_type=#{inspect(content_type)} bytes=#{byte_size(body)} preview=#{inspect(preview)}"
       )
 
       # Some tracker endpoints return HTML and JS redirects.
