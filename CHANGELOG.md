@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.6.5 - 2026-08-18
+
+### Added
+
+- A built-in RC4 stream cipher (`Peer.MSE.RC4`), selected automatically when the
+  linked libcrypto does not expose RC4. OpenSSL 3 moved RC4 into the optional
+  `legacy` provider and the Windows ERTS ships no legacy module, so `:crypto`
+  omits `:rc4` there — and because the whole MSE handshake is RC4-encrypted,
+  including the exchange that selects a plaintext stream, such a node could not
+  speak MSE at all and every peer dial failed. `config :elixir_torrent, :mse_rc4`
+  accepts `:auto` (default), `:crypto`, `:pure` or `:disabled`.
+
+### Fixed
+
+- Tracker announces now choose their source address by asking the kernel which
+  local address routes to the destination, instead of taking one from
+  `Acceptor.all_global_ips/0`. Windows enforces the strong host model and refuses
+  a bind whose address does not belong to the routing interface, so with a VPN,
+  a second NIC or tethering every announce failed with `:eaddrnotavail`. BEP 7 is
+  unchanged where a routable global address exists; an announce refused for the
+  bind is retried once unbound.
+- `Magnet.Fetcher.finalize_piece_attempt/1` no longer raises `FunctionClauseError`
+  on a non-retryable piece attempt, which previously took down the entire magnet
+  fetch instead of that one attempt. `:econnreset` and `:econnaborted` — how a
+  departing peer is reported on Windows — are now treated as retryable.
+- The DHT IPv4 socket logged `bind=<primary ip>` while actually being bound to
+  `0.0.0.0`.
+
+### Changed
+
+- The test suite now runs on Windows. It previously failed before the first test
+  on a `/dev/null` path, and then on `localhost` resolution: the suite forbids DNS
+  on the wire, Unix answers `localhost` from `/etc/hosts`, and Windows ships that
+  line commented out. Three platform assumptions in tests and three TOCTOU races
+  were fixed alongside.
+
 ## 0.6.4 - 2026-08-12
 
 ### Added
