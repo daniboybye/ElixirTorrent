@@ -1385,6 +1385,7 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
       Application.put_env(:elixir_torrent, :mse_rc4, :pure)
 
       hash = :crypto.strong_rand_bytes(20)
+      remote_id = <<9::160>>
 
       with_torrent_stack(hash, fn _hash ->
         {:ok, listen, port, ip} = listen_on_loopback()
@@ -1400,6 +1401,19 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
               Peer.MSE.Handshake.respond(sock, Peer.MSE.Handshake.resolver([hash]), @timeout)
 
             send(parent, {:mse_responded, result})
+
+            # Answer the dialer's handshake through the negotiated cipher, so the
+            # dial completes instead of waiting out its own read timeout and then
+            # retrying in plaintext against a listener that no longer accepts.
+            # That cost 30s — half the suite's CI coverage budget — for a test
+            # that had already proven its point by then.
+            {:ok, %{send: send_cipher}} = result
+
+            assert :ok =
+                     :gen_tcp.send(
+                       sock,
+                       Peer.MSE.crypt(send_cipher, bt_handshake(hash, remote_id))
+                     )
 
             receive do
               ^close_gate -> :ok
