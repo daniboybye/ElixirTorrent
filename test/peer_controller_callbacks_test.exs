@@ -253,7 +253,7 @@ defmodule PeerControllerCallbacksTest do
       end)
     end
 
-    test "fast-extension wire without negotiation stops with protocol_error" do
+    test "a reject for a block we are not waiting on keeps the connection" do
       hash = :crypto.strong_rand_bytes(20)
       id = <<4::160>>
       key = Peer.make_key(hash, id)
@@ -264,7 +264,8 @@ defmodule PeerControllerCallbacksTest do
         ref = Process.monitor(ctrl_pid)
         assert :ok = Peer.Controller.handle_reject(key, 0, 0, @piece_len)
 
-        assert_receive {:DOWN, ^ref, :process, ^ctrl_pid, {:shutdown, :protocol_error}}, 2_000
+        assert %{unsolicited_blocks: 1} = controller_state(key)
+        refute_receive {:DOWN, ^ref, :process, ^ctrl_pid, _}, 200
       end)
     end
 

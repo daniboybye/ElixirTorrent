@@ -416,25 +416,70 @@ defmodule PeerControllerStateTest do
       end)
     end
 
-    test "handle_reject for unknown request is protocol_error" do
+    test "a reject for a block we cancelled is expected, not a protocol error" do
       hash = :crypto.strong_rand_bytes(20)
-      state = base_state(hash, 4, requests: MapSet.new())
 
-      assert {:error, :protocol_error, ^state} =
+      # BEP 6 obliges the peer to answer every request exactly once, so the
+      # cancel we just sent comes back as this reject. Banning for it cost us
+      # precisely the peers that implement the extension correctly.
+      state = base_state(hash, 4, withdrawn: MapSet.new([{0, 0, @piece_len}]))
+
+      assert %State{withdrawn: withdrawn, unsolicited_blocks: 0} =
                State.handle_reject(state, 0, 0, @piece_len)
+
+      assert MapSet.size(withdrawn) == 0
     end
 
-    test "handle_piece without matching request is protocol_error" do
+    test "a block still in flight when we cancelled is counted, not punished" do
       hash = :crypto.strong_rand_bytes(20)
 
       state =
         base_state(hash, 4,
           status: 0,
-          requests: MapSet.new([{0, 0, @piece_len}])
+          withdrawn: MapSet.new([{0, 0, @piece_len}]),
+          rank: 0,
+          downloaded_bytes: 0
         )
 
-      assert {:error, :protocol_error, ^state} =
-               State.handle_piece(state, 0, @piece_len, @piece_len)
+      assert %State{
+               rank: @piece_len,
+               downloaded_bytes: @piece_len,
+               withdrawn: withdrawn,
+               unsolicited_blocks: 0
+             } = State.handle_piece(state, 0, 0, @piece_len)
+
+      assert MapSet.size(withdrawn) == 0
+    end
+
+    test "a choke moves in-flight requests into the withdrawn window" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        {:ok, piece_pid} = start_piece_worker(hash, 0)
+        _peer = ensure_peer_registered(hash)
+        on_exit(fn -> stop_worker(piece_pid) end)
+
+        state = base_state(hash, 4, status: 0, requests: MapSet.new([{0, 0, @piece_len}]))
+
+        assert %State{requests: reqs, withdrawn: withdrawn} = State.handle_choke(state)
+        assert MapSet.size(reqs) == 0
+        assert MapSet.member?(withdrawn, {0, 0, @piece_len})
+      end)
+    end
+
+    test "blocks we never asked for are counted and eventually end the connection" do
+      hash = :crypto.strong_rand_bytes(20)
+      state = base_state(hash, 4, status: 0)
+
+      assert %State{unsolicited_blocks: 1} =
+               state = State.handle_piece(state, 0, 0, @piece_len)
+
+      # Wasteful rather than malicious: the connection ends without the
+      # torrent-wide ban that :protocol_error carries.
+      state = %{state | unsolicited_blocks: 512}
+
+      assert {:error, :unsolicited_blocks, %State{}} =
+               State.handle_piece(state, 0, 0, @piece_len)
     end
 
     test "handle_piece with matching request updates counters" do

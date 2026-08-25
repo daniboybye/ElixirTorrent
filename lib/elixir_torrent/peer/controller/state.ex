@@ -36,6 +36,17 @@ defmodule Peer.Controller.State do
     ut_metadata_requests: %{window_started_at: nil, count: 0},
     hash_requests: %{},
     requests: MapSet.new(),
+    # Blocks we asked for and then withdrew (wire cancel, repin, or a choke that
+    # drops the peer's queue). A cancel is not atomic: the block may already be
+    # on the wire, and BEP 6 peers must answer every request exactly once, so a
+    # withdrawn block legitimately comes back as a piece or a reject one RTT
+    # later. Kept so those answers are recognised instead of read as a protocol
+    # violation. Bounded — see put_withdrawn/4.
+    withdrawn: MapSet.new(),
+    # Blocks that matched neither `requests` nor `withdrawn`. Never fatal on its
+    # own (our window is finite), but a peer pushing data we never asked for is
+    # spending our bandwidth, so it is capped.
+    unsolicited_blocks: 0,
     # Inbound block requests accepted for asynchronous disk reads but not yet
     # sent to the peer. BEP 6 requires a choke to explicitly reject every
     # queued request outside the peer-specific allowed-fast set.
@@ -107,6 +118,8 @@ defmodule Peer.Controller.State do
           ut_metadata_requests: %{window_started_at: integer() | nil, count: non_neg_integer()},
           hash_requests: %{Peer.HashTransfer.ref() => map()},
           requests: MapSet.t(subpiece()),
+          withdrawn: MapSet.t(subpiece()),
+          unsolicited_blocks: non_neg_integer(),
           upload_requests: MapSet.t(subpiece()),
           pending_requests: non_neg_integer(),
           rank: non_neg_integer(),
@@ -131,6 +144,12 @@ defmodule Peer.Controller.State do
   # far below what mainstream clients accept (they advertise reqq 250-500); when
   # a peer advertises a smaller reqq we honor it instead of overflowing its queue.
   @max_unanswered_requests 64
+  # A withdrawn block stays recognisable for as long as it can plausibly still be
+  # in flight: at most one full pipeline per withdrawal, and a peer can be
+  # re-pinned before the previous round's answers land, so allow a few rounds.
+  @max_withdrawn 4 * @max_unanswered_requests
+  # Roughly 8 MiB of unrequested 16 KiB blocks before we give up on the peer.
+  @max_unsolicited_blocks 512
   @request_pipeline_depth 64
   @max_pending_hash_requests 8
   # One metadata response can carry 16 KiB. 128 requests/s still permits about
@@ -743,12 +762,12 @@ defmodule Peer.Controller.State do
 
   @spec cancel(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
   def cancel(state, index, begin, length) do
-    if member_request?(state, index, begin, length) do
-      Sender.cancel(key(state), index, begin, length)
-    end
+    member? = member_request?(state, index, begin, length)
+    if member?, do: Sender.cancel(key(state), index, begin, length)
 
     state
     |> delete_request(index, begin, length)
+    |> then(&if member?, do: put_withdrawn(&1, index, begin, length), else: &1)
     |> make_request()
   end
 
@@ -877,8 +896,11 @@ defmodule Peer.Controller.State do
 
     # Peer choked us → they will drop any queued requests. Reset both the
     # in-flight set and the pending-ack counter so we can re-fill the
-    # pipeline from zero on the next unchoke.
+    # pipeline from zero on the next unchoke. A Fast peer owes us a reject for
+    # each dropped request (BEP 6), and a block already on the wire still
+    # arrives, so the set moves to `withdrawn` rather than vanishing.
     %__MODULE__{state | choke_me: true, requests: MapSet.new(), pending_requests: 0}
+    |> withdraw_all(state.requests)
   end
 
   @spec handle_unchoke(t()) :: t()
@@ -1212,19 +1234,34 @@ defmodule Peer.Controller.State do
   @spec handle_piece(t(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           t() | {:error, :protocol_error, t()}
   def handle_piece(state, index, begin, length) do
-    if member_request?(state, index, begin, length) do
-      now = System.monotonic_time(:millisecond)
+    case classify_answer(state, index, begin, length) do
+      :requested ->
+        count_block(state, length)
+        |> delete_request(index, begin, length)
+        |> make_request()
 
-      state
-      |> Map.update!(:rank, &(&1 + length))
-      |> Map.update!(:downloaded_bytes, &(&1 + length))
-      |> Map.update!(:pin_downloaded_bytes, &(&1 + length))
-      |> Map.put(:last_block_at, now)
-      |> delete_request(index, begin, length)
-      |> make_request()
-    else
-      {:error, :protocol_error, state}
+      :withdrawn ->
+        # The block was already on the wire when we cancelled. The payload is
+        # stored either way (the controller hands it to the piece worker before
+        # this cast), so count it and keep the peer.
+        count_block(state, length)
+        |> drop_withdrawn(index, begin, length)
+        |> make_request()
+
+      :unsolicited ->
+        note_unsolicited(state, "piece index=#{index} begin=#{begin} len=#{length}")
     end
+  end
+
+  @spec count_block(t(), Torrent.length()) :: t()
+  defp count_block(%__MODULE__{} = state, length) do
+    %__MODULE__{
+      state
+      | rank: state.rank + length,
+        downloaded_bytes: state.downloaded_bytes + length,
+        pin_downloaded_bytes: state.pin_downloaded_bytes + length,
+        last_block_at: System.monotonic_time(:millisecond)
+    }
   end
 
   # DHT (BEP 5 § BitTorrent Protocol Extension)
@@ -1331,14 +1368,23 @@ defmodule Peer.Controller.State do
   end
 
   defp do_handle_reject(state, index, begin, length) do
-    if member_request?(state, index, begin, length) do
-      Downloads.reject(state.hash, index, state.id, begin, length)
+    case classify_answer(state, index, begin, length) do
+      :requested ->
+        Downloads.reject(state.hash, index, state.id, begin, length)
 
-      state
-      |> delete_request(index, begin, length)
-      |> make_request()
-    else
-      {:error, :protocol_error, state}
+        state
+        |> delete_request(index, begin, length)
+        |> make_request()
+
+      # BEP 6 obliges the peer to reject what it drops, so a cancel or a choke
+      # earns exactly this message back. The block was already handed back to
+      # its piece worker when we withdrew it; nothing left to do but keep the
+      # peer.
+      :withdrawn ->
+        drop_withdrawn(state, index, begin, length)
+
+      :unsolicited ->
+        note_unsolicited(state, "reject index=#{index} begin=#{begin} len=#{length}")
     end
   end
 
@@ -1957,6 +2003,61 @@ defmodule Peer.Controller.State do
     MapSet.member?(state.requests, subpiece(index, begin, length))
   end
 
+  # Which of our own requests does this piece/reject answer? Treating "not
+  # outstanding" as a protocol error banned well-behaved peers for the RTT after
+  # every cancel, choke and repin — the ban is torrent-wide, so an aggressive
+  # re-pinning scheduler was quietly emptying the swarm.
+  @spec classify_answer(t(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
+          :requested | :withdrawn | :unsolicited
+  defp classify_answer(state, index, begin, length) do
+    subpiece = subpiece(index, begin, length)
+
+    cond do
+      MapSet.member?(state.requests, subpiece) -> :requested
+      MapSet.member?(state.withdrawn, subpiece) -> :withdrawn
+      true -> :unsolicited
+    end
+  end
+
+  @spec put_withdrawn(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
+  defp put_withdrawn(%__MODULE__{} = state, index, begin, length) do
+    withdrawn = MapSet.put(state.withdrawn, subpiece(index, begin, length))
+
+    # Past the cap the oldest entries are no longer plausibly in flight, and a
+    # MapSet has no order to evict by. Dropping the window only costs us the
+    # distinction between a very late answer and an unsolicited one, and that is
+    # now a counter rather than a disconnect.
+    withdrawn = if MapSet.size(withdrawn) > @max_withdrawn, do: MapSet.new(), else: withdrawn
+
+    %__MODULE__{state | withdrawn: withdrawn}
+  end
+
+  @spec withdraw_all(t(), MapSet.t(subpiece())) :: t()
+  defp withdraw_all(state, subpieces) do
+    Enum.reduce(subpieces, state, fn {index, begin, length}, acc ->
+      put_withdrawn(acc, index, begin, length)
+    end)
+  end
+
+  @spec drop_withdrawn(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
+  defp drop_withdrawn(%__MODULE__{} = state, index, begin, length) do
+    %__MODULE__{state | withdrawn: MapSet.delete(state.withdrawn, subpiece(index, begin, length))}
+  end
+
+  @spec note_unsolicited(t(), String.t()) :: t() | {:error, :unsolicited_blocks, t()}
+  defp note_unsolicited(%__MODULE__{} = state, what) do
+    state = %__MODULE__{state | unsolicited_blocks: state.unsolicited_blocks + 1}
+    log_download(state, "unsolicited #{what} total=#{state.unsolicited_blocks}", :debug)
+
+    if state.unsolicited_blocks > @max_unsolicited_blocks do
+      # Wasteful, not malicious: drop the connection but leave the peer ID
+      # dialable, unlike :protocol_error.
+      {:error, :unsolicited_blocks, state}
+    else
+      state
+    end
+  end
+
   @spec full_requests_queue?(t()) :: boolean()
   # Counts in-flight wire requests (`requests`) plus piece-worker :ok acks not
   # yet processed into `requests` (`pending_requests`). Before pending existed,
@@ -2026,7 +2127,7 @@ defmodule Peer.Controller.State do
       Downloads.reject(state.hash, index, state.id, begin, length)
     end)
 
-    %{state | requests: MapSet.new(), pending_requests: 0}
+    withdraw_all(%{state | requests: MapSet.new(), pending_requests: 0}, state.requests)
   end
 
   @spec apply_pin(t(), Torrent.index()) :: t()
