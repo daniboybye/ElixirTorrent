@@ -422,12 +422,12 @@ defmodule PeerControllerStateTest do
       # BEP 6 obliges the peer to answer every request exactly once, so the
       # cancel we just sent comes back as this reject. Banning for it cost us
       # precisely the peers that implement the extension correctly.
-      state = base_state(hash, 4, withdrawn: MapSet.new([{0, 0, @piece_len}]))
+      state = base_state(hash, 4, withdrawn: %{{0, 0, @piece_len} => 1})
 
       assert %State{withdrawn: withdrawn, unsolicited_blocks: 0} =
                State.handle_reject(state, 0, 0, @piece_len)
 
-      assert MapSet.size(withdrawn) == 0
+      assert withdrawn == %{}
     end
 
     test "a block still in flight when we cancelled is counted, not punished" do
@@ -436,7 +436,7 @@ defmodule PeerControllerStateTest do
       state =
         base_state(hash, 4,
           status: 0,
-          withdrawn: MapSet.new([{0, 0, @piece_len}]),
+          withdrawn: %{{0, 0, @piece_len} => 1},
           rank: 0,
           downloaded_bytes: 0
         )
@@ -448,7 +448,7 @@ defmodule PeerControllerStateTest do
                unsolicited_blocks: 0
              } = State.handle_piece(state, 0, 0, @piece_len)
 
-      assert MapSet.size(withdrawn) == 0
+      assert withdrawn == %{}
     end
 
     test "a choke moves in-flight requests into the withdrawn window" do
@@ -463,7 +463,7 @@ defmodule PeerControllerStateTest do
 
         assert %State{requests: reqs, withdrawn: withdrawn} = State.handle_choke(state)
         assert MapSet.size(reqs) == 0
-        assert MapSet.member?(withdrawn, {0, 0, @piece_len})
+        assert withdrawn == %{{0, 0, @piece_len} => 1}
       end)
     end
 
@@ -482,6 +482,28 @@ defmodule PeerControllerStateTest do
       assert %State{unsolicited_blocks: 0} = State.handle_reject(state, 600, 0, @piece_len)
       assert %State{unsolicited_blocks: 0} = State.handle_reject(state, 400, 0, @piece_len)
       assert %State{unsolicited_blocks: 1} = State.handle_reject(state, 1, 0, @piece_len)
+    end
+
+    test "a block withdrawn twice is owed two answers" do
+      hash = :crypto.strong_rand_bytes(20)
+      block = {7, 16_384, @piece_len}
+
+      # Live logs showed the same block requested, cancelled and requested again
+      # up to seven times against one peer. A set forgets the block on the first
+      # answer, so every later one read as unsolicited.
+      state = base_state(hash, 4, status: 0, requests: MapSet.new([block]))
+      state = State.cancel(state, 7, 16_384, @piece_len)
+      state = State.cancel(%{state | requests: MapSet.new([block])}, 7, 16_384, @piece_len)
+
+      assert %State{withdrawn: %{^block => 2}} = state
+
+      assert %State{unsolicited_blocks: 0} =
+               state = State.handle_reject(state, 7, 16_384, @piece_len)
+
+      assert %State{unsolicited_blocks: 0} =
+               state = State.handle_reject(state, 7, 16_384, @piece_len)
+
+      assert %State{unsolicited_blocks: 1} = State.handle_reject(state, 7, 16_384, @piece_len)
     end
 
     test "blocks we never asked for are counted and eventually end the connection" do
