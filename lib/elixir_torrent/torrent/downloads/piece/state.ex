@@ -24,7 +24,12 @@ defmodule Torrent.Downloads.Piece.State do
     :timer,
     :mode,
     monitoring: %{},
-    requests: []
+    requests: [],
+    # Blocks accepted into this piece, counted per supplying peer. A piece that
+    # fails its hash check was assembled from bad bytes, and when one peer
+    # supplied all of them BEP 3 gives us a provable culprit — see
+    # `sole_contributor/1`.
+    contributors: %{}
   ]
 
   @type timer :: reference() | nil
@@ -37,7 +42,8 @@ defmodule Torrent.Downloads.Piece.State do
           timer: timer(),
           mode: Piece.mode(),
           monitoring: map(),
-          requests: list(Request.t())
+          requests: list(Request.t()),
+          contributors: %{optional(Peer.id()) => pos_integer()}
         }
 
   @subpiece_length Piece.max_length()
@@ -234,12 +240,27 @@ defmodule Torrent.Downloads.Piece.State do
     state = %__MODULE__{
       state
       | requests: requests,
-        waiting: List.delete(state.waiting, subpiece)
+        waiting: List.delete(state.waiting, subpiece),
+        contributors: Map.update(state.contributors, peer_id, 1, &(&1 + 1))
     }
 
     with %__MODULE__{mode: :endgame, waiting: []} <- state do
       state.requests_are_dealt.()
       state
+    end
+  end
+
+  @doc """
+  The peer that supplied every accepted block of this piece, if there was only one.
+
+  Returns `nil` when several peers contributed, because then a failed hash check
+  cannot be pinned on any single one of them.
+  """
+  @spec sole_contributor(t()) :: Peer.id() | nil
+  def sole_contributor(%__MODULE__{contributors: contributors}) do
+    case Map.keys(contributors) do
+      [peer_id] -> peer_id
+      _ -> nil
     end
   end
 

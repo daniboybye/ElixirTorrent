@@ -106,6 +106,15 @@ defmodule Peer.Controller do
     :exit, _ -> :error
   end
 
+  @doc """
+  Reports that a piece this peer supplied on its own failed its hash check.
+
+  Repeated failures disconnect the peer — see `Peer.Controller.State.hash_check_failed/2`.
+  """
+  @spec hash_check_failed(Peer.key(), Torrent.index()) :: :ok
+  def hash_check_failed(key, index),
+    do: GenServer.cast(via(key), {:hash_check_failed, [index]})
+
   @spec handle_choke(Peer.key()) :: :ok
   def handle_choke(key), do: GenServer.cast(via(key), {:handle_choke, []})
 

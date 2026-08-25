@@ -68,6 +68,9 @@ defmodule Peer.Controller.State do
     # piece still reflected in `downloaded_bytes`.
     pin_downloaded_bytes: 0,
     superseed_piece: nil,
+    # Piece indices this peer supplied single-handedly that then failed their
+    # hash check. We stop asking this peer for them. See `hash_check_failed/2`.
+    hash_failures: MapSet.new(),
     bitfield: nil,
     interested: false,
     choke: true,
@@ -113,6 +116,7 @@ defmodule Peer.Controller.State do
           pinned_at: non_neg_integer(),
           pin_downloaded_bytes: non_neg_integer(),
           superseed_piece: Torrent.index() | :all | nil,
+          hash_failures: MapSet.t(Torrent.index()),
           bitfield: bitfield(),
           interested: boolean(),
           choke: boolean(),
@@ -139,9 +143,45 @@ defmodule Peer.Controller.State do
   # the first active index (BEP-3 endgame needs multi-source redundancy).
   @stale_pin_ms 20_000
   @stale_pin_ms_endgame 15_000
+  # How many *distinct* pieces this peer may supply single-handedly that then
+  # fail their SHA-1 before we drop the connection. A peer with one or two bad
+  # pieces on disk is otherwise perfectly good — a live run had one serve 99.84%
+  # of a 1.3 GB torrent correctly — so the per-index skip below carries the fix
+  # and disconnecting is reserved for a peer whose whole copy looks wrong.
+  @max_hash_failures 3
 
   @spec key(t()) :: Peer.key()
   def key(state), do: make_key(state.hash, state.id)
+
+  @doc false
+  @spec max_hash_failures() :: pos_integer()
+  def max_hash_failures, do: @max_hash_failures
+
+  @doc """
+  Records a piece this peer supplied alone that failed its hash check.
+
+  BEP 3 verifies pieces, not blocks, so a peer serving corrupt data is only
+  detectable after a whole piece is assembled. Nothing else in the download path
+  remembers where those bytes came from, so without this the piece picker hands
+  the same index straight back to the same peer and the torrent re-downloads it
+  forever. The index is remembered and never requested from this peer again;
+  only a peer that ruins `@max_hash_failures` different pieces is disconnected.
+  """
+  @spec hash_check_failed(t(), Torrent.index()) :: t() | {:error, :corrupt_pieces, t()}
+  def hash_check_failed(%__MODULE__{} = state, index) do
+    failures = MapSet.put(state.hash_failures, index)
+    state = %__MODULE__{state | hash_failures: failures}
+
+    Logger.warning(
+      "[peer_download] peer=#{Peer.log_id(state.id)} hash=#{Torrent.hex_encoded_hash(state.hash)} corrupt_piece index=#{index} bad_pieces=#{MapSet.size(failures)}/#{@max_hash_failures}"
+    )
+
+    if MapSet.size(failures) >= @max_hash_failures do
+      {:error, :corrupt_pieces, state}
+    else
+      state
+    end
+  end
 
   @doc false
   @spec ut_metadata_request_limit() :: pos_integer()
@@ -1581,16 +1621,19 @@ defmodule Peer.Controller.State do
 
   defp do_make_request(state), do: state
 
-  @spec download_request_skip_reason(t(), Torrent.index()) :: :queue_full | :choked | nil
+  @spec download_request_skip_reason(t(), Torrent.index()) ::
+          :queue_full | :choked | :corrupt_source | nil
   defp download_request_skip_reason(state, index) do
     cond do
+      MapSet.member?(state.hash_failures, index) -> :corrupt_source
       full_requests_queue?(state) -> :queue_full
       state.choke_me and not FastExtension.download?(state.fast_extension, index) -> :choked
       true -> nil
     end
   end
 
-  @spec log_download_request_skip(t(), Torrent.index(), :queue_full | :choked) :: t()
+  @spec log_download_request_skip(t(), Torrent.index(), :queue_full | :choked | :corrupt_source) ::
+          t()
   defp log_download_request_skip(state, index, :queue_full) do
     log_download(state, "request_skip queue_full index=#{index}", :debug)
     state
@@ -1599,6 +1642,14 @@ defmodule Peer.Controller.State do
   defp log_download_request_skip(state, index, :choked) do
     log_download(state, "request_skip choked index=#{index}", :debug)
     state
+  end
+
+  # This peer already served this piece with a bad hash. Drop the pin as well as
+  # the request, otherwise it stays pinned to an index it will never be asked
+  # for and stops contributing entirely.
+  defp log_download_request_skip(state, index, :corrupt_source) do
+    log_download(state, "request_skip corrupt_source index=#{index}", :debug)
+    clear_pin(state)
   end
 
   @spec apply_download_request(t(), Torrent.index()) :: t()
