@@ -688,6 +688,28 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
       assert byte_size(Acceptor.key()) == 4
     end
 
+    test "peer TCP sockets bound their writes, inbound and outbound alike" do
+      # Without send_timeout a peer that stops reading blocks Peer.Sender inside
+      # :gen_tcp.send forever and its mailbox grows unbounded.
+      {:ok, listen} = :gen_tcp.listen(0, Acceptor.tcp_socket_options(:inet))
+      on_exit(fn -> :gen_tcp.close(listen) end)
+
+      {:ok, port} = :inet.port(listen)
+      {:ok, outbound} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
+      on_exit(fn -> :gen_tcp.close(outbound) end)
+
+      {:ok, accepted} = :gen_tcp.accept(listen, 2_000)
+      on_exit(fn -> :gen_tcp.close(accepted) end)
+
+      :ok = Acceptor.apply_tcp_performance(outbound)
+
+      for socket <- [accepted, outbound] do
+        assert {:ok, opts} = :inet.getopts(socket, [:send_timeout, :send_timeout_close])
+        assert Keyword.fetch!(opts, :send_timeout) > 0
+        assert Keyword.fetch!(opts, :send_timeout_close)
+      end
+    end
+
     test "compute_all_global_ips and format_ip cover runtime snapshot" do
       ips = Acceptor.compute_all_global_ips()
       assert Map.has_key?(ips, :inet6_all)
