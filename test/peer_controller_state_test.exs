@@ -467,6 +467,23 @@ defmodule PeerControllerStateTest do
       end)
     end
 
+    test "the withdrawn window survives more withdrawals than it can hold" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      # A peer that is repinned repeatedly withdraws far more blocks than the
+      # window holds. Evicting by clearing it wholesale turned every answer
+      # still in flight into an "unsolicited" block; a live run produced 4392 of
+      # them in four minutes. Eviction has to drop the oldest, not everything.
+      state =
+        Enum.reduce(1..600, base_state(hash, 4, status: 0), fn n, acc ->
+          State.cancel(%{acc | requests: MapSet.new([{n, 0, @piece_len}])}, n, 0, @piece_len)
+        end)
+
+      assert %State{unsolicited_blocks: 0} = State.handle_reject(state, 600, 0, @piece_len)
+      assert %State{unsolicited_blocks: 0} = State.handle_reject(state, 400, 0, @piece_len)
+      assert %State{unsolicited_blocks: 1} = State.handle_reject(state, 1, 0, @piece_len)
+    end
+
     test "blocks we never asked for are counted and eventually end the connection" do
       hash = :crypto.strong_rand_bytes(20)
       state = base_state(hash, 4, status: 0)
