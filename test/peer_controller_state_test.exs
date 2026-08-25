@@ -246,15 +246,18 @@ defmodule PeerControllerStateTest do
       assert {:error, :protocol_error, ^state} = State.handle_have_none(state)
     end
 
-    test "non-negotiated have_all and have_none are rejected without mutating state" do
+    test "non-negotiated have_none is still applied" do
       hash = :crypto.strong_rand_bytes(20)
-      state = base_state(hash, 4, status: 0)
 
-      assert {:stop, {:shutdown, :protocol_error}, ^state} =
-               Peer.Controller.handle_cast({:handle_have_all, []}, state)
-
-      assert {:stop, {:shutdown, :protocol_error}, ^state} =
-               Peer.Controller.handle_cast({:handle_have_none, []}, state)
+      # The message needs no Fast state to be read: it says what an empty bitfield
+      # says. Refusing it cost us the peer and blacklisted its id, for information
+      # we could simply have used. `have_all` takes the same path but also touches
+      # PiecesStatistic, so it is covered where a model is running.
+      assert {:noreply, %State{bitfield: :none}} =
+               Peer.Controller.handle_cast(
+                 {:handle_have_none, []},
+                 base_state(hash, 4, status: 0)
+               )
     end
   end
 
