@@ -23,8 +23,28 @@ defmodule Acceptor do
 
   defdelegate handshakes(peers, hash), to: Handshakes
 
-  @tcp_performance [nodelay: true, recbuf: 262_144, sndbuf: 262_144]
-  @tcp_connect_fallback [nodelay: true]
+  # `:gen_tcp.send/2` defaults to `send_timeout: :infinity`, so a peer that stops
+  # reading blocks its `Peer.Sender` inside `:prim_inet.send/4` forever while
+  # wire casts keep arriving — an unbounded mailbox on a remote-controlled
+  # trigger. Live: one sender sat in that call with a 20 863-message mailbox and
+  # 3 MB of heap, still climbing. With a bound the write fails instead, and
+  # `Peer.Sender.do_send/2`'s existing `{:error, _} -> stop` path tears the peer
+  # down. `send_timeout_close` drops the socket too: a timed-out write may be
+  # partial, so the wire stream is no longer trustworthy. 30s is far beyond any
+  # healthy write and well under the 100s peer inactivity timeout.
+  @send_timeout_ms 30_000
+  @tcp_performance [
+    nodelay: true,
+    recbuf: 262_144,
+    sndbuf: 262_144,
+    send_timeout: @send_timeout_ms,
+    send_timeout_close: true
+  ]
+  @tcp_connect_fallback [
+    nodelay: true,
+    send_timeout: @send_timeout_ms,
+    send_timeout_close: true
+  ]
 
   @spec socket_options() :: list()
   def socket_options, do: [:binary, active: false, reuseaddr: true]
