@@ -646,6 +646,66 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
     end
 
+    test "assign_peer_to_piece?/3 will not move a pinned peer onto a drained piece" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(drained_pin_torrent(hash), fn _ ->
+        key = drained_piece_with_peer(hash, @peer_b, index: 0)
+
+        refute Swarm.assign_peer_to_piece?(hash, key, 1)
+      end)
+    end
+
+    test "assign_peer_to_piece?/3 still gives an unpinned peer a drained piece" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(drained_pin_torrent(hash), fn _ ->
+        key = drained_piece_with_peer(hash, @peer_b, index: nil)
+
+        # A peer with no pin never reaches check_interested/1, so it would never
+        # send BEP 3 `interested` and never be unchoked. It gets the pin anyway.
+        assert Swarm.assign_peer_to_piece?(hash, key, 1)
+      end)
+    end
+
+    test "assign_peer_to_piece?/3 frees a pin whose blocks are all in flight elsewhere" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(drained_pin_torrent(hash), fn _ ->
+        start_swarm(hash)
+        start_downloads(hash)
+
+        # Piece 0: every block claimed by another peer, none delivered yet.
+        Downloads.piece(hash, 0, fn -> :ok end, fn -> :ok end)
+
+        :sys.replace_state(Piece.whereis(hash, 0), fn state ->
+          %{
+            state
+            | waiting: [],
+              requests: [%Request{peer_id: @peer_a, subpiece: {0, 16_384}, timer: nil}]
+          }
+        end)
+
+        assert Downloads.piece_has_waiting?(hash, 0)
+        refute Downloads.piece_has_unclaimed?(hash, 0)
+
+        Downloads.piece(hash, 1, fn -> :ok end, fn -> :ok end)
+
+        {_pid, key} =
+          add_swarm_peer(hash, @peer_b,
+            index: 0,
+            bitfield: drained_pin_bitfield(),
+            choke_me: false,
+            stale: false
+          )
+
+        # There is nothing left on piece 0 to hand this peer, so it must be
+        # allowed onto piece 1 rather than idling until the in-flight blocks
+        # of a different peer resolve.
+        assert Swarm.assign_peer_to_piece?(hash, key, 1)
+      end)
+    end
+
     test "sort_peers_seeders_first ranks seeders ahead of leechers" do
       hash = :crypto.strong_rand_bytes(20)
       torrent = endgame_torrent(hash)
@@ -1314,6 +1374,52 @@ defmodule TorrentStorageCoverageBatchTest do
       last_piece_length: 16_384,
       peer_status: nil
     }
+  end
+
+  # 20 pieces keeps `left` above Model's `@until_endgame * piece_length`, so the
+  # torrent is NOT in endgame — endgame deliberately allows several peers onto
+  # the same drained piece, which is the opposite of what these tests check.
+  @drained_pin_pieces 20
+
+  defp drained_pin_torrent(hash) do
+    %Torrent{
+      hash: hash,
+      metadata: %{"info" => %{"name" => "drained-target", "piece length" => 16_384}},
+      left: @drained_pin_pieces * 16_384,
+      last_index: @drained_pin_pieces - 1,
+      last_piece_length: 16_384,
+      peer_status: nil
+    }
+  end
+
+  # Starts piece 1, empties its waiting list, and adds a peer holding both
+  # pieces 0 and 1. Emptying via `:sys.replace_state` rather than a real
+  # `Downloads.request/4` keeps it deterministic — a handed-out subpiece is
+  # re-queued the moment its request timer fires.
+  defp drained_piece_with_peer(hash, peer_id, opts) do
+    start_swarm(hash)
+    start_downloads(hash)
+    Downloads.piece(hash, 1, fn -> :ok end, fn -> :ok end)
+
+    piece_pid = Piece.whereis(hash, 1)
+    assert is_pid(piece_pid)
+    :sys.replace_state(piece_pid, &%{&1 | waiting: []})
+    refute Downloads.piece_has_waiting?(hash, 1)
+
+    {_pid, key} =
+      add_swarm_peer(
+        hash,
+        peer_id,
+        Keyword.merge([bitfield: drained_pin_bitfield(), choke_me: false, stale: false], opts)
+      )
+
+    key
+  end
+
+  defp drained_pin_bitfield do
+    Bitfield.make(@drained_pin_pieces)
+    |> Bitfield.set(0, 1)
+    |> Bitfield.set(1, 1)
   end
 
   defp both_pieces do

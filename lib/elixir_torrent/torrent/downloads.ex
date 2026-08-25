@@ -56,6 +56,16 @@ defmodule Torrent.Downloads do
   # be re-pinned to a fresh active piece.
   defdelegate piece_has_waiting?(hash, index), to: Piece, as: :has_waiting?
 
+  # Blocks nobody has claimed yet. `piece_has_waiting?/2` also counts blocks
+  # in flight to other peers, which is right for endgame but wrong when
+  # deciding whether *this* peer still has work here.
+  defdelegate piece_has_unclaimed?(hash, index), to: Piece, as: :has_unclaimed?
+
+  # Distinguishes "no worker yet" from "worker with nothing left to hand out",
+  # which `piece_has_waiting?/2` collapses into `false`.
+  @spec piece_whereis(Torrent.hash(), Torrent.index()) :: pid() | nil
+  defdelegate piece_whereis(hash, index), to: Piece, as: :whereis
+
   @spec piece_has_in_flight?(Torrent.hash(), Torrent.index()) :: boolean()
   def piece_has_in_flight?(hash, index) do
     case Piece.whereis(hash, index) do
