@@ -358,7 +358,8 @@ defmodule Peer.Controller do
   end
 
   @spec terminate(term(), State.t()) :: :ok
-  def terminate({:shutdown, :protocol_error}, state) do
+  def terminate({:shutdown, :protocol_error} = reason, state) do
+    note_disconnect_reason(state, reason)
     State.notify_hash_request_disconnect(state, :protocol_error)
     Torrent.Superseed.release(state.hash, state.id)
     Torrent.PiecesStatistic.remove_peer(state.hash, state.bitfield, state.pieces_count)
@@ -366,6 +367,7 @@ defmodule Peer.Controller do
   end
 
   def terminate(reason, %State{} = state) do
+    note_disconnect_reason(state, reason)
     State.record_pex_recent_disconnect(state, reason)
     State.notify_hash_request_disconnect(state, reason)
     # :shutdown / {:shutdown,_} are normal OTP stop paths (app teardown, swarm
@@ -384,6 +386,20 @@ defmodule Peer.Controller do
     Torrent.Superseed.release(state.hash, state.id)
     Torrent.PiecesStatistic.remove_peer(state.hash, state.bitfield, state.pieces_count)
     :ok
+  end
+
+  # Our supervisor is auto_shutdown, so it exits with a bare `:shutdown` and
+  # Peer.Endpoints — which monitors it, not us — cannot see this reason unless we
+  # hand it over first. terminate/2 runs before the supervisor exits, so the note
+  # is in place by the time the :DOWN lands.
+  @spec note_disconnect_reason(State.t(), term()) :: :ok
+  defp note_disconnect_reason(%State{socket: nil}, _reason), do: :ok
+
+  defp note_disconnect_reason(%State{} = state, reason) do
+    case Peer.Transport.safe_peername(state.socket) do
+      {:ok, {ip, port}} -> Peer.Endpoints.note_disconnect_reason(state.hash, ip, port, reason)
+      _ -> :ok
+    end
   end
 
   @doc false
