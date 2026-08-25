@@ -31,21 +31,35 @@ defmodule Peer.DialBackoffTest do
     assert DialBackoff.filter([p], @hash, 0) == []
   end
 
-  test "a churn block is NOT re-added even under min_count pressure" do
-    p = peer(2, 6882)
-    DialBackoff.record(@hash, p.ip, p.port, :churn)
+  test "a sticky block yields to every other candidate before it is re-dialled" do
+    churned = peer(2, 6882)
+    soft = peer(21, 6902)
+    free = peer(22, 6903)
+
+    DialBackoff.record(@hash, churned.ip, churned.port, :churn)
+    DialBackoff.record(@hash, soft.ip, soft.port, :timeout)
     _ = :sys.get_state(DialBackoff)
 
-    assert DialBackoff.filter([p], @hash, 5) == []
-    assert DialBackoff.filter([p], @hash, 0) == []
+    # Room for two: the unblocked peer, then the soft block. Sticky stays out
+    # while anything else can fill the batch.
+    assert DialBackoff.filter([churned, soft, free], @hash, 2) == [free, soft]
+
+    # Without min_count pressure only genuinely unblocked peers pass.
+    assert DialBackoff.filter([churned, soft, free], @hash, 0) == [free]
   end
 
-  test "a hard-failure block is sticky too" do
-    p = peer(3, 6883)
-    DialBackoff.record(@hash, p.ip, p.port, :econnrefused)
+  test "a sticky block is re-dialled when the torrent has nothing else to dial" do
+    churn = peer(2, 6882)
+    hard = peer(3, 6883)
+
+    DialBackoff.record(@hash, churn.ip, churn.port, :churn)
+    DialBackoff.record(@hash, hard.ip, hard.port, :econnrefused)
     _ = :sys.get_state(DialBackoff)
 
-    assert DialBackoff.filter([p], @hash, 5) == []
+    # Refusing the only candidates leaves the torrent with no dial at all, which
+    # costs more than the wasted SYNs.
+    assert DialBackoff.filter([churn, hard], @hash, 5) == [churn, hard]
+    assert DialBackoff.filter([churn, hard], @hash, 0) == []
   end
 
   test "unblocked peers always pass through" do
@@ -69,11 +83,68 @@ defmodule Peer.DialBackoffTest do
     assert DialBackoff.filter([p], @hash, 5) == [p]
 
     # The 3rd :timeout crosses @hard_fail_threshold and promotes the row to
-    # sticky. It must now be excluded even under aggressive min_count pressure.
+    # sticky: it now loses to any other candidate, and only comes back when the
+    # torrent would otherwise have nothing to dial.
     DialBackoff.record(@hash, p.ip, p.port, :timeout)
     _ = :sys.get_state(DialBackoff)
-    assert DialBackoff.filter([p], @hash, 5) == []
+    other = peer(23, 6904)
+    assert DialBackoff.filter([p, other], @hash, 1) == [other]
+    assert DialBackoff.filter([p], @hash, 5) == [p]
     assert DialBackoff.filter([p], @hash, 0) == []
+  end
+
+  test "a live connection clears the endpoint's failure history" do
+    p = peer(24, 6905)
+
+    for _ <- 1..3, do: DialBackoff.record(@hash, p.ip, p.port, :timeout)
+    _ = :sys.get_state(DialBackoff)
+    assert DialBackoff.blocked?(@hash, p.ip, p.port)
+
+    # Connect + handshake settles the only question this table asks. Without
+    # this, a peer that keeps us choked never delivers bytes, so
+    # `mark_productive/3` never fires and the row survives the whole session.
+    DialBackoff.record_success(@hash, p.ip, p.port)
+    _ = :sys.get_state(DialBackoff)
+
+    refute DialBackoff.blocked?(@hash, p.ip, p.port)
+    assert DialBackoff.filter([p], @hash, 0) == [p]
+  end
+
+  test "failures far enough apart start a new streak instead of escalating" do
+    p = peer(25, 6906)
+
+    for _ <- 1..2, do: DialBackoff.record(@hash, p.ip, p.port, :timeout)
+    _ = :sys.get_state(DialBackoff)
+
+    # Age the last failure past the streak window. Two failures an hour apart are
+    # two incidents, not evidence of a dead endpoint — without this the counter
+    # only ever climbed and live rows reached fail_count 109.
+    key = {@hash, p.ip, p.port}
+    [{^key, blocked_until, retention, sticky?, count}] = fresh_row(key)
+
+    :ets.insert(
+      :peer_dial_backoff,
+      {key, blocked_until, retention, sticky?, count,
+       System.monotonic_time(:millisecond) - 60 * 60 * 1_000}
+    )
+
+    DialBackoff.record(@hash, p.ip, p.port, :timeout)
+    _ = :sys.get_state(DialBackoff)
+
+    # Third failure overall, first of this streak → still soft, so min_count
+    # pressure can pick it ahead of written-off endpoints.
+    other = peer(26, 6907)
+    DialBackoff.record(@hash, other.ip, other.port, :churn)
+    _ = :sys.get_state(DialBackoff)
+
+    assert DialBackoff.filter([other, p], @hash, 1) == [p]
+  end
+
+  defp fresh_row(key) do
+    [{^key, blocked_until, retention, sticky?, count, _last_at}] =
+      :ets.lookup(:peer_dial_backoff, key)
+
+    [{key, blocked_until, retention, sticky?, count}]
   end
 
   test "non-reachability outcomes (already_connected / not_connectable) do not accumulate" do
