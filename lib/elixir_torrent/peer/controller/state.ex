@@ -43,6 +43,10 @@ defmodule Peer.Controller.State do
     # later. Kept so those answers are recognised instead of read as a protocol
     # violation. Bounded — see put_withdrawn/4.
     withdrawn: MapSet.new(),
+    # Previous generation of `withdrawn`. Eviction has to drop the oldest
+    # entries, and a MapSet has no order to drop by; retiring a full generation
+    # keeps at least @max_withdrawn recent withdrawals alive at all times.
+    withdrawn_prev: MapSet.new(),
     # Blocks that matched neither `requests` nor `withdrawn`. Never fatal on its
     # own (our window is finite), but a peer pushing data we never asked for is
     # spending our bandwidth, so it is capped.
@@ -119,6 +123,7 @@ defmodule Peer.Controller.State do
           hash_requests: %{Peer.HashTransfer.ref() => map()},
           requests: MapSet.t(subpiece()),
           withdrawn: MapSet.t(subpiece()),
+          withdrawn_prev: MapSet.t(subpiece()),
           unsolicited_blocks: non_neg_integer(),
           upload_requests: MapSet.t(subpiece()),
           pending_requests: non_neg_integer(),
@@ -2015,6 +2020,7 @@ defmodule Peer.Controller.State do
     cond do
       MapSet.member?(state.requests, subpiece) -> :requested
       MapSet.member?(state.withdrawn, subpiece) -> :withdrawn
+      MapSet.member?(state.withdrawn_prev, subpiece) -> :withdrawn
       true -> :unsolicited
     end
   end
@@ -2023,13 +2029,11 @@ defmodule Peer.Controller.State do
   defp put_withdrawn(%__MODULE__{} = state, index, begin, length) do
     withdrawn = MapSet.put(state.withdrawn, subpiece(index, begin, length))
 
-    # Past the cap the oldest entries are no longer plausibly in flight, and a
-    # MapSet has no order to evict by. Dropping the window only costs us the
-    # distinction between a very late answer and an unsolicited one, and that is
-    # now a counter rather than a disconnect.
-    withdrawn = if MapSet.size(withdrawn) > @max_withdrawn, do: MapSet.new(), else: withdrawn
-
-    %__MODULE__{state | withdrawn: withdrawn}
+    if MapSet.size(withdrawn) > @max_withdrawn do
+      %__MODULE__{state | withdrawn: MapSet.new(), withdrawn_prev: withdrawn}
+    else
+      %__MODULE__{state | withdrawn: withdrawn}
+    end
   end
 
   @spec withdraw_all(t(), MapSet.t(subpiece())) :: t()
@@ -2041,7 +2045,13 @@ defmodule Peer.Controller.State do
 
   @spec drop_withdrawn(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
   defp drop_withdrawn(%__MODULE__{} = state, index, begin, length) do
-    %__MODULE__{state | withdrawn: MapSet.delete(state.withdrawn, subpiece(index, begin, length))}
+    subpiece = subpiece(index, begin, length)
+
+    %__MODULE__{
+      state
+      | withdrawn: MapSet.delete(state.withdrawn, subpiece),
+        withdrawn_prev: MapSet.delete(state.withdrawn_prev, subpiece)
+    }
   end
 
   @spec note_unsolicited(t(), String.t()) :: t() | {:error, :unsolicited_blocks, t()}
