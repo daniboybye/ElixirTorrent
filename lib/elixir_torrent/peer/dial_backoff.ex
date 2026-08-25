@@ -36,6 +36,13 @@ defmodule Peer.DialBackoff do
   # can see it and escalate. Must be > @default_ttl_ms so the counter survives
   # a normal transient block. When retention expires, the whole row is swept.
   @fail_count_retention_ms 30 * 60 * 1_000
+  # Escalation asks "is this endpoint dead", so it must count failures *close
+  # together*, not failures ever. Retention is refreshed on every failure, so a
+  # row re-dialled at least once per @fail_count_retention_ms never aged out and
+  # its counter only climbed: live rows reached fail_count 107-109, which is a
+  # permanent sticky block on an endpoint that merely fails intermittently.
+  # Failures further apart than this start a fresh streak.
+  @fail_streak_window_ms 10 * 60 * 1_000
   # Hard cap on ETS rows — under heavy dial churn the table grows ~2k/30min today;
   # evict the oldest retention_until rows when we exceed this ceiling so memory
   # stays bounded on long sessions without weakening active blocks.
@@ -76,8 +83,7 @@ defmodule Peer.DialBackoff do
   def filter(peers, hash, min_count \\ 0) when is_list(peers) and is_integer(min_count) do
     now = System.monotonic_time(:millisecond)
     {allowed, blocked} = partition_by_block(peers, hash, now)
-    soft_blocked = reject_sticky_blocked(blocked, hash, now)
-    apply_min_count_resurrection(allowed, soft_blocked, hash, min_count)
+    apply_min_count_resurrection(allowed, blocked, hash, min_count)
   catch
     :exit, _ -> peers
   end
@@ -89,22 +95,14 @@ defmodule Peer.DialBackoff do
     end)
   end
 
-  # Sticky blocks (churn / hard failures / escalated) stay blocked even under target.
-  @spec reject_sticky_blocked([Peer.t()], Torrent.hash(), integer()) :: [Peer.t()]
-  defp reject_sticky_blocked(blocked, hash, now) do
-    Enum.reject(blocked, fn %Peer{ip: ip, port: port} ->
-      sticky_blocked?(hash, ip, port, now)
-    end)
-  end
-
   @spec apply_min_count_resurrection([Peer.t()], [Peer.t()], Torrent.hash(), non_neg_integer()) ::
           [Peer.t()]
-  defp apply_min_count_resurrection(allowed, soft_blocked, hash, min_count) do
-    if min_count <= 0 or length(allowed) >= min_count or soft_blocked == [] do
+  defp apply_min_count_resurrection(allowed, blocked, hash, min_count) do
+    if min_count <= 0 or length(allowed) >= min_count or blocked == [] do
       allowed
     else
-      need = min(min_count - length(allowed), length(soft_blocked))
-      allowed ++ take_blocked_for_min_count(soft_blocked, hash, need)
+      need = min(min_count - length(allowed), length(blocked))
+      allowed ++ take_blocked_for_min_count(blocked, hash, need)
     end
   end
 
@@ -115,6 +113,24 @@ defmodule Peer.DialBackoff do
   @spec mark_productive(Torrent.hash(), :inet.ip_address(), :inet.port_number()) :: :ok
   def mark_productive(hash, ip, port) do
     GenServer.cast(__MODULE__, {:mark_productive, hash, ip, port})
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
+  Forget an endpoint's failure history — we have a live connection to it.
+
+  This table answers "is this endpoint reachable", and a registered peer settles
+  that question: TCP connect and the BEP 3 handshake both completed. Only
+  `mark_productive/3` used to clear a row, which instead answers "was it useful",
+  and the two come apart badly on a leecher with nothing to trade: peers keep us
+  choked, so a reachable endpoint never delivers bytes and carries its failure
+  history for the whole session. Live, 1151 of 1162 active blocks were sticky and
+  every torrent was down to 3-8 dialable endpoints out of 37-53 known.
+  """
+  @spec record_success(Torrent.hash(), :inet.ip_address(), :inet.port_number()) :: :ok
+  def record_success(hash, ip, port) do
+    GenServer.cast(__MODULE__, {:record_success, hash, ip, port})
   catch
     :exit, _ -> :ok
   end
@@ -194,7 +210,8 @@ defmodule Peer.DialBackoff do
 
   defp blocked?(hash, ip, port, now) do
     case :ets.lookup(@table, key(hash, ip, port)) do
-      [{_, blocked_until, _retention, _sticky, _fail_count}] when is_integer(blocked_until) ->
+      [{_, blocked_until, _retention, _sticky, _fail_count, _last_at}]
+      when is_integer(blocked_until) ->
         now < blocked_until
 
       _ ->
@@ -204,11 +221,20 @@ defmodule Peer.DialBackoff do
 
   defp sticky_blocked?(hash, ip, port, now) do
     case :ets.lookup(@table, key(hash, ip, port)) do
-      [{_, blocked_until, _retention, true, _fail_count}] when is_integer(blocked_until) ->
+      [{_, blocked_until, _retention, true, _fail_count, _last_at}]
+      when is_integer(blocked_until) ->
         now < blocked_until
 
       _ ->
         false
+    end
+  end
+
+  @spec fail_count(Torrent.hash(), :inet.ip_address(), :inet.port_number()) :: non_neg_integer()
+  defp fail_count(hash, ip, port) do
+    case :ets.lookup(@table, key(hash, ip, port)) do
+      [{_, _, _, _, n, _}] when is_integer(n) -> n
+      _ -> 0
     end
   end
 
@@ -231,6 +257,11 @@ defmodule Peer.DialBackoff do
     {:noreply, state}
   end
 
+  def handle_cast({:record_success, hash, ip, port}, state) do
+    :ets.delete(@table, key(hash, ip, port))
+    {:noreply, state}
+  end
+
   def handle_cast({:record, hash, ip, port, ttl_ms, reason}, state) do
     now = System.monotonic_time(:millisecond)
     key = key(hash, ip, port)
@@ -250,21 +281,26 @@ defmodule Peer.DialBackoff do
         ) :: {boolean(), pos_integer()}
   defp insert_failure_record(key, _ip, _port, ttl_ms, reason, now) do
     productive? = productive_at?(key, now)
-    prev_fail_count = lookup_fail_count(key)
-    fail_count = prev_fail_count + 1
+    fail_count = streak_count(key, now) + 1
     {final_ttl, sticky?} = escalate(reason, fail_count, ttl_ms, productive?)
     blocked_until = now + final_ttl
     retention_until = max(blocked_until, now + @fail_count_retention_ms)
 
-    true = :ets.insert(@table, {key, blocked_until, retention_until, sticky?, fail_count})
+    true = :ets.insert(@table, {key, blocked_until, retention_until, sticky?, fail_count, now})
     {sticky?, fail_count}
   end
 
-  @spec lookup_fail_count(term()) :: non_neg_integer()
-  defp lookup_fail_count(key) do
+  # Failures more than @fail_streak_window_ms apart are separate incidents, not
+  # mounting evidence that the endpoint is dead.
+  @spec streak_count(term(), integer()) :: non_neg_integer()
+  defp streak_count(key, now) do
     case :ets.lookup(@table, key) do
-      [{_, _, _, _, n}] when is_integer(n) -> n
-      _ -> 0
+      [{_, _, _, _, n, last_at}]
+      when is_integer(n) and is_integer(last_at) and now - last_at <= @fail_streak_window_ms ->
+        n
+
+      _ ->
+        0
     end
   end
 
@@ -295,7 +331,7 @@ defmodule Peer.DialBackoff do
     # Sweep by retention_until (the 3rd tuple element), not blocked_until — the
     # fail_count needs to outlive the block so the next re-dial can escalate.
     :ets.select_delete(@table, [
-      {{:"$1", :"$2", :"$3", :"$4", :"$5"}, [{:<, :"$3", now}], [true]}
+      {{:"$1", :"$2", :"$3", :"$4", :"$5", :"$6"}, [{:<, :"$3", now}], [true]}
     ])
 
     :ets.select_delete(@productive_table, [
@@ -318,9 +354,9 @@ defmodule Peer.DialBackoff do
 
       @table
       |> :ets.tab2list()
-      |> Enum.sort_by(fn {_, _, retention, _, _} -> retention end)
+      |> Enum.sort_by(fn {_, _, retention, _, _, _} -> retention end)
       |> Enum.take(drop)
-      |> Enum.each(fn {key, _, _, _, _} -> :ets.delete(@table, key) end)
+      |> Enum.each(fn {key, _, _, _, _, _} -> :ets.delete(@table, key) end)
     end
   end
 
@@ -364,24 +400,36 @@ defmodule Peer.DialBackoff do
     end
   end
 
-  # When min_count pressure resurrects soft-blocked peers: productive first
-  # (known byte-deliverers), then v6 before v4. Under CGNAT outbound v6 yield
-  # is ~10–20× better than v4; matching a v4-heavy allowed slice would amplify
-  # dead v4 candidates and drain the v6 dial budget.
+  # Priority when min_count pressure makes us re-dial blocked endpoints:
+  #
+  #   1. productive — it already delivered bytes to us, so it is scarce and proven
+  #   2. soft-blocked before sticky — sticky means we deliberately wrote it off
+  #   3. v6 before v4 — outbound v6 yield here is ~10-20× v4 under CGNAT, so a
+  #      v4-heavy slice would burn the batch on timeouts
+  #   4. fewest failures first — least evidence against it
+  #
+  # Sticky used to be excluded outright, which is right while anything else is
+  # dialable and starves the torrent once nothing is. Every block a CGNAT host
+  # records is sticky in practice — churn, hard failures and the escalated
+  # write-off all are — so live 1151 of 1162 active blocks refused resurrection,
+  # leaving eight of nine torrents asking for a 50-endpoint batch and getting
+  # 3-8, with the scarce v6 pool blocked 2-6 of 5-8. A SYN to a written-off
+  # endpoint costs one timeout; not dialling costs the torrent.
   @spec take_blocked_for_min_count([Peer.t()], Torrent.hash(), non_neg_integer()) :: [Peer.t()]
   defp take_blocked_for_min_count(_blocked, _hash, 0), do: []
 
   defp take_blocked_for_min_count(blocked, hash, need) do
-    {productive, rest} =
-      Enum.split_with(blocked, fn %Peer{ip: ip, port: port} ->
-        productive?(hash, ip, port)
-      end)
+    now = System.monotonic_time(:millisecond)
 
-    {v6, v4} = Enum.split_with(rest, fn peer -> peer_family(peer) == :inet6 end)
-
-    productive
-    |> Kernel.++(v6)
-    |> Kernel.++(v4)
+    blocked
+    |> Enum.sort_by(fn %Peer{ip: ip, port: port} = peer ->
+      {
+        if(productive?(hash, ip, port), do: 0, else: 1),
+        if(sticky_blocked?(hash, ip, port, now), do: 1, else: 0),
+        if(peer_family(peer) == :inet6, do: 0, else: 1),
+        fail_count(hash, ip, port)
+      }
+    end)
     |> Enum.take(need)
   end
 

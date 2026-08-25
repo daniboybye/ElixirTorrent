@@ -118,6 +118,11 @@ defmodule Peer.Endpoints do
     ref = Process.monitor(pid)
     :ets.insert(table, {key, pid})
     now = System.monotonic_time(:millisecond)
+    # Registration is the proof of reachability the dial backoff is asking for:
+    # connect and the BEP 3 handshake both completed. Inbound peers count too —
+    # if they reached us, our earlier dial timeouts were about their NAT, not a
+    # dead host.
+    Peer.DialBackoff.record_success(hash, ip, port)
     {:reply, :ok, %{state | monitors: Map.put(monitors, ref, {key, now})}}
   end
 
