@@ -881,6 +881,36 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
     end
 
+    test "orphan_no_sources?/1 is true when the swarm has peers but none has this piece" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 2)
+
+      with_model(torrent, fn _ ->
+        start_swarm(hash)
+        # Holds piece 1 only, so the worker on piece 0 has no source and must
+        # release its @max_parallel_pieces slot rather than idle on it forever.
+        bf = Bitfield.make(2) |> Bitfield.set(1, 1)
+        add_swarm_peer(hash, @peer_a, index: nil, bitfield: bf)
+
+        state = %State{hash: hash, index: 0, waiting: [{0, 16_384}], monitoring: %{}}
+        assert State.orphan_no_sources?(state)
+      end)
+    end
+
+    test "orphan_no_sources?/1 is false while a connected peer has this piece" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 2)
+
+      with_model(torrent, fn _ ->
+        start_swarm(hash)
+        bf = Bitfield.make(2) |> Bitfield.set(0, 1)
+        add_swarm_peer(hash, @peer_a, index: nil, bitfield: bf)
+
+        state = %State{hash: hash, index: 0, waiting: [{0, 16_384}], monitoring: %{}}
+        refute State.orphan_no_sources?(state)
+      end)
+    end
+
     test "release_in_flight_requests/1 cancels tracked requests" do
       hash = :crypto.strong_rand_bytes(20)
       subpiece = {0, 16_384}
