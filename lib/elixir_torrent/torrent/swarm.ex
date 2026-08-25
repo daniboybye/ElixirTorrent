@@ -102,15 +102,33 @@ defmodule Torrent.Swarm do
           true
 
         other ->
-          may_leave_pin?(hash, key, index, other, active_indices)
+          endgame? = Model.get(hash, :mode) == :endgame
+
+          target_accepts_repin?(hash, index, endgame?) and
+            may_leave_pin?(hash, key, index, other, active_indices, endgame?)
       end
   catch
     :exit, _ -> false
   end
 
-  defp may_leave_pin?(hash, key, index, other, active_indices) do
-    drained? = not Downloads.piece_has_waiting?(hash, other)
-    endgame? = Model.get(hash, :mode) == :endgame
+  # Only gates *moving* a peer, never its first pin: `interested` is sent from
+  # `check_interested/1`, which needs an integer pin, so refusing a peer that has
+  # none would leave it permanently un-interested and therefore never unchoked.
+  #
+  # Moving one is different. Pinning a peer to a piece whose blocks are all
+  # already claimed parks its bandwidth until something else moves it. Live: 27
+  # of 37 peers pinned to 4 such pieces while 8 active pieces with 49-64 free
+  # blocks had no peer at all. A piece with no worker yet is accepted; it is
+  # about to start.
+  defp target_accepts_repin?(hash, index, endgame?) do
+    case Downloads.piece_whereis(hash, index) do
+      nil -> true
+      _pid -> endgame? or Downloads.piece_has_unclaimed?(hash, index)
+    end
+  end
+
+  defp may_leave_pin?(hash, key, index, other, active_indices, endgame?) do
+    drained? = pin_drained?(hash, other, endgame?)
     useless? = useless_pin_may_switch?(hash, key, index, other, active_indices)
 
     cond do
@@ -130,6 +148,14 @@ defmodule Torrent.Swarm do
         false
     end
   end
+
+  # "Nothing here for this peer any more." Outside endgame that means every
+  # block has been claimed, even if other peers still have them in flight —
+  # this peer cannot be handed one, so holding it here only wastes it. Endgame
+  # deliberately re-requests in-flight blocks from several peers, so there the
+  # pin stays useful until the piece is genuinely finished.
+  defp pin_drained?(hash, index, true), do: not Downloads.piece_has_waiting?(hash, index)
+  defp pin_drained?(hash, index, false), do: not Downloads.piece_has_unclaimed?(hash, index)
 
   # A peer choked with zero bytes on its current pin for long enough is not
   # contributing to that piece. In endgame, only re-pin to another active

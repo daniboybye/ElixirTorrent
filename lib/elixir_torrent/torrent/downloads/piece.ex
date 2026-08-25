@@ -73,6 +73,18 @@ defmodule Torrent.Downloads.Piece do
     :exit, _ -> false
   end
 
+  # Same probe restricted to blocks nobody has claimed yet — see
+  # `handle_call(:has_unclaimed?, ...)`.
+  @spec has_unclaimed?(Torrent.hash(), Torrent.index()) :: boolean()
+  def has_unclaimed?(hash, index) do
+    case GenServer.whereis(key(index, hash)) do
+      nil -> false
+      pid -> GenServer.call(pid, :has_unclaimed?, 1_000)
+    end
+  catch
+    :exit, _ -> false
+  end
+
   @spec whereis(Torrent.hash(), Torrent.index()) :: pid() | nil
   def whereis(hash, index), do: GenServer.whereis(key(index, hash))
 
@@ -177,6 +189,14 @@ defmodule Torrent.Downloads.Piece do
 
   def handle_call(:has_in_flight?, _from, state) do
     {:reply, state.requests != [], state}
+  end
+
+  # Strictly "are there blocks left to hand out". Unlike :has_waiting? this
+  # ignores in-flight requests, because a peer cannot be given a block that
+  # another peer already holds — outside endgame, where duplicating them is
+  # the whole point.
+  def handle_call(:has_unclaimed?, _from, state) do
+    {:reply, state.waiting != [], state}
   end
 
   # Sync ack for Downloads.request/4 — see request/4 above.
