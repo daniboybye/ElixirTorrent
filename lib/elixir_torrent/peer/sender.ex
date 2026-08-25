@@ -416,8 +416,15 @@ defmodule Peer.Sender do
   # this message is stale and dropped. Cheaper than Process.cancel_timer/1 on every
   # completed frame, and just as race-free: a cancel racing the timer's own send
   # would need this same staleness check anyway.
+  # Dropping the connection is the defence here; a ban is not. A frame that stops
+  # half-way is what a congested path looks like — a uTP window that collapsed, a
+  # peer swapping — and on this host that is routine, not a slow-loris. Banning
+  # the peer ID for it excluded mainstream clients from every torrent at once.
   def handle_info({:frame_stall, ref}, %__MODULE__{frame_stall_ref: ref, key: key} = state) do
-    Acceptor.malicious_peer(Peer.key_to_id(key))
+    Logger.debug(
+      "[peer_sender] frame_stalled peer=#{Peer.log_key(key)} hash=#{Torrent.hex_encoded_hash(Peer.key_to_hash(key))} buffered=#{byte_size(state.buffer)}"
+    )
+
     {:stop, {:shutdown, :frame_stalled}, state}
   end
 
@@ -468,7 +475,7 @@ defmodule Peer.Sender do
             drain_inbound(state)
 
           :protocol_error ->
-            Acceptor.malicious_peer(Peer.key_to_id(key))
+            ban(key, :unparsable_message)
             {:stop, {:shutdown, :protocol_error}, %{state | buffer: rest}}
         end
 
@@ -477,9 +484,21 @@ defmodule Peer.Sender do
         {:noreply, state, @timeout}
 
       :protocol_error ->
-        Acceptor.malicious_peer(Peer.key_to_id(key))
+        ban(key, :malformed_frame)
         {:stop, {:shutdown, :protocol_error}, state}
     end
+  end
+
+  # Naming the rule matters: a ban keeps this peer out of every torrent, so a
+  # bare "protocol_error" leaves no way to tell a genuinely broken client from a
+  # rule of ours that is too strict.
+  @spec ban(Peer.key(), atom()) :: :ok
+  defp ban(key, cause) do
+    Logger.debug(
+      "[peer_sender] banned peer=#{Peer.log_key(key)} hash=#{Torrent.hex_encoded_hash(Peer.key_to_hash(key))} cause=#{cause}"
+    )
+
+    Acceptor.malicious_peer(Peer.key_to_id(key))
   end
 
   # Starts the stall watchdog the first time `buffer` holds an incomplete frame, and

@@ -363,6 +363,13 @@ defmodule Peer.Controller do
     State.notify_hash_request_disconnect(state, :protocol_error)
     Torrent.Superseed.release(state.hash, state.id)
     Torrent.PiecesStatistic.remove_peer(state.hash, state.bitfield, state.pieces_count)
+
+    require Logger
+
+    Logger.debug(
+      "[peer_wire] banned peer=#{Peer.log_id(state.id)} hash=#{Torrent.hex_encoded_hash(state.hash)} cause=controller_protocol_error"
+    )
+
     Acceptor.malicious_peer(state.id)
   end
 
@@ -806,19 +813,26 @@ defmodule Peer.Controller do
     {:noreply, state}
   end
 
-  def handle_cast({message, _}, %State{hash: hash, fast_extension: nil} = state)
-      when message in [
-             :handle_suggest_piece,
-             :handle_have_all,
-             :handle_have_none,
-             :handle_allowed_fast,
-             :handle_reject
-           ] do
-    if Magnet.Bootstrap.active?(hash) do
-      {:noreply, state}
-    else
-      {:stop, {:shutdown, :protocol_error}, state}
-    end
+  # BEP 6 sends these only once both sides advertised the Fast extension, and we
+  # do advertise it, so a peer sending one without it is at odds with the spec.
+  # Tearing the connection down was still the wrong answer, because terminate/2
+  # also blacklists the peer ID for every torrent: 71 of 98 disconnects in one
+  # three-minute window, all of them qBittorrent and Transmission builds that do
+  # support Fast, on a host whose torrents run on 1-8 peers.
+  #
+  # `have all` / `have none` are self-describing — they carry what a full or empty
+  # bitfield carries — so they fall through to the normal handler. What is left is
+  # advisory (`suggest piece`, `allowed fast`) or self-healing (`reject`, which the
+  # request timeout already covers), so ignoring it costs nothing.
+  def handle_cast({message, _}, %State{fast_extension: nil} = state)
+      when message in [:handle_suggest_piece, :handle_allowed_fast, :handle_reject] do
+    require Logger
+
+    Logger.debug(
+      "[peer_wire] peer=#{Peer.log_id(state.id)} hash=#{Torrent.hex_encoded_hash(state.hash)} ignored=#{message} reason=fast_not_negotiated"
+    )
+
+    {:noreply, state}
   end
 
   def handle_cast({fun, args}, state) do

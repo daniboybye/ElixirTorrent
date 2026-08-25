@@ -558,7 +558,7 @@ defmodule PeerControllerCoverageBatchTest do
   end
 
   describe "Fast-extension guards and bootstrap leniency" do
-    test "non-negotiated Fast messages stop with protocol_error outside magnet bootstrap" do
+    test "advisory Fast messages are ignored, not punished, when Fast was not negotiated" do
       hash = :crypto.strong_rand_bytes(20)
       id = <<37::160>>
       key = Peer.make_key(hash, id)
@@ -566,10 +566,38 @@ defmodule PeerControllerCoverageBatchTest do
 
       with_model(sample_torrent(hash, 4), fn _ ->
         {:ok, ctrl} = start_controller(hash, id, reserved_no_fast)
-        ref = Process.monitor(ctrl)
 
+        # Dropping the peer here also blacklists its id for every torrent, which
+        # is far past what an advisory message deserves.
         assert :ok = Peer.Controller.handle_suggest_piece(key, 0)
-        assert_receive {:DOWN, ^ref, :process, ^ctrl, {:shutdown, :protocol_error}}, @timeout
+        assert :ok = Peer.Controller.handle_allowed_fast(key, 0)
+        assert :ok = Peer.Controller.handle_reject(key, 0, 0, 16_384)
+        TestSupport.Sync.sync(ctrl)
+
+        assert Process.alive?(ctrl)
+        refute Acceptor.BlackList.member?(id)
+        stop_quietly(ctrl)
+      end)
+    end
+
+    test "have_all still counts when Fast was not negotiated" do
+      hash = :crypto.strong_rand_bytes(20)
+      id = <<47::160>>
+      key = Peer.make_key(hash, id)
+      reserved_no_fast = reserved_without_fast()
+
+      with_model(sample_torrent(hash, 4), fn _ ->
+        {:ok, ctrl} = start_controller(hash, id, reserved_no_fast)
+
+        # It says exactly what a full bitfield says, so there is nothing to gain
+        # from discarding it — and a seeder we record as having nothing is a
+        # connection we can never request from.
+        assert :ok = Peer.Controller.handle_have_all(key)
+        TestSupport.Sync.sync(ctrl)
+
+        assert Process.alive?(ctrl)
+        assert :sys.get_state(ctrl).bitfield == :all
+        stop_quietly(ctrl)
       end)
     end
 
