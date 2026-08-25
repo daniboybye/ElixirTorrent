@@ -199,6 +199,12 @@ defmodule Peer.Controller do
       Downloads.response(hash, index, key_to_id(key), begin, block)
       GenServer.cast(via(key), {:handle_piece, [index, begin, byte_size(block)]})
     else
+      require Logger
+
+      Logger.debug(
+        "[peer_wire] peer=#{Peer.log_id(key_to_id(key))} hash=#{Torrent.hex_encoded_hash(hash)} rejected=piece_bounds index=#{index} begin=#{begin} bytes=#{byte_size(block)} pieces=#{inspect(Torrent.get(hash, :pieces_count))} piece_len=#{inspect(Torrent.Model.piece_length(hash, index))}"
+      )
+
       GenServer.stop(via(key), {:shutdown, :protocol_error})
     end
   end
@@ -838,6 +844,15 @@ defmodule Peer.Controller do
   def handle_cast({fun, args}, state) do
     case apply(State, fun, [state | args]) do
       {:error, reason, state} ->
+        # Which wire message reached this verdict, not just that something did:
+        # a :protocol_error here ends the connection and blacklists the peer, and
+        # the reason alone is shared by a dozen rules.
+        require Logger
+
+        Logger.debug(
+          "[peer_wire] peer=#{Peer.log_id(state.id)} hash=#{Torrent.hex_encoded_hash(state.hash)} rejected=#{fun} reason=#{inspect(reason)}"
+        )
+
         {:stop, {:shutdown, reason}, state}
 
       state ->
