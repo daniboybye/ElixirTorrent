@@ -46,6 +46,14 @@ defmodule Torrent.Controller do
   # Rate-limit "download waiting" — reconcile_pump + peer kicks can fire
   # {:next_piece} many times per second while conn=0; one line/min is enough.
   @download_waiting_log_interval_sec 60
+  # A {:next_piece} that cannot place a piece reschedules itself, and every
+  # independent trigger — the 2 s reconcile tick, peer handoff kicks, each
+  # piece's requests_are_dealt closure — starts another such chain. Nothing
+  # deduplicated them, so the chains simply accumulated: a live debug build went
+  # from 99 to ~2600 discovery dial cycles per minute over twelve minutes with no
+  # change in swarm size, and the tracker started answering 403. One pending wake
+  # per controller is enough, because every wake runs the same full pump attempt.
+  @next_piece_timer_key :next_piece_timer
 
   @spec start_link(Torrent.hash()) :: GenServer.on_start()
   def start_link(hash),
@@ -89,7 +97,7 @@ defmodule Torrent.Controller do
       "[resume] controller_start hash=#{Torrent.hex_encoded_hash(hash)} scheduling download"
     )
 
-    send_after(self(), {:next_piece, :random}, 500)
+    schedule_next_piece(:random, 500)
     send_after(self(), :unchoke, 1_000)
     # Kick off the periodic pump reconciler — see @reconcile_interval.
     send_after(self(), :reconcile_pump, @reconcile_interval)
@@ -124,7 +132,10 @@ defmodule Torrent.Controller do
     {:noreply, hash}
   end
 
-  def handle_info({:next_piece, strategy} = msg, hash) do
+  def handle_info({:next_piece, strategy}, hash) do
+    cancel_next_piece_timer()
+    strategy = collapse_queued_next_piece(strategy)
+
     cond do
       Model.downloaded?(hash) ->
         mark_complete(hash)
@@ -140,7 +151,7 @@ defmodule Torrent.Controller do
 
         Model.set_peer_status(hash, :connecting_to_peers)
         PeerDiscovery.connecting_to_peers(hash)
-        send_after(self(), msg, 20_000)
+        schedule_next_piece(strategy, 20_000)
     end
 
     {:noreply, hash}
@@ -167,7 +178,7 @@ defmodule Torrent.Controller do
     effective_max = effective_max_parallel(unchoked)
 
     if length(active) >= effective_max do
-      send_after(self(), {:next_piece, strategy}, 500)
+      schedule_next_piece(strategy, 500)
     else
       pick_and_start_piece(hash, strategy, active, connected)
     end
@@ -214,7 +225,7 @@ defmodule Torrent.Controller do
       mark_complete(hash)
     else
       fallback_when_no_piece(hash, active, connected)
-      send_after(self(), {:next_piece, strategy}, @next_piece_timeout)
+      schedule_next_piece(strategy, @next_piece_timeout)
     end
   end
 
@@ -247,7 +258,7 @@ defmodule Torrent.Controller do
 
       Model.set_peer_status(hash, nil)
       PeerDiscovery.connecting_to_peers(hash)
-      send_after(self(), {:next_piece, strategy}, @next_piece_timeout)
+      schedule_next_piece(strategy, @next_piece_timeout)
     end
   end
 
@@ -261,7 +272,7 @@ defmodule Torrent.Controller do
           "[reconcile_pump] hash=#{Torrent.hex_encoded_hash(hash)} active=#{active_count} max=#{effective_max} unchoked=#{unchoked} peers=#{connected} kick=next_piece"
         )
 
-        send(self(), {:next_piece, :rare})
+        schedule_next_piece(:rare, 0)
 
       true ->
         Logger.debug(
@@ -300,7 +311,7 @@ defmodule Torrent.Controller do
     # closure to fire (that closure only wakes on the last subpiece being handed
     # out, which never happens if the peer stalls). A small delay lets the just-
     # started piece begin taking requests before we contend again.
-    send_after(self(), {:next_piece, strategy}, @post_start_pump_delay)
+    schedule_next_piece(strategy, @post_start_pump_delay)
   end
 
   defp seeder_has_piece?(hash, index) do
@@ -377,6 +388,57 @@ defmodule Torrent.Controller do
     |> Enum.reject(&Downloads.piece_has_in_flight?(hash, &1))
     |> Enum.each(&Downloads.abort_idle_piece(hash, &1, force: true))
   end
+
+  # An immediate kick stays a plain `send`: `send_after(_, 0)` hands delivery to
+  # the timer service, which loses the ordering guarantee that a self-send is
+  # already queued before the next message this process handles. Bursts of these
+  # are collapsed on the receiving side instead.
+  defp schedule_next_piece(strategy, 0) do
+    send(self(), {:next_piece, strategy})
+    :ok
+  end
+
+  defp schedule_next_piece(strategy, delay) do
+    case Process.get(@next_piece_timer_key) do
+      ref when is_reference(ref) ->
+        if Process.read_timer(ref), do: :ok, else: put_next_piece_timer(strategy, delay)
+
+      _ ->
+        put_next_piece_timer(strategy, delay)
+    end
+  end
+
+  defp put_next_piece_timer(strategy, delay) do
+    Process.put(@next_piece_timer_key, send_after(self(), {:next_piece, strategy}, delay))
+    :ok
+  end
+
+  # We are about to run the pump, so any wake still armed for it is redundant.
+  # Dropping only the stored reference would leave that timer to fire later and
+  # start a second chain — which is precisely how the chains accumulated.
+  defp cancel_next_piece_timer do
+    case Process.delete(@next_piece_timer_key) do
+      ref when is_reference(ref) -> Process.cancel_timer(ref)
+      _ -> :ok
+    end
+
+    :ok
+  end
+
+  # Immediate `send`s (Controller.kick/1, the reconcile kick) bypass the timer,
+  # so a burst can still be sitting in the mailbox. Handling one is equivalent to
+  # handling all of them; `:rare` wins over `:random` because rarest-first is the
+  # strategy the reconcile path asks for.
+  defp collapse_queued_next_piece(strategy) do
+    receive do
+      {:next_piece, queued} -> collapse_queued_next_piece(merge_strategy(strategy, queued))
+    after
+      0 -> strategy
+    end
+  end
+
+  defp merge_strategy(:rare, _), do: :rare
+  defp merge_strategy(_, queued), do: queued
 
   defp maybe_log_download_waiting(hash, connected, downloaded, left, status) do
     key = {:download_waiting_logged, hash}
