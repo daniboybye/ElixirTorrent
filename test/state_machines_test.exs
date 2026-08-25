@@ -190,8 +190,7 @@ defmodule Peer.DialBackoffStateM do
   @spec model_filter(model(), [Peer.t()], non_neg_integer()) :: [Peer.t()]
   defp model_filter(state, peers, min_count) do
     {allowed, blocked} = split_allowed_peers(state, peers)
-    soft_blocked = filter_soft_blocked(state, blocked)
-    resolve_filtered_peers(state, allowed, soft_blocked, min_count)
+    resolve_filtered_peers(state, allowed, blocked, min_count)
   end
 
   defp split_allowed_peers(state, peers) do
@@ -200,48 +199,43 @@ defmodule Peer.DialBackoffStateM do
     end)
   end
 
-  defp filter_soft_blocked(state, blocked) do
-    Enum.reject(blocked, fn %Peer{ip: ip, port: port} ->
-      match?(%{sticky: true}, Map.get(state.blocks, {ip, port}))
-    end)
-  end
-
-  defp resolve_filtered_peers(_state, allowed, _soft_blocked, min_count)
+  defp resolve_filtered_peers(_state, allowed, _blocked, min_count)
        when min_count <= 0 do
     allowed
   end
 
-  defp resolve_filtered_peers(_state, allowed, soft_blocked, _min_count)
-       when soft_blocked == [] do
+  defp resolve_filtered_peers(_state, allowed, blocked, _min_count)
+       when blocked == [] do
     allowed
   end
 
-  defp resolve_filtered_peers(_state, allowed, _soft_blocked, min_count)
+  defp resolve_filtered_peers(_state, allowed, _blocked, min_count)
        when length(allowed) >= min_count do
     allowed
   end
 
-  defp resolve_filtered_peers(state, allowed, soft_blocked, min_count) do
-    need = min(min_count - length(allowed), length(soft_blocked))
-    allowed ++ take_soft(state, soft_blocked, need)
+  defp resolve_filtered_peers(state, allowed, blocked, min_count) do
+    need = min(min_count - length(allowed), length(blocked))
+    allowed ++ take_blocked(state, blocked, need)
   end
 
-  defp take_soft(_state, _blocked, 0), do: []
+  defp take_blocked(_state, _blocked, 0), do: []
 
-  defp take_soft(state, blocked, need) do
-    {productive, rest} =
-      Enum.split_with(blocked, fn %Peer{ip: ip, port: port} ->
-        MapSet.member?(state.productive, {ip, port})
-      end)
+  # Mirrors Peer.DialBackoff: productive, then soft before sticky, then v6 before
+  # v4, then fewest failures. Sticky is last-resort rather than excluded, so a
+  # torrent with nothing dialable still gets a batch.
+  defp take_blocked(state, blocked, need) do
+    blocked
+    |> Enum.sort_by(fn %Peer{ip: ip, port: port} ->
+      block = Map.get(state.blocks, {ip, port}, %{fail_count: 0, sticky: false})
 
-    {v6, v4} =
-      Enum.split_with(rest, fn %Peer{ip: ip} ->
-        tuple_size(ip) == 8
-      end)
-
-    productive
-    |> Kernel.++(v6)
-    |> Kernel.++(v4)
+      {
+        if(MapSet.member?(state.productive, {ip, port}), do: 0, else: 1),
+        if(block.sticky, do: 1, else: 0),
+        if(tuple_size(ip) == 8, do: 0, else: 1),
+        block.fail_count
+      }
+    end)
     |> Enum.take(need)
   end
 
