@@ -318,9 +318,15 @@ defmodule Torrent.Downloads.Piece.State do
   end
 
   @doc false
+  # "Can this piece still be sourced?" is a question about *this index*, not about
+  # the torrent. The old test also required `Swarm.count(hash) == 0`, so on any
+  # torrent with peers an idle worker whose holders had all disconnected was never
+  # aborted: it kept one of the @max_parallel_pieces slots with `monitoring: 0`
+  # and 64 unclaimed blocks forever. Observed live at 7 of 12 slots held that way,
+  # capping a 26-unchoked-peer torrent at 5 pieces in flight.
   @spec orphan_no_sources?(t()) :: boolean()
-  def orphan_no_sources?(%__MODULE__{hash: hash, monitoring: monitoring}) do
-    map_size(monitoring) == 0 and Swarm.count(hash) == 0
+  def orphan_no_sources?(%__MODULE__{hash: hash, index: index, monitoring: monitoring}) do
+    map_size(monitoring) == 0 and not Swarm.any_has_piece?(hash, index)
   end
 
   @spec maybe_abort_orphan(t()) :: t() | {:abort, t()}
