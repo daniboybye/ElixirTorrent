@@ -42,11 +42,16 @@ defmodule Peer.Controller.State do
     # withdrawn block legitimately comes back as a piece or a reject one RTT
     # later. Kept so those answers are recognised instead of read as a protocol
     # violation. Bounded — see put_withdrawn/4.
-    withdrawn: MapSet.new(),
+    #
+    # A count per block, not a set: the same block is often requested, withdrawn
+    # and requested again, so several answers can be owed for it at once, and
+    # BEP 6's exactly-one-answer rule makes the count exact. It also makes the
+    # bookkeeping independent of which answer arrives first.
+    withdrawn: %{},
     # Previous generation of `withdrawn`. Eviction has to drop the oldest
-    # entries, and a MapSet has no order to drop by; retiring a full generation
+    # entries, and a map has no order to drop by; retiring a full generation
     # keeps at least @max_withdrawn recent withdrawals alive at all times.
-    withdrawn_prev: MapSet.new(),
+    withdrawn_prev: %{},
     # Blocks that matched neither `requests` nor `withdrawn`. Never fatal on its
     # own (our window is finite), but a peer pushing data we never asked for is
     # spending our bandwidth, so it is capped.
@@ -122,8 +127,8 @@ defmodule Peer.Controller.State do
           ut_metadata_requests: %{window_started_at: integer() | nil, count: non_neg_integer()},
           hash_requests: %{Peer.HashTransfer.ref() => map()},
           requests: MapSet.t(subpiece()),
-          withdrawn: MapSet.t(subpiece()),
-          withdrawn_prev: MapSet.t(subpiece()),
+          withdrawn: %{subpiece() => pos_integer()},
+          withdrawn_prev: %{subpiece() => pos_integer()},
           unsolicited_blocks: non_neg_integer(),
           upload_requests: MapSet.t(subpiece()),
           pending_requests: non_neg_integer(),
@@ -2019,18 +2024,18 @@ defmodule Peer.Controller.State do
 
     cond do
       MapSet.member?(state.requests, subpiece) -> :requested
-      MapSet.member?(state.withdrawn, subpiece) -> :withdrawn
-      MapSet.member?(state.withdrawn_prev, subpiece) -> :withdrawn
+      Map.has_key?(state.withdrawn, subpiece) -> :withdrawn
+      Map.has_key?(state.withdrawn_prev, subpiece) -> :withdrawn
       true -> :unsolicited
     end
   end
 
   @spec put_withdrawn(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
   defp put_withdrawn(%__MODULE__{} = state, index, begin, length) do
-    withdrawn = MapSet.put(state.withdrawn, subpiece(index, begin, length))
+    withdrawn = Map.update(state.withdrawn, subpiece(index, begin, length), 1, &(&1 + 1))
 
-    if MapSet.size(withdrawn) > @max_withdrawn do
-      %__MODULE__{state | withdrawn: MapSet.new(), withdrawn_prev: withdrawn}
+    if map_size(withdrawn) > @max_withdrawn do
+      %__MODULE__{state | withdrawn: %{}, withdrawn_prev: withdrawn}
     else
       %__MODULE__{state | withdrawn: withdrawn}
     end
@@ -2047,11 +2052,22 @@ defmodule Peer.Controller.State do
   defp drop_withdrawn(%__MODULE__{} = state, index, begin, length) do
     subpiece = subpiece(index, begin, length)
 
-    %__MODULE__{
-      state
-      | withdrawn: MapSet.delete(state.withdrawn, subpiece),
-        withdrawn_prev: MapSet.delete(state.withdrawn_prev, subpiece)
-    }
+    if Map.has_key?(state.withdrawn, subpiece) do
+      %__MODULE__{state | withdrawn: decrement_owed(state.withdrawn, subpiece)}
+    else
+      %__MODULE__{state | withdrawn_prev: decrement_owed(state.withdrawn_prev, subpiece)}
+    end
+  end
+
+  @spec decrement_owed(%{subpiece() => pos_integer()}, subpiece()) :: %{
+          subpiece() => pos_integer()
+        }
+  defp decrement_owed(owed, subpiece) do
+    case owed do
+      %{^subpiece => 1} -> Map.delete(owed, subpiece)
+      %{^subpiece => n} -> Map.put(owed, subpiece, n - 1)
+      _ -> owed
+    end
   end
 
   @spec note_unsolicited(t(), String.t()) :: t() | {:error, :unsolicited_blocks, t()}
