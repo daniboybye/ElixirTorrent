@@ -237,6 +237,73 @@ defmodule TorrentStorageCoverageBatchTest do
     end
 
     @tag race_group: :uploader
+    test "a peer too slow to accept the block cancels the upload instead of crashing" do
+      piece0 = random_piece()
+      {torrent, _} = build_tiny_torrent([piece0])
+      hash = torrent.hash
+      parent = self()
+
+      # Never answers the call, so it times out — a peer whose socket has
+      # stopped draining. One slow peer with a deep request queue must not
+      # produce one task crash per in-flight block.
+      controller = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(controller, :kill) end)
+
+      with_storage_stack(torrent, fn _ ->
+        write_piece!(hash, 0, piece0)
+        start_uploader_supervisor(hash)
+
+        assert {:ok, task_pid} =
+                 Uploader.request(hash, @peer_a, 0, 0, 128, fn block ->
+                   send(parent, {:upload_callback_ready, self()})
+                   GenServer.call(controller, {:complete_upload, 0, 0, 128, block}, 50)
+                 end)
+
+        assert_receive {:upload_callback_ready, ^task_pid}, 2_000
+        task_ref = Process.monitor(task_pid)
+
+        assert_receive {:DOWN, ^task_ref, :process, ^task_pid, :normal}, 2_000
+        assert Model.get(hash, :uploaded) == 0
+      end)
+    end
+
+    @tag race_group: :uploader
+    test "peer shutting down mid-call quietly cancels the upload" do
+      piece0 = random_piece()
+      {torrent, _} = build_tiny_torrent([piece0])
+      hash = torrent.hash
+      parent = self()
+
+      # A peer that exits with a reason of its own while the upload callback is
+      # blocked in GenServer.call — a protocol error, say. That is the peer
+      # going away, not an upload fault, so the task must end :normal rather
+      # than crash and log an [error] per in-flight block.
+      controller =
+        spawn(fn ->
+          receive do
+            {:"$gen_call", _from, _msg} -> exit({:shutdown, :protocol_error})
+          end
+        end)
+
+      with_storage_stack(torrent, fn _ ->
+        write_piece!(hash, 0, piece0)
+        start_uploader_supervisor(hash)
+
+        assert {:ok, task_pid} =
+                 Uploader.request(hash, @peer_a, 0, 0, 128, fn block ->
+                   send(parent, {:upload_callback_ready, self()})
+                   GenServer.call(controller, {:complete_upload, 0, 0, 128, block})
+                 end)
+
+        assert_receive {:upload_callback_ready, ^task_pid}, 2_000
+        task_ref = Process.monitor(task_pid)
+
+        assert_receive {:DOWN, ^task_ref, :process, ^task_pid, :normal}, 2_000
+        assert Model.get(hash, :uploaded) == 0
+      end)
+    end
+
+    @tag race_group: :uploader
     test "peer teardown during completion quietly cancels the upload" do
       piece0 = random_piece()
       {torrent, _} = build_tiny_torrent([piece0])
