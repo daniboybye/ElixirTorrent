@@ -22,6 +22,15 @@ defmodule Peer.ConnectionManager do
   @swarm_cap 60
   @default_batch 40
   @escalated_batch 50
+  # A dial batch resolves only when its slowest endpoint does, and one endpoint
+  # can hold a slot for the full connect + handshake budget (~55s). Blocking the
+  # next batch on that made acquisition crawl exactly where it hurts: a starved
+  # torrent whose queue is all IPv4 gets a 4-endpoint probe batch, so it managed
+  # four dials per minute against a ~1% CGNAT success rate. Overlapping batches
+  # decouple the rate from the slowest peer; the caps below keep the socket cost
+  # bounded (a batch already runs at most 20 concurrent connects internally).
+  @max_in_flight_dials 40
+  @max_dial_batches 3
   @normal_interval_ms 3_000
   @escalated_interval_ms 1_000
   @low_speed_bytes_per_sec 32_768
@@ -118,7 +127,19 @@ defmodule Peer.ConnectionManager do
   def init(hash) do
     send_after(self(), :tick, @normal_interval_ms)
     # nil = never snubbed; monotonic ms can be negative so 0 is not a safe sentinel.
-    {:ok, %{hash: hash, queue: %{}, dialing?: false, dial_task: nil, last_snub_ms: nil}}
+    # `dialing?` is a hard stop on starting anything new; `in_flight`/`batches`
+    # are the running cost the caps are enforced against.
+    {:ok,
+     %{
+       hash: hash,
+       queue: %{},
+       dialing?: false,
+       dial_task: nil,
+       in_flight: MapSet.new(),
+       batches: 0,
+       dial_tasks: [],
+       last_snub_ms: nil
+     }}
   end
 
   @impl GenServer
@@ -180,19 +201,34 @@ defmodule Peer.ConnectionManager do
     connected = Swarm.count(hash)
     record_failures(hash, results, connected)
 
-    state = %{state | queue: queue, dialing?: false, dial_task: nil}
+    batches = max(state.batches - 1, 0)
+    in_flight = MapSet.difference(state.in_flight, MapSet.new(selected_keys))
+
+    state = %{
+      state
+      | queue: queue,
+        in_flight: in_flight,
+        batches: batches,
+        dial_tasks: Enum.filter(state.dial_tasks, &Process.alive?/1),
+        dialing?: false,
+        dial_task: if(batches == 0, do: nil, else: state.dial_task)
+    }
+
     maybe_replenish_discovery(state, connected)
 
     maybe_dial(state, connected)
   end
 
   @impl GenServer
-  def terminate(_reason, %{dial_task: pid}) when is_pid(pid) do
-    if Process.alive?(pid), do: Process.exit(pid, :shutdown)
+  def terminate(_reason, state) do
+    for pid <- [state[:dial_task] | Map.get(state, :dial_tasks, [])],
+        is_pid(pid),
+        Process.alive?(pid) do
+      Process.exit(pid, :shutdown)
+    end
+
     :ok
   end
-
-  def terminate(_reason, _state), do: :ok
 
   defp handle_tick(state, hash, connected) do
     cond do
@@ -265,7 +301,13 @@ defmodule Peer.ConnectionManager do
   defp maybe_dial(state, connected) when connected >= @swarm_cap, do: {:noreply, state}
 
   defp maybe_dial(%{hash: hash} = state, connected) do
-    dial_batch(state, batch_size(hash, connected))
+    headroom = @max_in_flight_dials - MapSet.size(state.in_flight)
+
+    if headroom <= 0 or state.batches >= @max_dial_batches do
+      {:noreply, state}
+    else
+      dial_batch(state, min(batch_size(hash, connected), headroom))
+    end
   end
 
   defp maybe_dial_or_noreply(state, connected) do
@@ -280,6 +322,9 @@ defmodule Peer.ConnectionManager do
     peers =
       hash
       |> prioritize_dial_queue(DialQueue.peers(queue))
+      # An endpoint stays in the queue until its dial resolves, so overlapping
+      # batches would otherwise pick the same one twice.
+      |> Enum.reject(&MapSet.member?(state.in_flight, {&1.ip, &1.port}))
       |> Handshakes.select_peers_to_dial(hash, batch)
 
     if peers == [] do
@@ -298,7 +343,19 @@ defmodule Peer.ConnectionManager do
           send(parent, {:dial_done, selected_keys, results})
         end)
 
-      {:noreply, %{state | dialing?: true, dial_task: dial_task}}
+      in_flight = MapSet.union(state.in_flight, MapSet.new(selected_keys))
+      batches = state.batches + 1
+
+      {:noreply,
+       %{
+         state
+         | in_flight: in_flight,
+           batches: batches,
+           dial_tasks: [dial_task | state.dial_tasks],
+           dialing?:
+             MapSet.size(in_flight) >= @max_in_flight_dials or batches >= @max_dial_batches,
+           dial_task: dial_task
+       }}
     end
   end
 
