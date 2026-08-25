@@ -851,6 +851,50 @@ defmodule Peer.ConnectionManagerTest do
       assert log =~ "ok=1"
     end
 
+    test "an in-flight batch does not block the next one, and the caps do" do
+      hash = :crypto.strong_rand_bytes(20)
+      pid = start_isolated_manager(hash)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
+
+      # A batch resolves only when its slowest endpoint does, up to ~55s. Serialising
+      # on that starved torrents whose queue yields only a few dialable endpoints.
+      peers = for n <- 1..8, do: %Peer{ip: {10, 0, 1, n}, port: 7000 + n}
+      queue = Enum.reduce(peers, %{}, &DialQueue.offer(&2, [&1], :discovery))
+
+      in_flight = MapSet.new(Enum.map(peers, &{&1.ip, &1.port}))
+
+      # Every candidate is already being dialled by the batch in flight, so the
+      # second batch has nothing left to pick and must not redial them.
+      :sys.replace_state(pid, fn state ->
+        %{state | queue: queue, in_flight: in_flight, batches: 1, dialing?: false}
+      end)
+
+      :ok = GenServer.cast(pid, :dial_now)
+      state = :sys.get_state(pid)
+      assert state.batches == 1
+      assert MapSet.equal?(state.in_flight, in_flight)
+
+      # At the batch cap nothing starts even with free candidates.
+      :sys.replace_state(pid, fn state ->
+        %{state | queue: queue, in_flight: MapSet.new(), batches: 3, dialing?: false}
+      end)
+
+      :ok = GenServer.cast(pid, :dial_now)
+      state = :sys.get_state(pid)
+      assert state.batches == 3
+      assert MapSet.size(state.in_flight) == 0
+
+      # Resolving a batch gives its slot back (empty queue, so nothing refills it).
+      :sys.replace_state(pid, fn state ->
+        %{state | queue: %{}, in_flight: in_flight, batches: 3}
+      end)
+
+      send(pid, {:dial_done, [{{10, 0, 1, 1}, 7001}], {0, %{timeout: 1}, []}})
+      state = :sys.get_state(pid)
+      assert state.batches == 2
+      refute MapSet.member?(state.in_flight, {{10, 0, 1, 1}, 7001})
+    end
+
     test "dial_now while already dialing does not start a second batch" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_isolated_manager(hash)
