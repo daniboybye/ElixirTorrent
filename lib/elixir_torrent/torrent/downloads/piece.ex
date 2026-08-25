@@ -218,12 +218,32 @@ defmodule Torrent.Downloads.Piece do
       {:stop, :normal, state}
     else
       Logger.warning("[piece_download] hash=#{hash_hex} index=#{state.index} verify_failed")
+      report_corrupt_source(state, hash_hex)
       fire_dealt(state)
       {:stop, {:shutdown, :wrong_subpiece}, state}
     end
   end
 
   defp finish_if_complete(state), do: {:noreply, state}
+
+  # A piece that fails its SHA-1 was assembled from bad bytes. When one peer
+  # supplied every block, it is provably the source, so tell its controller —
+  # otherwise nothing stops us re-requesting the same piece from the same peer
+  # forever. With several contributors the failure cannot be attributed and the
+  # piece is simply retried.
+  defp report_corrupt_source(%State{} = state, hash_hex) do
+    case State.sole_contributor(state) do
+      nil ->
+        :ok
+
+      peer_id ->
+        Logger.warning(
+          "[piece_download] hash=#{hash_hex} index=#{state.index} corrupt_source peer=#{Peer.log_id(peer_id)}"
+        )
+
+        Peer.Controller.hash_check_failed({peer_id, state.hash}, state.index)
+    end
+  end
 
   # Best-effort invocation of the controller's pump-wake closure. It is
   # idempotent from the controller's perspective (posts {:next_piece, :rare};
