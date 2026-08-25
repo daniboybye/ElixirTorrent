@@ -803,6 +803,41 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
     end
 
+    test "each pump trigger cancels the previous pending {:next_piece} wake" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 4)
+
+      with_model(torrent, fn _ ->
+        # No peers, so the handler takes the connecting_to_peers branch and arms
+        # a retry every time — the shape that used to accumulate one immortal
+        # chain per trigger.
+        start_swarm(hash)
+        start_downloads(hash)
+
+        pending_wake = fn pid ->
+          {:dictionary, dict} = Process.info(pid, :dictionary)
+          Keyword.get(dict, :next_piece_timer)
+        end
+
+        with_controller(hash, fn pid ->
+          send(pid, {:next_piece, :rare})
+          TestSupport.Sync.sync(pid)
+          first = pending_wake.(pid)
+
+          assert is_reference(first)
+          assert Process.read_timer(first)
+
+          send(pid, {:next_piece, :rare})
+          TestSupport.Sync.sync(pid)
+          second = pending_wake.(pid)
+
+          assert is_reference(second)
+          refute second == first
+          refute Process.read_timer(first)
+        end)
+      end)
+    end
+
     test ":reconcile_pump kicks next_piece when peers exist and capacity remains" do
       hash = :crypto.strong_rand_bytes(20)
       torrent = sample_torrent(hash, 4)
