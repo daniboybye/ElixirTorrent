@@ -77,6 +77,66 @@ defmodule PeerEndpointsTest do
     TestSupport.Sync.await_down(new_monitor, new_peer, @timeout)
   end
 
+  @tag race_group: :endpoints
+  test "a noted disconnect reason replaces the supervisor's bare :shutdown in the log" do
+    endpoint = {{9, 9, 9, 7}, 6883}
+    {peer, monitor, _release} = TestSupport.Sync.spawn_blocked()
+
+    :ok = Peer.Endpoints.register(@hash, elem(endpoint, 0), elem(endpoint, 1), peer)
+
+    :ok =
+      Peer.Endpoints.note_disconnect_reason(
+        @hash,
+        elem(endpoint, 0),
+        elem(endpoint, 1),
+        {:shutdown, :no_mutual_interest}
+      )
+
+    TestSupport.Sync.sync(Peer.Endpoints)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        Process.exit(peer, :shutdown)
+        TestSupport.Sync.await_down(monitor, peer, @timeout)
+        TestSupport.Sync.sync(Peer.Endpoints)
+      end)
+
+    assert log =~ "no_mutual_interest"
+  end
+
+  @tag race_group: :endpoints
+  test "the note is dropped when the endpoint is registered again" do
+    endpoint = {{9, 9, 9, 6}, 6884}
+    {first, first_monitor, _} = TestSupport.Sync.spawn_blocked()
+    {second, second_monitor, _} = TestSupport.Sync.spawn_blocked()
+
+    :ok = Peer.Endpoints.register(@hash, elem(endpoint, 0), elem(endpoint, 1), first)
+
+    :ok =
+      Peer.Endpoints.note_disconnect_reason(
+        @hash,
+        elem(endpoint, 0),
+        elem(endpoint, 1),
+        {:shutdown, :protocol_error}
+      )
+
+    # The note describes the connection that just ended, so a fresh connection to
+    # the same endpoint must not inherit it.
+    Process.exit(first, :kill)
+    TestSupport.Sync.await_down(first_monitor, first, @timeout)
+    :ok = Peer.Endpoints.register(@hash, elem(endpoint, 0), elem(endpoint, 1), second)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        Process.exit(second, :shutdown)
+        TestSupport.Sync.await_down(second_monitor, second, @timeout)
+        TestSupport.Sync.sync(Peer.Endpoints)
+      end)
+
+    refute log =~ "protocol_error"
+    assert log =~ "reason=:shutdown"
+  end
+
   test "list/1 returns registered endpoints" do
     peer_a =
       spawn(fn ->

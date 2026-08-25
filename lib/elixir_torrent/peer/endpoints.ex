@@ -43,6 +43,30 @@ defmodule Peer.Endpoints do
     :exit, _ -> :ok
   end
 
+  @doc """
+  Record why a peer connection ended, so the disconnect log can name the cause.
+
+  What this module monitors is the per-peer supervisor, and that supervisor is
+  `auto_shutdown: :any_significant` — it exits with a bare `:shutdown` as soon as
+  either child stops, whatever the child's own reason was. So every disconnect
+  logged `reason=:shutdown`: true of the supervisor, and useless for telling a
+  peer that closed the socket on us apart from one we dropped ourselves.
+
+  The controller reports its reason from `terminate/2`, which runs before the
+  supervisor exits, so the note is already here when the `:DOWN` arrives.
+  """
+  @spec note_disconnect_reason(
+          Torrent.hash(),
+          :inet.ip_address(),
+          :inet.port_number(),
+          term()
+        ) :: :ok
+  def note_disconnect_reason(hash, ip, port, reason) do
+    GenServer.cast(__MODULE__, {:note_disconnect_reason, endpoint_key(hash, ip, port), reason})
+  catch
+    :exit, _ -> :ok
+  end
+
   @spec registered?(Torrent.hash(), :inet.ip_address(), :inet.port_number()) :: boolean()
   def registered?(hash, ip, port) do
     GenServer.call(__MODULE__, {:registered?, hash, ip, port})
@@ -75,7 +99,12 @@ defmodule Peer.Endpoints do
   def init(_) do
     table = :ets.new(@table, [:set, :protected, read_concurrency: true])
     peer_ids = :ets.new(@peer_id_table, [:set, :protected, read_concurrency: true])
-    {:ok, %{table: table, peer_ids: peer_ids, monitors: %{}}}
+    {:ok, %{table: table, peer_ids: peer_ids, monitors: %{}, reasons: %{}}}
+  end
+
+  @impl GenServer
+  def handle_cast({:note_disconnect_reason, key, reason}, state) do
+    {:noreply, %{state | reasons: Map.put(state.reasons, key, reason)}}
   end
 
   @impl GenServer
@@ -118,6 +147,9 @@ defmodule Peer.Endpoints do
     ref = Process.monitor(pid)
     :ets.insert(table, {key, pid})
     now = System.monotonic_time(:millisecond)
+    # A note left by a previous connection to this endpoint describes that one,
+    # not the connection starting now.
+    state = %{state | reasons: Map.delete(state.reasons, key)}
     # Registration is the proof of reachability the dial backoff is asking for:
     # connect and the BEP 3 handshake both completed. Inbound peers count too —
     # if they reached us, our earlier dial timeouts were about their NAT, not a
@@ -185,8 +217,9 @@ defmodule Peer.Endpoints do
         :ets.delete(state.table, key)
         drop_peer_id(state.peer_ids, key)
         maybe_backoff_churn(key, connected_at)
-        log_disconnect(key, reason)
-        {:noreply, %{state | monitors: monitors}}
+        {noted, reasons} = Map.pop(state.reasons, key)
+        log_disconnect(key, noted || reason)
+        {:noreply, %{state | monitors: monitors, reasons: reasons}}
     end
   end
 
