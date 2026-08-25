@@ -21,6 +21,7 @@ defmodule ElixirTorrentApplication do
       NAT.PortMapper,
       Magnet.Fetcher.Supervisor,
       Magnet.Fetcher.ConnectionLimit,
+      Magnet.Fetcher.DhtBackgroundStore,
       Magnet.Bootstrap.Supervisor
     ]
     |> Supervisor.start_link(strategy: :one_for_one)

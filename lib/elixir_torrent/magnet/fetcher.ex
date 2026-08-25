@@ -612,8 +612,13 @@ defmodule Magnet.Fetcher do
       Logger.debug("[magnet_fetch] dht_background_peers hash=#{hash_hex} count=#{length(peers)}")
     end
 
+    # This task detaches from the round that spawned it and sleeps for seconds,
+    # so the table can legitimately be gone by now (application shutdown).
+    ensure_dht_bg_table()
     :ets.insert(@dht_bg_table, {hash, {:done, peers}})
     :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   @doc false
