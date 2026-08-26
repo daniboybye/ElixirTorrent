@@ -113,6 +113,37 @@ defmodule Torrent.Downloads.Piece.State do
     }
   end
 
+  # A worker captures the torrent's mode once, in `download/3`, so a piece that
+  # was started before the torrent crossed into endgame keeps running in normal
+  # mode — where a block belongs to exactly one peer — for the rest of its life.
+  # That removes redundancy from precisely the pieces endgame exists for: live,
+  # the last piece of a torrent sat with all 64 blocks claimed by a single peer
+  # that timed out 297 times over an hour, while three unchoked peers holding
+  # the piece had nothing to ask for. Re-queueing the in-flight subpieces is
+  # what opens them to other peers; the requests themselves stay, and
+  # `do_request/3` caps redundancy at @endgame_redundancy per block.
+  @spec enter_endgame(t()) :: t()
+  def enter_endgame(%__MODULE__{mode: :endgame} = state), do: state
+
+  def enter_endgame(%__MODULE__{} = state) do
+    Logger.debug(
+      "[piece_download] hash=#{Torrent.hex_encoded_hash(state.hash)} index=#{state.index} mode=endgame in_flight=#{length(state.requests)} waiting=#{length(state.waiting)}"
+    )
+
+    # Endgame runs without the piece-level stall/orphan timer, and whichever of
+    # the two is pending must also be flushed: delivered late it would abort a
+    # worker that is now making progress.
+    cancel_timer(state.timer, :idle_orphan_check)
+    cancel_timer(state.timer, :timeout)
+
+    %__MODULE__{
+      state
+      | mode: :endgame,
+        timer: nil,
+        waiting: Enum.uniq(state.waiting ++ Enum.map(state.requests, & &1.subpiece))
+    }
+  end
+
   @spec make_subpieces(waiting(), Torrent.length(), Torrent.length() | 0) :: waiting()
   defp make_subpieces(acc, len, pos) when pos + @subpiece_length >= len do
     [{pos, len - pos} | acc]

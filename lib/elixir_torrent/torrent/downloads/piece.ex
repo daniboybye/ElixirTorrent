@@ -97,6 +97,18 @@ defmodule Torrent.Downloads.Piece do
     :exit, _ -> false
   end
 
+  # Level-triggered mode upgrade from the torrent controller: a worker reads the
+  # torrent's mode once (State.download/3), so pieces already in flight when the
+  # torrent crosses into endgame would otherwise never get redundant sources.
+  # Idempotent, and one-way — endgame is never revoked.
+  @spec enter_endgame(Torrent.hash(), Torrent.index()) :: :ok
+  def enter_endgame(hash, index) do
+    case GenServer.whereis(key(index, hash)) do
+      nil -> :ok
+      pid -> GenServer.cast(pid, {:enter_endgame, []})
+    end
+  end
+
   @spec whereis(Torrent.hash(), Torrent.index()) :: pid() | nil
   def whereis(hash, index), do: GenServer.whereis(key(index, hash))
 
