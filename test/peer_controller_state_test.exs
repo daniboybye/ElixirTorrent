@@ -391,6 +391,31 @@ defmodule PeerControllerStateTest do
       assert State.stale_useless_pin?(state)
       refute State.stale_useless_pin?(%{state | pin_downloaded_bytes: 1})
     end
+
+    test "stale_useless_pin? also releases an unchoked peer that delivers nothing" do
+      hash = :crypto.strong_rand_bytes(20)
+      now = System.monotonic_time(:millisecond)
+
+      # The damaging case: a choked peer holds no requests, but an unchoked one
+      # keeps a full pipeline, so the blocks it sits on are unavailable to anyone
+      # else and merely time out every 30 s. Live, two such peers held one whole
+      # piece each with 0 and 48 KiB delivered while two pieces with all 64 blocks
+      # free had no peer at all, and the torrent stopped at 99%.
+      state =
+        base_state(hash, 4,
+          status: 0,
+          choke_me: false,
+          pin_downloaded_bytes: 0,
+          pinned_at: now - 65_000
+        )
+
+      assert State.stale_useless_pin?(state)
+
+      # A merely slow peer gets longer than the choked threshold, and longer than
+      # one block timeout, to produce its first block.
+      refute State.stale_useless_pin?(%{state | pinned_at: now - 30_000})
+      refute State.stale_useless_pin?(%{state | pin_downloaded_bytes: 1})
+    end
   end
 
   describe "reject, cancel, and piece accounting" do
