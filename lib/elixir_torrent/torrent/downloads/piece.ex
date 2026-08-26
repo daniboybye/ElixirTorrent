@@ -85,6 +85,18 @@ defmodule Torrent.Downloads.Piece do
     :exit, _ -> false
   end
 
+  # Same probe as `has_unclaimed?/2` but also true while this peer's own requests
+  # are in flight here — see `handle_call({:serves_peer?, _}, ...)`.
+  @spec serves_peer?(Torrent.hash(), Torrent.index(), Peer.id()) :: boolean()
+  def serves_peer?(hash, index, peer_id) do
+    case GenServer.whereis(key(index, hash)) do
+      nil -> false
+      pid -> GenServer.call(pid, {:serves_peer?, peer_id}, 1_000)
+    end
+  catch
+    :exit, _ -> false
+  end
+
   @spec whereis(Torrent.hash(), Torrent.index()) :: pid() | nil
   def whereis(hash, index), do: GenServer.whereis(key(index, hash))
 
@@ -197,6 +209,15 @@ defmodule Torrent.Downloads.Piece do
   # the whole point.
   def handle_call(:has_unclaimed?, _from, state) do
     {:reply, state.waiting != [], state}
+  end
+
+  # "Is this peer still working here?" — unclaimed blocks it could be handed, or
+  # blocks it is already fetching. See `Swarm.pin_drained?/4` for why the second
+  # half matters: a peer holding every in-flight request on a piece is the reason
+  # that piece has nothing unclaimed left.
+  def handle_call({:serves_peer?, peer_id}, _from, state) do
+    serves? = state.waiting != [] or Enum.any?(state.requests, &(&1.peer_id == peer_id))
+    {:reply, serves?, state}
   end
 
   # Sync ack for Downloads.request/4 — see request/4 above.

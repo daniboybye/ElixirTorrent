@@ -61,6 +61,10 @@ defmodule Torrent.Downloads do
   # deciding whether *this* peer still has work here.
   defdelegate piece_has_unclaimed?(hash, index), to: Piece, as: :has_unclaimed?
 
+  # Whether a piece still has anything for one specific peer: unclaimed blocks,
+  # or blocks that peer is already fetching.
+  defdelegate piece_serves_peer?(hash, index, peer_id), to: Piece, as: :serves_peer?
+
   # Distinguishes "no worker yet" from "worker with nothing left to hand out",
   # which `piece_has_waiting?/2` collapses into `false`.
   @spec piece_whereis(Torrent.hash(), Torrent.index()) :: pid() | nil

@@ -128,7 +128,7 @@ defmodule Torrent.Swarm do
   end
 
   defp may_leave_pin?(hash, key, index, other, active_indices, endgame?) do
-    drained? = pin_drained?(hash, other, endgame?)
+    drained? = pin_drained?(hash, other, Peer.key_to_id(key), endgame?)
     useless? = useless_pin_may_switch?(hash, key, index, other, active_indices)
 
     cond do
@@ -150,12 +150,24 @@ defmodule Torrent.Swarm do
   end
 
   # "Nothing here for this peer any more." Outside endgame that means every
-  # block has been claimed, even if other peers still have them in flight —
-  # this peer cannot be handed one, so holding it here only wastes it. Endgame
-  # deliberately re-requests in-flight blocks from several peers, so there the
-  # pin stays useful until the piece is genuinely finished.
-  defp pin_drained?(hash, index, true), do: not Downloads.piece_has_waiting?(hash, index)
-  defp pin_drained?(hash, index, false), do: not Downloads.piece_has_unclaimed?(hash, index)
+  # block has been claimed *by someone else*, so this peer cannot be handed one
+  # and holding it here only wastes it. Endgame deliberately re-requests
+  # in-flight blocks from several peers, so there the pin stays useful until the
+  # piece is genuinely finished.
+  #
+  # The peer's own in-flight requests have to count as work, or the rule eats
+  # itself: a peer that has claimed every remaining block makes the piece look
+  # drained, gets moved off, and the move cancels the very requests that drained
+  # it — so the blocks return to `waiting`, the piece looks workable again, and
+  # the next reconcile tick pins the peer straight back. Live, that oscillated at
+  # the 2 s tick: one peer re-sent the same block 79 times in ten minutes and
+  # delivered none of it, and the swarm as a whole sent 17 requests per block
+  # received.
+  defp pin_drained?(hash, index, _peer_id, true),
+    do: not Downloads.piece_has_waiting?(hash, index)
+
+  defp pin_drained?(hash, index, peer_id, false),
+    do: not Downloads.piece_serves_peer?(hash, index, peer_id)
 
   # A peer choked with zero bytes on its current pin for long enough is not
   # contributing to that piece. In endgame, only re-pin to another active
