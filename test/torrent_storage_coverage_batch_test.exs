@@ -773,6 +773,46 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
     end
 
+    test "assign_peer_to_piece?/3 keeps a peer whose own blocks are the ones in flight" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(drained_pin_torrent(hash), fn _ ->
+        start_swarm(hash)
+        start_downloads(hash)
+
+        # Same setup as the test above, except the in-flight block belongs to the
+        # pinned peer itself. Moving it would cancel the very requests that made
+        # the piece look drained, returning them to `waiting` — so the next
+        # reconcile tick pins the peer straight back. Live, that oscillated at the
+        # 2 s tick and the peer delivered nothing at all.
+        Downloads.piece(hash, 0, fn -> :ok end, fn -> :ok end)
+
+        :sys.replace_state(Piece.whereis(hash, 0), fn state ->
+          %{
+            state
+            | waiting: [],
+              requests: [%Request{peer_id: @peer_b, subpiece: {0, 16_384}, timer: nil}]
+          }
+        end)
+
+        refute Downloads.piece_has_unclaimed?(hash, 0)
+        assert Downloads.piece_serves_peer?(hash, 0, @peer_b)
+        refute Downloads.piece_serves_peer?(hash, 0, @peer_a)
+
+        Downloads.piece(hash, 1, fn -> :ok end, fn -> :ok end)
+
+        {_pid, key} =
+          add_swarm_peer(hash, @peer_b,
+            index: 0,
+            bitfield: drained_pin_bitfield(),
+            choke_me: false,
+            stale: false
+          )
+
+        refute Swarm.assign_peer_to_piece?(hash, key, 1)
+      end)
+    end
+
     test "sort_peers_seeders_first ranks seeders ahead of leechers" do
       hash = :crypto.strong_rand_bytes(20)
       torrent = endgame_torrent(hash)
