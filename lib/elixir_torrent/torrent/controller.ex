@@ -126,6 +126,7 @@ defmodule Torrent.Controller do
       end
 
     reconcile_pump_kick(hash, active_count, effective_max, connected, unchoked)
+    reconcile_endgame_mode(hash, active)
     reconcile_refresh_interest(hash, active, active_count, connected)
 
     send_after(self(), :reconcile_pump, @reconcile_interval)
@@ -278,6 +279,18 @@ defmodule Torrent.Controller do
         Logger.debug(
           "[reconcile_pump] hash=#{Torrent.hex_encoded_hash(hash)} active=#{active_count} max=#{effective_max} unchoked=#{unchoked} peers=#{connected} action=none"
         )
+    end
+  end
+
+  # Crossing into endgame is a property of the torrent, but the decision that
+  # matters — may two peers hold the same block? — lives in each piece worker,
+  # which read the mode when it started. Pieces already in flight at the
+  # transition therefore stayed in normal mode and kept one-block-one-peer
+  # exclusivity for the rest of the download, which is what left a torrent at
+  # 99.94% with its last piece fully claimed by a single timing-out peer.
+  defp reconcile_endgame_mode(hash, active) do
+    if Model.get(hash, :mode) == :endgame do
+      Enum.each(active, &Downloads.piece_enter_endgame(hash, &1))
     end
   end
 

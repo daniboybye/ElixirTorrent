@@ -65,6 +65,9 @@ defmodule Torrent.Downloads do
   # or blocks that peer is already fetching.
   defdelegate piece_serves_peer?(hash, index, peer_id), to: Piece, as: :serves_peer?
 
+  # Upgrade a running worker to endgame; see `Piece.enter_endgame/2`.
+  defdelegate piece_enter_endgame(hash, index), to: Piece, as: :enter_endgame
+
   # Distinguishes "no worker yet" from "worker with nothing left to hand out",
   # which `piece_has_waiting?/2` collapses into `false`.
   @spec piece_whereis(Torrent.hash(), Torrent.index()) :: pid() | nil

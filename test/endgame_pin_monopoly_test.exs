@@ -108,6 +108,67 @@ defmodule EndgamePinMonopolyTest do
         end
       end)
     end
+
+    test "controller reconcile upgrades a piece started before the endgame transition" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = mid_download_torrent(hash)
+      subpiece = {0, @piece_len}
+
+      with_model(torrent, fn _ ->
+        start_swarm(hash)
+        start_downloads(hash)
+        Downloads.piece(hash, 0, fn -> :ok end, fn -> :ok end)
+        assert wait_active_pieces(hash, [0])
+
+        piece = Downloads.Piece.whereis(hash, 0)
+        refute Model.get(hash, :mode) == :endgame
+        assert :sys.get_state(piece).mode == nil
+
+        # The live shape of the stall: every block of the piece claimed by one
+        # peer, so `waiting` is empty and no other peer may ask for those blocks
+        # — a piece worker only ever hands a block to a single peer outside
+        # endgame. The in-flight request also carries the worker past the orphan
+        # sweep this same reconcile runs.
+        :sys.replace_state(piece, fn state ->
+          %{
+            state
+            | waiting: [],
+              timer: nil,
+              requests: [
+                %Torrent.Downloads.Piece.Request{
+                  peer_id: @peer_endgame_b,
+                  subpiece: subpiece,
+                  timer: nil
+                }
+              ]
+          }
+        end)
+
+        # The torrent crosses the endgame threshold while that worker is already
+        # running, which is the case `State.download/3` cannot see: it read the
+        # mode once, at start.
+        :sys.replace_state(model_via(hash), &%{&1 | left: @piece_len})
+        assert Model.get(hash, :mode) == :endgame
+
+        {:ok, controller} = GenServer.start(Torrent.Controller, hash)
+
+        try do
+          send(controller, :reconcile_pump)
+          TestSupport.Sync.sync(controller)
+          TestSupport.Sync.sync(piece)
+
+          state = :sys.get_state(piece)
+
+          assert state.mode == :endgame
+          # Re-opened for a second source, without taking it from the peer that
+          # is already fetching it.
+          assert state.waiting == [subpiece]
+          assert length(state.requests) == 1
+        after
+          safe_stop(controller)
+        end
+      end)
+    end
   end
 
   describe "endgame reject re-queue" do
@@ -140,6 +201,8 @@ defmodule EndgamePinMonopolyTest do
 
   defp downloads_via(hash), do: {:via, Registry, {Registry, {hash, Torrent.Downloads}}}
 
+  defp model_via(hash), do: {:via, Registry, {Registry, {hash, Model}}}
+
   defp endgame_torrent(hash) do
     %Torrent{
       hash: hash,
@@ -150,6 +213,12 @@ defmodule EndgamePinMonopolyTest do
       last_piece_length: @piece_len,
       peer_status: nil
     }
+  end
+
+  # Same torrent, but with enough left that Model.get(:mode) is still nil — the
+  # state a piece worker is born into before the endgame transition.
+  defp mid_download_torrent(hash) do
+    %{endgame_torrent(hash) | left: 11 * @piece_len, last_index: 15}
   end
 
   defp both_pieces do
