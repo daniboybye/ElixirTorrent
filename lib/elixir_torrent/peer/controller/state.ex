@@ -172,6 +172,17 @@ defmodule Peer.Controller.State do
   # the first active index (BEP-3 endgame needs multi-source redundancy).
   @stale_pin_ms 20_000
   @stale_pin_ms_endgame 15_000
+  # Same idea for a peer that is *not* choking us and still delivers nothing.
+  # That case is the damaging one: a choked peer holds no requests (handle_choke
+  # clears them), while an unchoked one keeps a full pipeline, so every block it
+  # sits on is unavailable to anybody else and is merely re-timed-out every
+  # @timeout_request. Live, two such peers held one whole piece each — 61 and 64
+  # blocks, 0 and 48 KiB delivered — while two pieces with all 64 blocks free had
+  # no peer at all, and the torrent stopped dead at 99%. The threshold is longer
+  # than the choked one and longer than a block timeout, so a merely slow peer
+  # gets a full request cycle to prove itself first; this is the same 60 s idea
+  # other clients call snubbing.
+  @snubbed_pin_ms 60_000
   # How many *distinct* pieces this peer may supply single-handedly that then
   # fail their SHA-1 before we drop the connection. A peer with one or two bad
   # pieces on disk is otherwise perfectly good — a live run had one serve 99.84%
@@ -2137,11 +2148,16 @@ defmodule Peer.Controller.State do
   @doc false
   @spec stale_useless_pin?(t()) :: boolean()
   def stale_useless_pin?(%__MODULE__{status: idx} = state) when is_integer(idx) do
-    state.choke_me and state.pin_downloaded_bytes == 0 and
-      pin_age_ms(state) >= stale_pin_threshold_ms(state.hash)
+    state.pin_downloaded_bytes == 0 and pin_age_ms(state) >= useless_pin_threshold_ms(state)
   end
 
   def stale_useless_pin?(_), do: false
+
+  @spec useless_pin_threshold_ms(t()) :: non_neg_integer()
+  defp useless_pin_threshold_ms(%__MODULE__{choke_me: true} = state),
+    do: stale_pin_threshold_ms(state.hash)
+
+  defp useless_pin_threshold_ms(%__MODULE__{}), do: @snubbed_pin_ms
 
   # Flush wire cancels + piece-worker rejects before repin or disconnect.
   # Mirrors handle_choke/1 local cleanup but also sends cancels — we are
