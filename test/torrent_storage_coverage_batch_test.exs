@@ -813,6 +813,70 @@ defmodule TorrentStorageCoverageBatchTest do
       end)
     end
 
+    test "assign_peer_to_piece?/3 frees an endgame pin that cannot serve this peer" do
+      hash = :crypto.strong_rand_bytes(20)
+      active = [0, 1, 2]
+
+      # Endgame spreads peers across the remaining indices by hashing the peer id,
+      # so the index this peer is entitled to is known up front — and pinning it
+      # elsewhere is what makes this exercise a move rather than the same-index
+      # shortcut.
+      preferred = Enum.at(active, :erlang.phash2(@peer_b, length(active)))
+      pin = Enum.find(active, &(&1 != preferred))
+      bf = Enum.reduce(active, Bitfield.make(4), fn i, acc -> Bitfield.set(acc, i, 1) end)
+
+      # A torrent enters endgame while the workers it already started keep running
+      # in normal mode, and a normal-mode worker never hands out a block that is
+      # already in flight. Judging the pin by the torrent's mode read those
+      # in-flight blocks — someone else's — as a reason to hold this peer, which
+      # parked a live torrent at 99.18% with 8 of 10 peers on one such piece while
+      # six pieces sat untouched.
+      with_model(endgame_torrent(hash), fn _ ->
+        assert Torrent.Model.get(hash, :mode) == :endgame
+
+        start_swarm(hash)
+        start_downloads(hash)
+        Downloads.piece(hash, pin, fn -> :ok end, fn -> :ok end)
+
+        piece_pid = Piece.whereis(hash, pin)
+        assert is_pid(piece_pid)
+        # `Downloads.piece/4` fills the worker asynchronously; without this barrier
+        # the overwrite below races that fill.
+        TestSupport.Sync.sync(piece_pid)
+
+        :sys.replace_state(piece_pid, fn state ->
+          %{
+            state
+            | mode: nil,
+              waiting: [],
+              requests: [%Request{peer_id: @peer_a, subpiece: {0, 16_384}, timer: nil}]
+          }
+        end)
+
+        refute Downloads.piece_serves_peer?(hash, pin, @peer_b)
+        assert Downloads.piece_serves_peer?(hash, pin, @peer_a)
+
+        {_pid, key_b} =
+          add_swarm_peer(hash, @peer_b, index: pin, bitfield: bf, choke_me: false, stale: false)
+
+        {_pid, key_a} =
+          add_swarm_peer(hash, @peer_a, index: pin, bitfield: bf, choke_me: false, stale: false)
+
+        targets = active -- [pin]
+
+        # Freed, and onto its own index only. Endgame accepts a re-pin onto any
+        # active piece, so without the per-peer gate every freed peer would follow
+        # `reconcile_refresh_interest/4` onto whichever index it reaches first,
+        # trading one crowded piece for another.
+        assert Enum.filter(targets, &Swarm.assign_peer_to_piece?(hash, key_b, &1, active)) ==
+                 [preferred]
+
+        # The peer whose own requests emptied the piece is the one working there;
+        # moving it would cancel exactly those requests.
+        assert Enum.filter(targets, &Swarm.assign_peer_to_piece?(hash, key_a, &1, active)) == []
+      end)
+    end
+
     test "sort_peers_seeders_first ranks seeders ahead of leechers" do
       hash = :crypto.strong_rand_bytes(20)
       torrent = endgame_torrent(hash)

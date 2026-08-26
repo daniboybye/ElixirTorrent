@@ -86,8 +86,8 @@ defmodule Torrent.Swarm do
   #     subpieces left (drained) → free to move. This is the fix: without
   #     it, a peer would sit pinned to a drained piece until its worker
   #     died, losing all its bandwidth to the pump.
-  #   * pinned to another active piece with waiting subpieces BUT this peer
-  #     is choked and has delivered zero bytes on the pin for longer than
+  #   * pinned to another active piece that still has something for it BUT this
+  #     peer is choked and has delivered zero bytes on the pin for longer than
   #     @stale_pin_ms → free to move (endgame monopoly fix). In endgame, a
   #     stable hash spreads useless pins across ALL remaining indices so one
   #     choked piece does not hoard the whole swarm.
@@ -105,7 +105,7 @@ defmodule Torrent.Swarm do
           endgame? = Model.get(hash, :mode) == :endgame
 
           target_accepts_repin?(hash, index, endgame?) and
-            may_leave_pin?(hash, key, index, other, active_indices, endgame?)
+            may_leave_pin?(hash, key, index, other, active_indices)
       end
   catch
     :exit, _ -> false
@@ -127,25 +127,38 @@ defmodule Torrent.Swarm do
     end
   end
 
-  defp may_leave_pin?(hash, key, index, other, active_indices, endgame?) do
-    drained? = pin_drained?(hash, other, Peer.key_to_id(key), endgame?)
-    useless? = useless_pin_may_switch?(hash, key, index, other, active_indices)
-
+  defp may_leave_pin?(hash, key, index, other, active_indices) do
     cond do
       other not in active_indices ->
         true
 
-      drained? and not endgame? ->
-        true
+      pin_drained?(hash, other, Peer.key_to_id(key)) ->
+        endgame_target_allows?(hash, key, index, active_indices)
 
-      drained? and endgame? and useless? ->
-        true
-
-      useless? ->
+      useless_pin_may_switch?(hash, key, index, other, active_indices) ->
         true
 
       true ->
         false
+    end
+  end
+
+  # Where a freed peer is allowed to land. Outside endgame nothing extra is
+  # needed: `target_accepts_repin?/3` requires the target to still hold
+  # unclaimed blocks, so a piece stops accepting peers once they have claimed
+  # everything it has. Endgame accepts *any* active index by design, which
+  # leaves the count unbounded — and `reconcile_refresh_interest/4` walks every
+  # active index in order, so without a gate the whole freed set lands on
+  # whichever index it reaches first. The stable hash spreads them across the
+  # remaining indices instead, which is what endgame wants anyway: redundant
+  # sources on all of them rather than a crowd on one.
+  defp endgame_target_allows?(hash, key, index, active_indices) do
+    case Model.get(hash, :mode) do
+      :endgame when length(active_indices) > 1 ->
+        endgame_preferred_index(key, active_indices) == index
+
+      _ ->
+        true
     end
   end
 
@@ -163,10 +176,23 @@ defmodule Torrent.Swarm do
   # the 2 s tick: one peer re-sent the same block 79 times in ten minutes and
   # delivered none of it, and the swarm as a whole sent 17 requests per block
   # received.
-  defp pin_drained?(hash, index, _peer_id, true),
-    do: not Downloads.piece_has_waiting?(hash, index)
-
-  defp pin_drained?(hash, index, peer_id, false),
+  #
+  # The question is asked of the piece worker rather than split on the torrent's
+  # mode, because the two do not agree: a torrent enters `:endgame` while the
+  # workers it already started keep running in normal mode, and the endgame
+  # branch used to probe `piece_has_waiting?/2`, which counts *other* peers'
+  # in-flight blocks. On a normal-mode piece that is precisely the wrong answer —
+  # it cannot hand this peer one of those blocks — so the pin was held forever.
+  # Live on a torrent parked at 99.18%: 8 of 10 peers pinned to one piece with no
+  # unclaimed blocks left, three of them unchoked and idle, while six pieces sat
+  # with all 64 blocks unclaimed and no peer at all.
+  #
+  # `waiting` already encodes the mode, which is why one probe serves both: a
+  # normal-mode worker drops a block from `waiting` when it hands it out, while
+  # an endgame worker keeps it there until it is *delivered*, so redundant
+  # re-requests stay possible and the pin stays useful until the piece is
+  # genuinely finished — the endgame behaviour the split was there to protect.
+  defp pin_drained?(hash, index, peer_id),
     do: not Downloads.piece_serves_peer?(hash, index, peer_id)
 
   # A peer choked with zero bytes on its current pin for long enough is not
@@ -175,19 +201,18 @@ defmodule Torrent.Swarm do
   # reconcile's multi-interest pass would leave every peer on the last index.
   defp useless_pin_may_switch?(hash, key, index, _other, active_indices) do
     Peer.Controller.stale_useless_pin?(key) and
-      case Model.get(hash, :mode) do
-        :endgame when length(active_indices) > 1 ->
-          endgame_preferred_index(key, active_indices) == index
-
-        _ ->
-          true
-      end
+      endgame_target_allows?(hash, key, index, active_indices)
   end
 
-  defp endgame_preferred_index({_hash, peer_id}, active_indices) do
+  # Spreads peers across the remaining indices by hashing the *peer*. The key is
+  # `{id, hash}` (`Peer.make_key/2`), and this destructured it as `{_hash,
+  # peer_id}` — so every peer on a torrent hashed the same value and got the same
+  # answer, funnelling the whole swarm onto one index instead of spreading it.
+  # That is the inverse of the intent, and it is what held 8 of 10 peers on a
+  # single piece while a torrent sat at 99.18%.
+  defp endgame_preferred_index(key, active_indices) do
     sorted = Enum.sort(active_indices)
-    bucket = rem(:erlang.phash2(peer_id, length(sorted)), length(sorted))
-    Enum.at(sorted, bucket)
+    Enum.at(sorted, :erlang.phash2(Peer.key_to_id(key), length(sorted)))
   end
 
   @spec seed(Torrent.hash()) :: :ok
