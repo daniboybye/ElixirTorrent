@@ -1,5 +1,128 @@
 # Changelog
 
+## 0.6.6 - 2026-08-27
+
+A swarm-health release. Under CGNAT, where a torrent runs on a handful of peers,
+three separate mechanisms were removing peers we could not afford to lose or
+parking them on work they were not allowed to do — torrents sat at 99% for hours
+with unchoked idle peers and unclaimed blocks side by side.
+
+### Fixed
+
+- Peers are no longer banned for correctly answering a request we withdrew.
+  A cancel is not atomic: BEP 6 obliges the peer to answer every request exactly
+  once, so a block cancelled, choked or repinned away still arrives one RTT
+  later. Both the piece and the reject landed in the "not outstanding" branch,
+  which disconnected the peer and blacklisted its ID across every torrent — 46
+  bans from `handle_piece` and 29 from `handle_reject` in five minutes, hitting
+  the Fast clients hardest precisely because they are the ones obliged to
+  reject. Withdrawn blocks are now remembered in a bounded per-block *count*
+  (one answer per request, so arrival order stops mattering) evicted by
+  generation rather than cleared wholesale. An answer matching neither set is
+  wasteful, not malicious: it ends the connection at 512 blocks without banning.
+- Fast-extension messages sent without the extension advertised, and frames that
+  stall half-way, no longer ban the peer. 71 of 98 disconnects in one
+  three-minute window were mainstream qBittorrent and Transmission builds.
+  `have_all`/`have_none` now go through the normal bitfield handler — a seeder
+  recorded as having nothing is a peer we can never request from — and the
+  advisory messages are logged and ignored. A truncated frame is a congested
+  path, so the connection still drops, but the ID is not blacklisted.
+- Peer bans expire. The blacklist was a `MapSet` that only grew, so one bad
+  frame excluded a peer for the whole session across every torrent: 352 IDs in
+  ten minutes while eight of nine torrents could not exceed three connections.
+  Bans now last 30 minutes with a cap and a background sweep, and each records
+  the rule that fired.
+- The dial layer no longer writes off a candidate pool a CGNAT host cannot
+  refill. A failure row was cleared only by `mark_productive/3`, which asks
+  whether an endpoint was *useful* rather than whether it is *reachable* — a
+  leecher we keep choked never delivers bytes and so carried its failure history
+  forever; registration now clears it, inbound peers included. Retention was
+  also refreshed on every failure, so a row re-dialled once per 30 minutes never
+  aged out and reached fail counts above 100; escalation now counts failures
+  within a 10-minute streak window. Sticky blocks became last-resort under
+  `min_count` pressure (productive, then soft before sticky, then v6 before v4,
+  then fewest failures) instead of refusing resurrection absolutely — 1151 of
+  1162 active blocks did, leaving a 50-endpoint request returning 3-8.
+- Endgame now applies to pieces that were already in flight when the torrent
+  crossed the threshold. A worker read the mode once at `State.download/3`, so
+  exactly the pieces endgame exists for ran without redundancy: one 1 MiB piece
+  held a torrent at 99.939% for over an hour with all 27 remaining blocks in
+  flight to a single peer that had logged 297 request timeouts on it, while
+  three unchoked peers holding the piece had nothing they were allowed to ask
+  for. `:reconcile_pump` upgrades active workers level-triggered; the transition
+  is idempotent and one-way and re-queues in-flight subpieces so endgame *adds*
+  sources for a block rather than taking it from the peer already fetching it.
+- A pin is released from an unchoked peer that delivers nothing. The staleness
+  test required `choke_me`, but a choked peer holds no requests at all — the
+  harmful case was the one it skipped, an unchoked peer sitting on a full
+  64-request pipeline nobody else may touch. Two such peers re-requested their
+  64 blocks 821 and 622 times in five minutes while two pieces with every block
+  unclaimed had no peer. Zero bytes now releases the pin either way, on a longer
+  threshold when unchoked (60 s, more than a block timeout) than when choked.
+- A peer is no longer repinned off the piece it is fetching. "Drained" ignored
+  *who* had claimed the blocks, so a peer that had claimed the rest of its piece
+  made it look finished, was moved away, and the move cancelled the very
+  requests that drained it — oscillating at the 2 s tick, 17 wire requests per
+  block received. Draining now also requires no in-flight requests from that
+  peer. Measured over seven minutes live: requests per block 17:1 → 1.1:1,
+  re-request factor 5.66× → 1.08×, swarm 28 → 73 peers, 1.79 → 2.47 MB/s.
+- Two endgame defects that parked torrents just short of completion: the
+  drained-pin probe branched on the *torrent's* mode rather than the worker's,
+  holding a pin for work that worker could never hand out, and
+  `endgame_preferred_index/2` destructured the peer key backwards
+  (`{_hash, peer_id}` against `Peer.make_key/2`'s `{id, hash}`), hashing the
+  torrent hash and so funnelling the entire swarm onto one index.
+- Outside endgame, a peer may leave a piece whose blocks are all claimed.
+  `piece_has_waiting?/2` counts blocks in flight to *other* peers, which a
+  normal-mode worker can never hand out — 27 of 37 peers were pinned to 4
+  claimed pieces while 8 pieces with 49-64 free blocks had no peer at all.
+- A piece worker whose holders have all disconnected is released. The abort
+  check also required the swarm to be empty, so on any torrent with peers such a
+  worker held one of the `@max_parallel_pieces` slots forever — 7 of 12 slots
+  live, capping a torrent with 26 unchoked peers at 5 pieces in flight.
+- A piece failing its SHA-1 check now blames the peer that supplied it. The
+  worker previously just re-requested every block and could pick the same peer
+  again; one torrent sat at 99.84% for hours re-downloading one index. Blocks
+  now remember their source, a peer stops being asked for an index it has
+  corrupted, and is dropped after `@max_hash_failures` *distinct* ruined pieces.
+- Writes to a peer that has stopped reading are bounded. A TCP socket defaults
+  to `send_timeout: :infinity`, so a sender blocked inside `:prim_inet.send/4`
+  never returned and its mailbox only grew — one held 20863 messages. Accepted
+  and dialled sockets now take a 30 s send timeout and close on it.
+- The upload delivery task no longer crashes when a peer cannot take a block.
+  Only `:noproc` was tolerated, so a peer shutting down mid-call produced one
+  crash report per in-flight block — 333 in fifteen minutes. BEP 3 permits
+  simply not answering a request, so this is now a cancellation with one debug
+  line; any other exit still crashes.
+- One pending pump wake per torrent. Every trigger — the 2 s reconcile tick,
+  each peer handoff, every `requests_are_dealt` closure — started its own
+  self-rescheduling `{:next_piece}` chain, and they accumulated: 99 → ~2600
+  discovery dial cycles per minute over twelve minutes with no change in swarm
+  size, until the tracker answered 403.
+- A peer disconnect logs why it ended. `Peer.Endpoints` monitors a supervisor
+  with `auto_shutdown: :any_significant`, which exits with a bare `:shutdown`
+  whatever the child's reason was, so every disconnect read `reason=:shutdown` —
+  useless for the one question worth asking, whether the peer left or we dropped
+  it. A protocol error now also logs the rejected wire message, and the
+  piece-bounds check logs the block alongside the torrent's geometry.
+- The background DHT metadata-lookup dedup table has a permanent owner. It was
+  created by whichever `Magnet.Fetcher` ran first and died with that torrent, so
+  every later background task crashed with `ArgumentError` on insert; a
+  supervised GenServer now owns it.
+
+### Performance
+
+- Dial batches overlap instead of serialising on their slowest endpoint. One
+  endpoint can hold a slot for the whole connect + handshake budget (measured
+  successes at 16 s, 42 s and 42 s, worst case near 55 s), and until it resolved
+  the manager would start nothing new for that torrent. That hurt worst where it
+  mattered most: a starved torrent with an all-IPv4 queue is capped to a
+  four-endpoint probe batch, so it made four attempts per minute against a
+  ~1% CGNAT success rate. Batches are now bounded by endpoints in flight (40)
+  and concurrent batches (3), with in-flight endpoints excluded from selection
+  so two batches cannot dial the same peer.
+
+
 ## 0.6.5 - 2026-08-18
 
 ### Added
