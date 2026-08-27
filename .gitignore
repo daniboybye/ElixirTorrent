@@ -22,6 +22,10 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 elixir_torrent-*.tar
 
+# Sobelow SARIF report (built via "mix sobelow --out"); CI regenerates it per run,
+# a local CI-parity run would otherwise leave it in the tree.
+sobelow.sarif
+
 # Local session state, DHT node id persistence, and downloaded data (engine default layout).
 /.elixir_torrent/
 
