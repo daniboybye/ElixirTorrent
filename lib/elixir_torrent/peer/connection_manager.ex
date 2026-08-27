@@ -193,30 +193,33 @@ defmodule Peer.ConnectionManager do
 
   @impl GenServer
   def handle_info({:dial_done, selected_keys, results}, %{hash: hash} = state) do
-    {_ok, _failures, failed_peers} = results
-    failed_keys = MapSet.new(Enum.map(failed_peers, fn {p, _} -> {p.ip, p.port} end))
-
-    keys_to_drop = Enum.reject(selected_keys, &MapSet.member?(failed_keys, &1))
-    queue = Map.drop(state.queue, keys_to_drop)
     connected = Swarm.count(hash)
     record_failures(hash, results, connected)
 
-    batches = max(state.batches - 1, 0)
-    in_flight = MapSet.difference(state.in_flight, MapSet.new(selected_keys))
+    state = release_dial_batch(state, selected_keys, results)
 
-    state = %{
+    maybe_replenish_discovery(state, connected)
+
+    maybe_dial(state, connected)
+  end
+
+  # An endpoint that failed stays queued so backoff ordering decides when to retry
+  # it; the rest resolved and leave the queue with the batch. Freeing the slots is
+  # what lets the next batch start, so it happens whatever the results were.
+  defp release_dial_batch(state, selected_keys, {_ok, _failures, failed_peers}) do
+    failed_keys = MapSet.new(failed_peers, fn {p, _} -> {p.ip, p.port} end)
+    keys_to_drop = Enum.reject(selected_keys, &MapSet.member?(failed_keys, &1))
+    batches = max(state.batches - 1, 0)
+
+    %{
       state
-      | queue: queue,
-        in_flight: in_flight,
+      | queue: Map.drop(state.queue, keys_to_drop),
+        in_flight: MapSet.difference(state.in_flight, MapSet.new(selected_keys)),
         batches: batches,
         dial_tasks: Enum.filter(state.dial_tasks, &Process.alive?/1),
         dialing?: false,
         dial_task: if(batches == 0, do: nil, else: state.dial_task)
     }
-
-    maybe_replenish_discovery(state, connected)
-
-    maybe_dial(state, connected)
   end
 
   @impl GenServer
@@ -319,44 +322,49 @@ defmodule Peer.ConnectionManager do
   end
 
   defp dial_batch(%{hash: hash, queue: queue} = state, batch) do
-    peers =
-      hash
-      |> prioritize_dial_queue(DialQueue.peers(queue))
-      # An endpoint stays in the queue until its dial resolves, so overlapping
-      # batches would otherwise pick the same one twice.
-      |> Enum.reject(&MapSet.member?(state.in_flight, {&1.ip, &1.port}))
-      |> Handshakes.select_peers_to_dial(hash, batch)
+    case select_dial_peers(state, hash, batch) do
+      [] ->
+        if map_size(queue) == 0 do
+          PeerDiscovery.Announce.replenish_candidates(hash)
+        end
 
-    if peers == [] do
-      if map_size(queue) == 0 do
-        PeerDiscovery.Announce.replenish_candidates(hash)
-      end
+        {:noreply, state}
 
-      {:noreply, state}
-    else
-      selected_keys = Enum.map(peers, fn p -> {p.ip, p.port} end)
-      parent = self()
-
-      {:ok, dial_task} =
-        Task.start(fn ->
-          results = Handshakes.dial_peers(peers, hash)
-          send(parent, {:dial_done, selected_keys, results})
-        end)
-
-      in_flight = MapSet.union(state.in_flight, MapSet.new(selected_keys))
-      batches = state.batches + 1
-
-      {:noreply,
-       %{
-         state
-         | in_flight: in_flight,
-           batches: batches,
-           dial_tasks: [dial_task | state.dial_tasks],
-           dialing?:
-             MapSet.size(in_flight) >= @max_in_flight_dials or batches >= @max_dial_batches,
-           dial_task: dial_task
-       }}
+      peers ->
+        {:noreply, launch_dial_batch(state, hash, peers)}
     end
+  end
+
+  defp select_dial_peers(%{queue: queue, in_flight: in_flight}, hash, batch) do
+    hash
+    |> prioritize_dial_queue(DialQueue.peers(queue))
+    # An endpoint stays in the queue until its dial resolves, so overlapping
+    # batches would otherwise pick the same one twice.
+    |> Enum.reject(&MapSet.member?(in_flight, {&1.ip, &1.port}))
+    |> Handshakes.select_peers_to_dial(hash, batch)
+  end
+
+  defp launch_dial_batch(state, hash, peers) do
+    selected_keys = Enum.map(peers, fn p -> {p.ip, p.port} end)
+    parent = self()
+
+    {:ok, dial_task} =
+      Task.start(fn ->
+        results = Handshakes.dial_peers(peers, hash)
+        send(parent, {:dial_done, selected_keys, results})
+      end)
+
+    in_flight = MapSet.union(state.in_flight, MapSet.new(selected_keys))
+    batches = state.batches + 1
+
+    %{
+      state
+      | in_flight: in_flight,
+        batches: batches,
+        dial_tasks: [dial_task | state.dial_tasks],
+        dialing?: MapSet.size(in_flight) >= @max_in_flight_dials or batches >= @max_dial_batches,
+        dial_task: dial_task
+    }
   end
 
   defp record_failures(hash, {ok_count, failures, failed_peers}, connected) do
