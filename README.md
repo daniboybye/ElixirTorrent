@@ -1,6 +1,6 @@
 # ElixirTorrent
 
-[![GitHub release](https://img.shields.io/badge/release-0.6.5-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent/releases/tag/0.6.5) [![Changelog](https://img.shields.io/badge/changelog-blue)](https://hexdocs.pm/elixir_torrent/changelog.html) [![Hex.pm](https://img.shields.io/hexpm/v/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent/0.6.5) [![HexDocs](https://img.shields.io/badge/hexdocs-0.6.5-8E44AD)](https://hexdocs.pm/elixir_torrent/0.6.5) [![Hex.pm Downloads](https://img.shields.io/hexpm/dt/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent) [![License](https://img.shields.io/hexpm/l/elixir_torrent.svg)](https://github.com/daniboybye/ElixirTorrent/blob/master/LICENSE)
+[![GitHub release](https://img.shields.io/badge/release-0.6.6-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent/releases/tag/0.6.6) [![Changelog](https://img.shields.io/badge/changelog-blue)](https://hexdocs.pm/elixir_torrent/changelog.html) [![Hex.pm](https://img.shields.io/hexpm/v/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent/0.6.6) [![HexDocs](https://img.shields.io/badge/hexdocs-0.6.6-8E44AD)](https://hexdocs.pm/elixir_torrent/0.6.6) [![Hex.pm Downloads](https://img.shields.io/hexpm/dt/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent) [![License](https://img.shields.io/hexpm/l/elixir_torrent.svg)](https://github.com/daniboybye/ElixirTorrent/blob/master/LICENSE)
 
 [![build](https://img.shields.io/github/actions/workflow/status/daniboybye/ElixirTorrent/build-and-publish.yml?branch=master&label=build&logo=github)](https://github.com/daniboybye/ElixirTorrent/actions/workflows/build-and-publish.yml) [![codecov](https://codecov.io/gh/daniboybye/ElixirTorrent/branch/master/graph/badge.svg)](https://codecov.io/gh/daniboybye/ElixirTorrent) [![BEPs](https://img.shields.io/badge/BEPs-23%20implemented-E8A33D)](PROTOCOL.md) [![Last commit](https://img.shields.io/github/last-commit/daniboybye/ElixirTorrent/master)](https://github.com/daniboybye/ElixirTorrent/commits/master)
 
@@ -56,7 +56,7 @@ Full per-BEP status, including the known gaps: **[PROTOCOL.md](PROTOCOL.md)**.
 ```elixir
 def deps do
   [
-    {:elixir_torrent, "~> 0.6.5"}
+    {:elixir_torrent, "~> 0.6.6"}
   ]
 end
 ```
@@ -173,7 +173,7 @@ Full reference: [`hexdocs.pm/elixir_torrent/ElixirTorrent.html`](https://hexdocs
 | `stop_all_and_serialize/0` | Graceful stop + persist for every torrent |
 | `remove/2` | Stop and drop from session; optional `delete_data: true` |
 | `get/2` | Low-level field access (prefer `stats/2`) |
-| `version/0` | Version-derived client peer ID prefix (`ET0-6-5`, BEP 20) |
+| `version/0` | Version-derived client peer ID prefix (`ET0-6-6`, BEP 20) |
 
 ## ElixirTorrent Web (desktop app)
 
