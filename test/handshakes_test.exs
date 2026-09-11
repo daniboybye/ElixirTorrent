@@ -109,6 +109,10 @@ defmodule HandshakesTest do
       assert Handshakes.dial_reachability_outcome(:socket_handoff_failed) == :ok
     end
 
+    test "add_peer_failed counts as family ok (endpoint completed BT handshake)" do
+      assert Handshakes.dial_reachability_outcome(:add_peer_failed) == :ok
+    end
+
     test "already_connected and not_connectable are neutral skips" do
       assert Handshakes.dial_reachability_outcome(:already_connected) == :skip
       assert Handshakes.dial_reachability_outcome(:not_connectable) == :skip
