@@ -394,8 +394,8 @@ defmodule HandshakesCoverageBatchTest do
 
         assert {ok_count, failures, failed} = Handshakes.dial_peers([peer, peer], hash)
         assert ok_count == 1
-        assert Map.get(failures, :add_peer_failed) == 1
-        assert Enum.any?(failed, fn {^peer, :add_peer_failed} -> true end)
+        assert Map.get(failures, :already_connected) == 1
+        assert Enum.any?(failed, fn {^peer, :already_connected} -> true end)
         assert_receive :dial_server_done, @timeout
         send(server.pid, close_gate)
         :gen_tcp.close(listen)

@@ -378,14 +378,17 @@ defmodule Acceptor.Connection.Handshakes do
   defp increment_failure(failures, reason),
     do: Map.update(failures, reason, 1, &(&1 + 1))
 
-  # Dial outcome → Peer.DialStats family bump. :socket_handoff_failed is emitted
-  # only after TCP/uTP connect and the BitTorrent handshake succeeded; the peer
-  # proved reachable and local OTP churn (register/handoff/activate) failed.
-  # Count that as a family :ok so v4/v6 yield isn't poisoned by our own process
-  # wiring. :already_connected / :not_connectable are neutral (:skip).
+  # Dial outcome → Peer.DialStats family bump. :socket_handoff_failed and
+  # :add_peer_failed are both emitted only after TCP/uTP connect and the
+  # BitTorrent handshake succeeded; the peer proved reachable and local OTP
+  # churn (supervisor start / register / handoff / activate) failed. Count them
+  # as a family :ok so v4/v6 yield isn't poisoned by our own process wiring.
+  # :already_connected / :not_connectable are neutral (:skip).
   @doc false
   @spec dial_reachability_outcome(term()) :: :ok | :skip | :fail
-  def dial_reachability_outcome(:socket_handoff_failed), do: :ok
+  def dial_reachability_outcome(reason)
+      when reason in [:socket_handoff_failed, :add_peer_failed],
+      do: :ok
 
   def dial_reachability_outcome(reason) when reason in [:already_connected, :not_connectable],
     do: :skip
@@ -945,6 +948,15 @@ defmodule Acceptor.Connection.Handshakes do
       {:error, :max_peers} ->
         safe_close(socket)
         {:error, :max_peers}
+
+      # Peer supervisors are registered under {peer_id, hash}, so a second
+      # endpoint presenting a peer id we already hold loses the race here.
+      # `already_connected?/2` screens the batch, but up to @batch dials run
+      # concurrently and a fake-peer farm hands the same id out from many IPs,
+      # so the duplicate is only observable at registration.
+      {:error, {:already_started, _pid}} ->
+        safe_close(socket)
+        {:error, :already_connected}
 
       _ ->
         safe_close(socket)

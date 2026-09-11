@@ -61,10 +61,18 @@ defmodule Peer.DialBackoff do
   @sticky_reasons [:churn | @hard_failures]
 
   # These outcomes don't reflect endpoint reachability — don't count them toward
-  # the fail threshold and don't write a block row. :socket_handoff_failed means
-  # connect+handshake succeeded and only local handoff failed; Endpoints already
-  # records :churn when registration happened, so DialBackoff must not double-block.
-  @non_reachability_reasons [:already_connected, :not_connectable, :socket_handoff_failed]
+  # the fail threshold and don't write a block row. :socket_handoff_failed and
+  # :add_peer_failed both mean connect+handshake succeeded and only a local step
+  # failed (supervisor start, then handoff); Endpoints already records :churn
+  # when registration happened, so DialBackoff must not double-block. Blocking on
+  # them wrote off endpoints we had just spoken BEP 3 to: live, one torrent held
+  # 61 of 62 endpoints sticky-blocked with 4 peers connected.
+  @non_reachability_reasons [
+    :already_connected,
+    :not_connectable,
+    :socket_handoff_failed,
+    :add_peer_failed
+  ]
 
   @spec child_spec(term()) :: Supervisor.child_spec()
   def child_spec(_) do
