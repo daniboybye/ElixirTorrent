@@ -397,7 +397,34 @@ defmodule PeerDiscovery.AnnounceCoverageBatchTest do
             })
         end)
 
-      assert log =~ "request failure reason"
+      # The line must name the torrent and the tracker — a bare reason is not
+      # actionable when a torrent carries dozens of announce URLs.
+      assert log =~ "[tracker] announce_failed"
+      assert log =~ "reason=:invalid_bencode"
+      assert log =~ "announce=#{announce}"
+      assert log =~ "hash=#{Torrent.hex_encoded_hash(state.hash)}"
+    end
+
+    test "an expected dead-tracker reason stays out of the warning stream" do
+      ref = make_ref()
+      announce = "http://127.0.0.1:1/gone"
+
+      state =
+        base_state(
+          requests: %{ref => {announce, 0, 0}},
+          tier_batches: %{0 => 1}
+        )
+
+      log =
+        capture_log([level: :warning], fn ->
+          _ =
+            Announce.dispatch_task_message(state, {
+              ref,
+              %Error{reason: {:http_status, 404}, retry_in: nil}
+            })
+        end)
+
+      refute log =~ "announce_failed"
     end
   end
 
