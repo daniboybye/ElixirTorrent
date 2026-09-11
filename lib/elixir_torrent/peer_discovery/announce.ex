@@ -637,17 +637,18 @@ defmodule PeerDiscovery.Announce do
 
   def handle_info({ref, %Tracker.Error{retry_in: retry_in} = error}, state)
       when not is_nil(retry_in) do
-    timeout = retry_interval_seconds(retry_in, error.reason)
-    {:noreply, parallel_tracker_error(state, ref, timeout)}
+    timeout = retry_interval_seconds(retry_in)
+    {:noreply, parallel_tracker_error(state, ref, timeout, error.reason)}
   end
 
   def handle_info({ref, %Tracker.Error{reason: reason}}, state) do
-    timeout = retry_interval_seconds(nil, reason)
-    {:noreply, parallel_tracker_error(state, ref, timeout)}
+    timeout = retry_interval_seconds(nil)
+    {:noreply, parallel_tracker_error(state, ref, timeout, reason)}
   end
 
   def handle_info({ref, _}, state) do
-    {:noreply, parallel_tracker_error(state, ref, Tracker.default_failure_interval())}
+    timeout = Tracker.default_failure_interval()
+    {:noreply, parallel_tracker_error(state, ref, timeout, :unexpected_reply)}
   end
 
   @spec start_parallel_tier(%__MODULE__{}, non_neg_integer(), [String.t()]) :: %__MODULE__{}
@@ -1131,27 +1132,41 @@ defmodule PeerDiscovery.Announce do
     end
   end
 
-  @spec parallel_tracker_error(%__MODULE__{}, reference(), non_neg_integer()) :: %__MODULE__{}
-  defp parallel_tracker_error(%__MODULE__{} = state, ref, timeout_seconds) do
+  @spec parallel_tracker_error(%__MODULE__{}, reference(), non_neg_integer(), term()) ::
+          %__MODULE__{}
+  defp parallel_tracker_error(%__MODULE__{} = state, ref, timeout_seconds, reason) do
     {meta, requests} = Map.pop(state.requests, ref)
 
     case meta do
       nil ->
         state
 
-      {:scrape, _announce} ->
+      {:scrape, announce} ->
         # Scrape failures are non-fatal — the tracker's announce endpoint may
         # still work. Drop the request, leave parallel state and `disabled`
         # untouched. Retry on next @scrape_interval_ms tick.
+        log_scrape_failure(state.hash, announce, reason)
         %{state | requests: requests}
 
       {announce, tier_index, _tracker_index} ->
-        state
-        |> Map.put(:requests, requests)
-        |> Map.update!(:peers, &Map.delete(&1, announce))
-        |> put_tracker_retry_after(announce, timeout_seconds)
-        |> dec_tier_batch(tier_index)
+        log_tracker_failure(state.hash, announce, reason)
+        drop_failed_announce(state, requests, announce, tier_index, timeout_seconds)
     end
+  end
+
+  @spec drop_failed_announce(
+          %__MODULE__{},
+          map(),
+          String.t(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: %__MODULE__{}
+  defp drop_failed_announce(state, requests, announce, tier_index, timeout_seconds) do
+    state
+    |> Map.put(:requests, requests)
+    |> Map.update!(:peers, &Map.delete(&1, announce))
+    |> put_tracker_retry_after(announce, timeout_seconds)
+    |> dec_tier_batch(tier_index)
   end
 
   @spec put_tracker_retry_after(%__MODULE__{}, String.t(), non_neg_integer()) :: %__MODULE__{}
@@ -1529,30 +1544,50 @@ defmodule PeerDiscovery.Announce do
     end
   end
 
-  @spec retry_interval_seconds(term(), term()) :: non_neg_integer()
-  defp retry_interval_seconds(retry_in, _reason) when is_integer(retry_in) and retry_in >= 0,
-    do: retry_in
+  @spec retry_interval_seconds(term()) :: non_neg_integer()
+  defp retry_interval_seconds(retry_in) when is_integer(retry_in) and retry_in >= 0, do: retry_in
 
-  defp retry_interval_seconds(retry_in, _reason) when retry_in in ["never", :never], do: 0
+  defp retry_interval_seconds(retry_in) when retry_in in ["never", :never], do: 0
 
-  defp retry_interval_seconds(retry_in, _reason) when is_binary(retry_in) do
+  defp retry_interval_seconds(retry_in) when is_binary(retry_in) do
     case parse_retry_in_seconds(retry_in) do
       nil -> Tracker.default_failure_interval()
       n -> n
     end
   end
 
-  defp retry_interval_seconds(_, reason) do
-    # Dead public trackers (NXDOMAIN / black-hole UDP / connect timeouts) are the
-    # common case in real announce-lists — BEP 12 already fails over tiers. Warn
-    # only on unexpected reasons so server.log stays readable under CGNAT churn.
-    if expected_tracker_failure_reason?(reason) do
-      Logger.debug("request failure reason: #{inspect(reason)}")
-    else
-      Logger.warning("request failure reason: #{inspect(reason)}")
-    end
+  defp retry_interval_seconds(_), do: Tracker.default_failure_interval()
 
-    Tracker.default_failure_interval()
+  # Logged from `parallel_tracker_error/4`, where the request ref has been
+  # resolved back to its announce URL. The previous "request failure reason: …"
+  # line carried neither the info_hash nor the tracker, so nothing in it could
+  # be acted on — worst for the tracker's own bencoded `failure reason` text,
+  # which asks the *user* to do something ("Please redownload the torrent…")
+  # about a torrent it never named.
+  @spec log_tracker_failure(Torrent.hash(), String.t(), term()) :: :ok
+  defp log_tracker_failure(hash, announce, reason) do
+    message =
+      "[tracker] announce_failed hash=#{Torrent.hex_encoded_hash(hash)} " <>
+        "announce=#{announce} reason=#{inspect(reason)}"
+
+    # Dead public trackers are the common case in real announce-lists and BEP 12
+    # already fails over tiers, so only unexpected reasons warn — otherwise
+    # server.log is unreadable under CGNAT churn.
+    if expected_tracker_failure_reason?(reason) do
+      Logger.debug(message)
+    else
+      Logger.warning(message)
+    end
+  end
+
+  # BEP 48 scrape is an optional side channel; its failure never blocks announce,
+  # so it stays at :debug regardless of reason.
+  @spec log_scrape_failure(Torrent.hash(), String.t(), term()) :: :ok
+  defp log_scrape_failure(hash, announce, reason) do
+    Logger.debug(
+      "[tracker] scrape_failed hash=#{Torrent.hex_encoded_hash(hash)} " <>
+        "announce=#{announce} reason=#{inspect(reason)}"
+    )
   end
 
   @doc false
@@ -1571,6 +1606,22 @@ defmodule PeerDiscovery.Announce do
       do: true
 
   def expected_tracker_failure_reason?({:nxdomain, _}), do: true
+
+  # HTTPoison surfaces hackney's connect timeout as the `gen_statem` call that
+  # timed out, not as a bare `:timeout`, so the connect-timeout case this list
+  # exists to cover never matched and every one of them warned instead.
+  def expected_tracker_failure_reason?({:timeout, {:gen_statem, :call, _}}), do: true
+
+  # The endpoint answered, but not as a working tracker: 404 (gone), 403
+  # (private/banned without a passkey) and Cloudflare's origin 5xx (521 "web
+  # server is down") are all routine in a public announce-list, and the
+  # per-tracker retry cooldown already spaces the retries. A bencoded
+  # `failure reason` string is deliberately not covered — that is the tracker
+  # speaking BEP 3 to us and can be actionable.
+  def expected_tracker_failure_reason?({:http_status, status})
+      when is_integer(status) and status >= 400,
+      do: true
+
   def expected_tracker_failure_reason?(_), do: false
 
   @spec extract_tiers(map()) :: [list(String.t())]

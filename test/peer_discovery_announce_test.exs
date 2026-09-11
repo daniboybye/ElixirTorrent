@@ -1220,6 +1220,28 @@ defmodule PeerDiscoveryAnnounceTest do
     refute Announce.expected_tracker_failure_reason?(:invalid_bencode)
   end
 
+  test "expected_tracker_failure_reason?/1 covers hackney's wrapped connect timeout" do
+    # HTTPoison hands back the gen_statem call that timed out rather than a bare
+    # :timeout, so this shape is what a real connect timeout looks like.
+    assert Announce.expected_tracker_failure_reason?(
+             {:timeout, {:gen_statem, :call, [self(), :connect, 8000]}}
+           )
+  end
+
+  test "expected_tracker_failure_reason?/1 treats HTTP error statuses as dead trackers" do
+    for status <- [403, 404, 410, 500, 521, 522] do
+      assert Announce.expected_tracker_failure_reason?({:http_status, status})
+    end
+
+    refute Announce.expected_tracker_failure_reason?({:http_status, 200})
+
+    # A bencoded "failure reason" is the tracker talking to us and can be
+    # actionable (e.g. a private tracker asking for a passkey) — keep it loud.
+    refute Announce.expected_tracker_failure_reason?(
+             "Please redownload the torrent. PID system is active and pid was not found in the torrent"
+           )
+  end
+
   defp safe_stop(pid, timeout) do
     GenServer.stop(pid, :normal, timeout)
   catch
