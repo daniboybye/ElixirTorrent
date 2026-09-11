@@ -646,9 +646,13 @@ defmodule PeerDiscovery.Announce do
     {:noreply, parallel_tracker_error(state, ref, timeout, reason)}
   end
 
-  def handle_info({ref, _}, state) do
+  # Every shape a tracker task is supposed to return is matched above, so this
+  # clause means we got something nobody wrote. Carry the term — naming only the
+  # category would leave the same "reason with no evidence" this module just
+  # stopped emitting.
+  def handle_info({ref, other}, state) do
     timeout = Tracker.default_failure_interval()
-    {:noreply, parallel_tracker_error(state, ref, timeout, :unexpected_reply)}
+    {:noreply, parallel_tracker_error(state, ref, timeout, {:unexpected_reply, other})}
   end
 
   @spec start_parallel_tier(%__MODULE__{}, non_neg_integer(), [String.t()]) :: %__MODULE__{}
