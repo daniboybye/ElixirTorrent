@@ -310,38 +310,59 @@ defmodule DHT.KRPC do
     (v4 ++ v6) |> Enum.uniq_by(& &1.id)
   end
 
-  @doc "Decode compact peers from a get_peers response body."
-  @spec response_peers(response()) :: [Peer.t()]
-  def response_peers(%{values: values}) do
+  @doc """
+  Decode compact peers from a get_peers response body.
+
+  `family` is the address family the response arrived on. It is needed because
+  **18 is a multiple of 6**: BEP 5 nominally puts one compact peer in each
+  `values` string, but implementations pack several into one, so a string carrying
+  three IPv4 peers is indistinguishable by length alone from a single IPv6 peer.
+  BEP 32 runs the IPv6 DHT as a *separate* DHT, which makes the transport the
+  authority — a response that came back over IPv6 carries IPv6 peers. Length stays
+  the tie-breaker only when the transport's own unit does not divide the string,
+  and for callers that do not know the family.
+  """
+  @spec response_peers(response(), :inet | :inet6 | nil) :: [Peer.t()]
+  def response_peers(response, family \\ nil)
+
+  def response_peers(%{values: values}, family) do
     values
     |> normalize_values()
-    |> Enum.flat_map(&decode_value_peers/1)
+    |> Enum.flat_map(&decode_value_peers(&1, family))
     |> Enum.uniq_by(&{&1.ip, &1.port})
   end
 
-  def response_peers(_), do: []
+  def response_peers(_, _), do: []
 
   @spec normalize_values(term()) :: [binary()]
   defp normalize_values(values) when is_binary(values), do: [values]
   defp normalize_values(values) when is_list(values), do: Enum.filter(values, &is_binary/1)
   defp normalize_values(_), do: []
 
-  @spec decode_value_peers(binary()) :: [Peer.t()]
-  defp decode_value_peers(blob) when is_binary(blob) do
-    size = byte_size(blob)
-
-    cond do
-      size == 0 ->
-        []
-
-      rem(size, @ipv6_peer_info_size) == 0 ->
-        Compact.decode_ipv6_peers(blob)
-
-      rem(size, @peer_info_size) == 0 ->
-        Compact.decode_peers(blob)
-
-      true ->
-        []
+  @spec decode_value_peers(binary(), :inet | :inet6 | nil) :: [Peer.t()]
+  defp decode_value_peers(blob, family) when is_binary(blob) do
+    case value_peer_family(byte_size(blob), family) do
+      :inet6 -> Compact.decode_ipv6_peers(blob)
+      :inet -> Compact.decode_peers(blob)
+      nil -> []
     end
   end
+
+  # The transport family goes first, so a packed 18-byte string arriving over IPv4
+  # is read as the three IPv4 peers it is rather than one invented IPv6 address.
+  # A phantom endpoint is not harmless: it consumes a dial slot, can never connect,
+  # and its failure is recorded against the IPv6 family — which is what drives the
+  # per-family dial throttle, so guessing wrong here teaches the engine that IPv6
+  # does not work.
+  @spec value_peer_family(non_neg_integer(), :inet | :inet6 | nil) :: :inet | :inet6 | nil
+  defp value_peer_family(0, _family), do: nil
+
+  defp value_peer_family(size, :inet6) when rem(size, @ipv6_peer_info_size) == 0, do: :inet6
+  defp value_peer_family(size, :inet) when rem(size, @peer_info_size) == 0, do: :inet
+
+  # Family unknown, or known but its unit does not divide the string — a v4 peer
+  # answered over the v6 DHT, say. Fall back to length, preferring IPv6 as before.
+  defp value_peer_family(size, _family) when rem(size, @ipv6_peer_info_size) == 0, do: :inet6
+  defp value_peer_family(size, _family) when rem(size, @peer_info_size) == 0, do: :inet
+  defp value_peer_family(_size, _family), do: nil
 end

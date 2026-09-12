@@ -584,7 +584,9 @@ defmodule DHT do
 
     tables = RoutingTables.mark_good(state.routing_tables, contact, from_query: true)
     state = %{state | routing_tables: tables}
-    peers = KRPC.response_peers(response)
+    # The family the answer arrived on disambiguates a packed `values` string —
+    # see `KRPC.response_peers/2`.
+    peers = KRPC.response_peers(response, transport_family(ip))
 
     nodes =
       response
@@ -1499,9 +1501,12 @@ defmodule DHT do
 
   @spec socket_for_dest(t(), :inet.ip_address()) :: port()
   defp socket_for_dest(state, ip) do
-    family = if tuple_size(ip) == 8, do: :inet6, else: :inet
-    select_socket(state, family)
+    select_socket(state, transport_family(ip))
   end
+
+  @spec transport_family(:inet.ip_address()) :: :inet | :inet6
+  defp transport_family(ip) when tuple_size(ip) == 8, do: :inet6
+  defp transport_family(_ip), do: :inet
 
   @spec socket_family(t(), port()) :: :inet | :inet6
   defp socket_family(%__MODULE__{socket_v6: socket_v6}, socket) when socket == socket_v6,
