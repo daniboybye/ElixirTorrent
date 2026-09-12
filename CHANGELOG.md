@@ -51,6 +51,18 @@ speed of 0 B/s reported on a torrent moving at 100 KB/s.
   oscillates, and a torrent slower than one piece per window reads 0 until its
   first piece lands.
 
+- A disk error while serving a BEP 52 hash request returns an error instead of
+  raising. `Merkle.leaf_range_response_from_disk/7` documents
+  `{:error, term()}` and handles a failed `:file.open/2` that way, but the
+  per-leaf reads underneath it pattern-matched `{:ok, block} = :file.pread/3`, so
+  an I/O error — or a file truncated between the stat that produced `file_length`
+  and the read — raised `MatchError` from the middle of the function. `HashServe`
+  catches that and answers `hash_reject`, which is correct on the wire but
+  reached by the wrong path; any other caller got an exception for a disk
+  condition. `:file.pread/3` also answers a bare `:eof` rather than an error
+  tuple, which is now distinguished from the legitimate padded-leaf case that
+  reads no bytes at all.
+
 ### Changed
 
 - The HTTP stack behind tracker announces and BEP 19 web seeds moved up: hackney
