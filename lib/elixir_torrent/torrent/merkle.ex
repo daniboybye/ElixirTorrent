@@ -679,9 +679,8 @@ defmodule Torrent.Merkle do
         ctx.proof_layers
       )
 
-    cache = read_leaf_cache(fd, ctx.file_length, ctx.block_count, indices)
-
-    with :ok <-
+    with {:ok, cache} <- read_leaf_cache(fd, ctx.file_length, ctx.block_count, indices),
+         :ok <-
            verify_piece_subtrees(
              cache,
              ctx.piece_hashes,
@@ -1274,34 +1273,48 @@ defmodule Torrent.Merkle do
     |> MapSet.filter(&(&1 < block_count))
   end
 
+  # Stops at the first unreadable leaf rather than hashing the rest, because the
+  # cache is only useful complete — every consumer below does `Map.fetch!/2`.
   defp read_leaf_cache(fd, file_length, block_count, indices) do
-    Enum.reduce(indices, %{}, fn leaf, acc ->
-      Map.put(acc, leaf, leaf_hash_from_fd(fd, file_length, block_count, leaf))
+    Enum.reduce_while(indices, {:ok, %{}}, fn leaf, {:ok, acc} ->
+      case leaf_hash_from_fd(fd, file_length, block_count, leaf) do
+        {:ok, hash} -> {:cont, {:ok, Map.put(acc, leaf, hash)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
     end)
   end
 
   defp leaf_hash_from_fd(fd, file_length, block_count, leaf_index) do
     offset = leaf_index * @block_size
 
-    data =
+    with {:ok, data} <- read_leaf_bytes(fd, offset, file_length) do
       cond do
-        offset >= file_length ->
-          <<>>
-
-        offset + @block_size > file_length ->
-          size = file_length - offset
-          {:ok, block} = :file.pread(fd, offset, size)
-          block
-
-        true ->
-          {:ok, block} = :file.pread(fd, offset, @block_size)
-          block
+        leaf_index >= block_count -> {:ok, @zero_hash}
+        byte_size(data) == 0 -> {:ok, @zero_hash}
+        true -> {:ok, :crypto.hash(:sha256, data)}
       end
+    end
+  end
 
-    cond do
-      leaf_index >= block_count -> @zero_hash
-      byte_size(data) == 0 -> @zero_hash
-      true -> :crypto.hash(:sha256, data)
+  # A leaf past the end of the file is a legitimate request on a padded tree, not
+  # a read at all: BEP 52 pads the leaf layer to a power of two and those leaves
+  # hash to `@zero_hash`.
+  defp read_leaf_bytes(_fd, offset, file_length) when offset >= file_length, do: {:ok, <<>>}
+
+  defp read_leaf_bytes(fd, offset, file_length) do
+    case :file.pread(fd, offset, min(@block_size, file_length - offset)) do
+      {:ok, block} ->
+        {:ok, block}
+
+      # `pread` answers a bare `:eof` instead of an error tuple when there is
+      # nothing at the offset. Reaching it here means `file_length` no longer
+      # describes the file — truncated under us between the `File.stat` and this
+      # read — so it is a real failure and not the padded-leaf case above.
+      :eof ->
+        {:error, :eof}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
