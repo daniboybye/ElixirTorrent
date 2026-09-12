@@ -185,10 +185,16 @@ defmodule Cycle2PureProtocolCoverageTest do
 
       assert RoutingTables.mark_good(tables, @local_id) != tables
       missing = <<0xCC, 0::152>>
-      assert RoutingTables.mark_bad(RoutingTables.new(@hash), missing) == RoutingTables.new(@hash)
 
-      assert RoutingTables.mark_query_failed(RoutingTables.new(@hash), missing) ==
-               RoutingTables.new(@hash)
+      # Compared against a second `RoutingTables.new(@hash)` these two flaked: the
+      # struct carries `last_changed_ms` from the monotonic clock, so under
+      # full-suite load the two constructions land in different milliseconds. The
+      # claim here is that marking an id that is not in the table is a no-op — not
+      # that `new/1` is deterministic — so compare against the same value.
+      empty = RoutingTables.new(@hash)
+
+      assert RoutingTables.mark_bad(empty, missing) == empty
+      assert RoutingTables.mark_query_failed(empty, missing) == empty
 
       v6 = %{id: <<0xDD, 0::152>>, ip: {0x2001, 0, 0, 0, 0, 0, 0, 1}, port: 6882}
       tables = RoutingTables.new(@hash) |> RoutingTables.insert(v6, now_ms: 0)
