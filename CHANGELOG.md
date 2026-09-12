@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.6.7 - 2026-09-12
+
+A measurement release. Every fix here is a case where the engine was doing
+something wrong *and the instruments said it was fine* — a tracker retried
+forever because its failure had no reason attached, healthy peers marked
+unreachable because a local error was counted as a network one, and a download
+speed of 0 B/s reported on a torrent moving at 100 KB/s.
+
+### Fixed
+
+- A tracker whose hostname no longer resolves is dropped for the session instead
+  of being announced to forever. Hackney raises `:badarg` out of its connect path
+  for a name with no A and no AAAA record rather than returning `:nxdomain`, so
+  the HTTP announce returned a reason with no `retry_in` and got the default retry
+  interval — `tracker.openbittorrent.com`, defunct, was re-announced six times an
+  hour across four torrents. The UDP side never had this problem because it
+  resolves up front and answers `retry_in: "never"`. The `:badarg` catch now
+  resolves the host itself and only writes a tracker off when DNS genuinely has
+  nothing; other sources of `:badarg` keep the old opaque reason, because a
+  permanent disable is too destructive to apply on a guess.
+- Announce failures name the torrent and the announce URL. The line read
+  `request failure reason: <term>` with neither, which made the most actionable
+  message in the log useless: a tracker's own bencoded failure reason asks the
+  user to re-add a torrent it never identified. Two classification gaps went with
+  it — HTTPoison surfaces hackney's connect timeout as
+  `{:timeout, {:gen_statem, :call, [pid, :connect, 8000]}}`, which the
+  connect-timeout case never matched (42 of 89 warnings in a 21-minute window),
+  and HTTP 4xx/5xx was not classified at all even though a 403 or 521 from a
+  public announce-list entry is a dead tracker that BEP 12 already fails over.
+- `:add_peer_failed` no longer counts as a peer being unreachable. It is emitted
+  only *after* TCP connect and the full BEP 3 handshake succeed — we already hold
+  the peer's id — and means the supervisor could not start, which is a local
+  fault. It was depressing the measured per-family dial yield that drives the
+  address-family throttle and writing `DialBackoff` rows toward the hard-fail
+  threshold: one torrent held 61 of its 62 known endpoints sticky-blocked while
+  connected to 4 peers. The catch-all also hid the outcome behind it — peer
+  supervisors register under `{peer_id, hash}`, so a farm handing one id out from
+  many IPs loses the race at `start_child`, which is `:already_connected`.
+- The download speed readout no longer reports 0 B/s on a moving torrent.
+  `Torrent.Model` differenced `downloaded` over its 5 s tick, but that counter
+  advances only when a whole piece verifies, so the sample was quantized to piece
+  size: at 55 KB/s with 1 MiB pieces three ticks in four read exactly 0.0. Two
+  live torrents reported 0 B/s while gaining a combined 196 KB/s, and the ETA
+  derived from it was `:infinity` throughout. The rate is now averaged over a 60 s
+  window, held while a window containing progress matures, and clamped by
+  `piece_length / elapsed` only when nothing has arrived at all. A torrent with
+  nothing completed for 10 minutes reports 0. This is an improvement, not a cure:
+  the source is still piece-granular, so a swarm delivering in bursts still
+  oscillates, and a torrent slower than one piece per window reads 0 until its
+  first piece lands.
+
+### Changed
+
+- The HTTP stack behind tracker announces and BEP 19 web seeds moved up: hackney
+  4.7.2 → 4.7.4, h2 0.11.0 → 0.12.0, webtransport 0.4.4 → 0.4.5, quic 1.8.0 →
+  1.8.2.
+
 ## 0.6.6 - 2026-08-27
 
 A swarm-health release. Under CGNAT, where a torrent runs on a handful of peers,
