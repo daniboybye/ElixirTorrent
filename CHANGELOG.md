@@ -51,6 +51,16 @@ speed of 0 B/s reported on a torrent moving at 100 KB/s.
   oscillates, and a torrent slower than one piece per window reads 0 until its
   first piece lands.
 
+- A packed `values` string in a `get_peers` response is no longer mistaken for an
+  IPv6 peer. **18 is a multiple of 6**, so a string carrying three compact IPv4
+  peers has exactly the size of one compact IPv6 peer, and the decoder tested the
+  IPv6 stride first — inventing an IPv6 address out of three IPv4 ones. A phantom
+  endpoint is not harmless: it consumes a dial slot, can never connect, and its
+  failure is recorded against the **IPv6** family, which is what drives the
+  per-family dial throttle — so the guess teaches the engine that IPv6 does not
+  work. BEP 32 runs the IPv6 DHT as a separate DHT, which makes the transport the
+  authority: the family the response arrived on now decides, and length remains
+  the tie-breaker only where that family's own unit does not divide the string.
 - A disk error while serving a BEP 52 hash request returns an error instead of
   raising. `Merkle.leaf_range_response_from_disk/7` documents
   `{:error, term()}` and handles a failed `:file.open/2` that way, but the

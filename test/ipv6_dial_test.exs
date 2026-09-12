@@ -107,6 +107,57 @@ defmodule IPv6DialTest do
       assert length(peers) == 2
       assert Enum.all?(peers, fn %Peer{ip: ip} -> tuple_size(ip) == 8 end)
     end
+
+    # 18 is a multiple of 6, so a `values` string packing three IPv4 peers has
+    # exactly the size of one IPv6 peer. Length alone cannot tell them apart; BEP 32
+    # runs the IPv6 DHT as a separate DHT, so the transport the answer arrived on is
+    # the authority.
+    test "a packed 18-byte blob over IPv4 is three IPv4 peers, not one IPv6 peer" do
+      blob =
+        Compact.encode_peer({1, 2, 3, 4}, 6881) <>
+          Compact.encode_peer({5, 6, 7, 8}, 6882) <>
+          Compact.encode_peer({9, 10, 11, 12}, 6883)
+
+      assert byte_size(blob) == 18
+
+      peers = KRPC.response_peers(%{values: [blob]}, :inet)
+
+      assert length(peers) == 3
+      assert Enum.all?(peers, fn %Peer{ip: ip} -> tuple_size(ip) == 4 end)
+      assert %Peer{ip: {9, 10, 11, 12}, port: 6883} in peers
+    end
+
+    test "the same 18-byte blob over IPv6 is one IPv6 peer" do
+      blob =
+        <<0x26, 0x02, 0x00, 0x2D, 0x40, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x42, 0x1A, 0xE1>>
+
+      peers = KRPC.response_peers(%{values: [blob]}, :inet6)
+
+      assert length(peers) == 1
+      assert Enum.all?(peers, fn %Peer{ip: ip} -> tuple_size(ip) == 8 end)
+    end
+
+    test "falls back to length when the family's own unit does not divide the blob" do
+      # A single IPv4 peer answered over the IPv6 DHT: 6 is not a multiple of 18, so
+      # the length has to decide, and it says IPv4.
+      blob = Compact.encode_peer({1, 2, 3, 4}, 6881)
+
+      assert KRPC.response_peers(%{values: [blob]}, :inet6) == [
+               %Peer{ip: {1, 2, 3, 4}, port: 6881}
+             ]
+    end
+
+    test "with no family the old length-only preference for IPv6 is unchanged" do
+      blob =
+        Compact.encode_peer({1, 2, 3, 4}, 6881) <>
+          Compact.encode_peer({5, 6, 7, 8}, 6882) <>
+          Compact.encode_peer({9, 10, 11, 12}, 6883)
+
+      peers = KRPC.response_peers(%{values: [blob]})
+
+      assert length(peers) == 1
+      assert Enum.all?(peers, fn %Peer{ip: ip} -> tuple_size(ip) == 8 end)
+    end
   end
 
   describe "DHT.cap_lookup_peers/2" do
