@@ -11,6 +11,10 @@ defmodule Torrent.Model do
   require Logger
 
   @timeout_detect_the_speed 5 * 1_000
+  # Averaging window for the download readout, and the point past which a torrent
+  # that has not completed a single piece is called stopped — see `download_rate/1`.
+  @rate_window 60 * 1_000
+  @rate_window_max 10 * 60 * 1_000
   # Mid-download resume checkpoint (BEP-adjacent): persist bitfield + counters to
   # `.term` so a restart loads Session.apply/2 and Resume runs :verify_saved on
   # only the pieces we claim — not a blind re-download from peers. Without this,
@@ -166,11 +170,11 @@ defmodule Torrent.Model do
     do: {:noreply, torrent}
 
   @spec handle_info(term(), Torrent.t()) :: {:noreply, Torrent.t()}
-  def handle_info({:detected_the_speed, download, upload}, %Torrent{} = torrent) do
+  def handle_info({:detected_the_speed, _download, upload}, %Torrent{} = torrent) do
     message_for_next_detection(torrent)
 
     speed = %{
-      download: detected_the_speed(torrent.downloaded, download),
+      download: download_rate(torrent),
       upload: detected_the_speed(torrent.uploaded, upload)
     }
 
@@ -220,9 +224,96 @@ defmodule Torrent.Model do
 
   defp do_get(key, torrent), do: Map.get(torrent, key)
 
+  @doc false
+  @spec download_rate_for_test(Torrent.t()) :: number()
+  def download_rate_for_test(torrent), do: download_rate(torrent)
+
   # Kb/s
   defp detected_the_speed(current, old),
     do: (current - old) / @timeout_detect_the_speed
+
+  # Download rate in the same Kb/s units, but averaged over a window long enough to
+  # contain several pieces instead of differenced over the 5 s tick.
+  #
+  # `downloaded` advances only when a whole piece completes and verifies, so a 5 s
+  # difference is quantized to piece size: at 55 KB/s with 1 MiB pieces one lands
+  # every ~19 s, so three ticks in four read exactly 0. That is what reported
+  # 0 B/s for torrents demonstrably progressing (#53b).
+  #
+  # Two narrower fixes were tried live and both failed, which is why the window is
+  # the shape it is:
+  #   * An EMA over the quantized samples. Any time constant short enough to track
+  #     a fast torrent still collapses between a slow torrent's pieces — observed
+  #     decaying to 1e-39 — and one long enough for the slow torrent is uselessly
+  #     laggy for the fast one.
+  #   * Timing each arrival against the previous one. A piece completing inside a
+  #     single tick makes the measured interval ~5 s, which is a real burst rate
+  #     (209 KB/s on a 1 MiB piece) but a bad basis for deciding the torrent has
+  #     stalled, so the readout alternated between the burst and 0.
+  #
+  # Averaging `delta / elapsed` over a fixed @rate_window sidesteps both: the window
+  # spans enough pieces that quantization averages out, and it is the same
+  # measurement used by hand when auditing this node (sum of `left` deltas over
+  # ≥100 s). While a window is still open the last published average is held rather
+  # than a burst rate, clamped by `piece_length / elapsed` — were the torrent still
+  # going that fast, the next piece would already have landed. A torrent that
+  # completes nothing for @rate_window_max is called stopped; that is generous on
+  # purpose, since a genuinely slow torrent can need minutes per piece.
+  defp download_rate(%Torrent{} = torrent) do
+    now = System.monotonic_time(:millisecond)
+    key = progress_key(torrent)
+    {start_at, start_downloaded} = rate_window(key, now, torrent.downloaded)
+    elapsed = max(now - start_at, 1)
+    delta = torrent.downloaded - start_downloaded
+
+    case rate_verdict(torrent, delta, elapsed) do
+      {:publish, rate} ->
+        Process.put(key, {now, torrent.downloaded})
+        rate
+
+      :hold ->
+        torrent.speed.download
+
+      {:ceiling, ceiling} ->
+        min(torrent.speed.download, ceiling)
+    end
+  end
+
+  defp rate_verdict(%Torrent{left: 0}, _delta, _elapsed), do: {:publish, 0.0}
+
+  defp rate_verdict(_torrent, delta, elapsed) when delta > 0 and elapsed >= @rate_window,
+    do: {:publish, delta / elapsed}
+
+  # Bytes have landed inside this window, so the torrent is demonstrably moving:
+  # hold the last published average until the window matures. Deliberately no
+  # ceiling here — progress is proof, and applying one anyway is what made the
+  # readout sawtooth from a true 100 KB/s down to 11 as the window aged, since the
+  # ceiling is `piece_length / elapsed` and `elapsed` grows all window long.
+  defp rate_verdict(_torrent, delta, _elapsed) when delta > 0, do: :hold
+
+  defp rate_verdict(_torrent, 0, elapsed) when elapsed >= @rate_window_max,
+    do: {:publish, 0.0}
+
+  # Nothing at all has arrived yet. Now the ceiling is meaningful: were the torrent
+  # still running faster than this, the first piece of the window would have landed.
+  defp rate_verdict(torrent, 0, elapsed),
+    do: {:ceiling, do_piece_length(torrent) / elapsed}
+
+  defp progress_key(%Torrent{hash: hash}), do: {:speed_rate_window, hash}
+
+  # The first tick has to open the window, otherwise `elapsed` would be recomputed
+  # from `now` every tick and could never grow.
+  defp rate_window(key, now, downloaded) do
+    case Process.get(key) do
+      nil ->
+        window = {now, downloaded}
+        Process.put(key, window)
+        window
+
+      stored ->
+        stored
+    end
+  end
 
   defp message_for_next_detection(torrent) do
     message = {:detected_the_speed, torrent.downloaded, torrent.uploaded}
