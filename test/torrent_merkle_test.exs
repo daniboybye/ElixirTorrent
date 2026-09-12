@@ -533,6 +533,78 @@ defmodule Torrent.MerkleTest do
       assert Merkle.leaf_range_response_from_disk(path, 1, [hash("x")], @block_size, 1, 2, 0) ==
                {:error, :invalid_index}
     end
+
+    test "returns an error tuple when the file is shorter than the declared length" do
+      # `file_length` comes from a stat taken before the read, so a file truncated
+      # or replaced in between leaves `:file.pread/3` reading past the real EOF.
+      # The function documents `{:error, term()}` and already handles a failed
+      # `:file.open/2` that way; a failed read used to raise `MatchError` out of
+      # the middle instead. `HashServe` catches that and answers `hash_reject`,
+      # which is the right thing on the wire (BEP 52) reached by the wrong path —
+      # and anything else calling this got an exception for a disk condition.
+      blocks = for byte <- [?a, ?b, ?c, ?d], do: :binary.copy(<<byte>>, @block_size)
+      content = IO.iodata_to_binary(blocks)
+      {:ok, tree} = Merkle.build(content)
+      piece_length = 2 * @block_size
+      {:ok, layer_bin} = Merkle.piece_layer(tree, piece_length)
+
+      piece_hashes =
+        for <<digest::binary-size(32) <- layer_bin>> do
+          digest
+        end
+
+      dir = Path.join(System.tmp_dir!(), "merkle_short_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      path = Path.join(dir, "truncated.bin")
+      # Only the first block is actually on disk.
+      File.write!(path, :binary.part(content, 0, @block_size))
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      assert Merkle.leaf_range_response_from_disk(
+               path,
+               byte_size(content),
+               piece_hashes,
+               piece_length,
+               0,
+               4,
+               0
+             ) == {:error, :eof}
+    end
+
+    test "still serves a whole file whose last block is short" do
+      # The guard added alongside the error contract must not disturb the ordinary
+      # ragged-tail case: a final partial block is normal, not a truncated file.
+      full = for byte <- [?a, ?b, ?c, ?d, ?e, ?f, ?g], do: :binary.copy(<<byte>>, @block_size)
+      content = IO.iodata_to_binary(full) <> :binary.copy(<<?h>>, 100)
+      {:ok, tree} = Merkle.build(content)
+      root = Merkle.root(tree)
+      piece_length = 4 * @block_size
+      {:ok, layer_bin} = Merkle.piece_layer(tree, piece_length)
+
+      piece_hashes =
+        for <<digest::binary-size(32) <- layer_bin>> do
+          digest
+        end
+
+      dir = Path.join(System.tmp_dir!(), "merkle_ragged_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      path = Path.join(dir, "ragged.bin")
+      File.write!(path, content)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      assert {:ok, hashes} =
+               Merkle.leaf_range_response_from_disk(
+                 path,
+                 byte_size(content),
+                 piece_hashes,
+                 piece_length,
+                 0,
+                 2,
+                 2
+               )
+
+      assert Merkle.verify_hashes(root, 0, 0, 2, 2, hashes, 8)
+    end
   end
 
   describe "libtorrent flat proof helpers" do
