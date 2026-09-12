@@ -752,7 +752,7 @@ defmodule Tracker do
     rescue
       e in CaseClauseError ->
         if badarg_clause?(e) do
-          %Error{reason: :badarg}
+          badarg_error(url)
         else
           reraise e, __STACKTRACE__
         end
@@ -761,7 +761,30 @@ defmodule Tracker do
         %Error{reason: reason}
 
       :error, :badarg ->
-        %Error{reason: :badarg}
+        badarg_error(url)
+    end
+  end
+
+  # Hackney raises `:badarg` out of its connect path — rather than returning
+  # `:nxdomain` — when the host has no address records at all. The UDP side
+  # resolves up front (`resolve_hosts/1`) and answers `retry_in: "never"`, which
+  # `PeerDiscovery.Announce` uses to drop a dead tracker from the rotation for
+  # the session. The HTTP side hands the URL straight to Hackney, so the same
+  # dead name came back as a bare `:badarg` with no `retry_in` and was
+  # re-announced on every cycle forever. Observed on the defunct
+  # `tracker.openbittorrent.com` (no A and no AAAA record): 6 announces an hour
+  # across 4 torrents, which is exactly what the "never" clause was written to
+  # stop for the rarbg trackers.
+  #
+  # `:badarg` has other possible sources, so confirm the DNS case before writing
+  # the tracker off; anything else keeps the old opaque reason.
+  @spec badarg_error(binary()) :: Error.t()
+  defp badarg_error(url) do
+    with host when is_binary(host) <- URI.parse(url).host,
+         {:error, _} <- resolve_hosts(host) do
+      %Error{reason: {:nxdomain, host}, retry_in: "never"}
+    else
+      _ -> %Error{reason: :badarg}
     end
   end
 
@@ -858,6 +881,10 @@ defmodule Tracker do
   @doc false
   @spec http_hackney_opts_for_test(:inet | :inet6, :inet.ip_address() | nil) :: keyword()
   def http_hackney_opts_for_test(family, ip), do: http_hackney_opts(family, ip)
+
+  @doc false
+  @spec badarg_error_for_test(binary()) :: Error.t()
+  def badarg_error_for_test(url), do: badarg_error(url)
 
   @doc false
   @spec loopback_tracker_for_test(binary()) :: boolean()

@@ -3,6 +3,28 @@ defmodule TrackerHTTPDecodeTest do
 
   alias Tracker.{Error, Response}
 
+  describe "badarg_error_for_test/1 (Hackney raises :badarg for a DNS-dead host)" do
+    test "a host with no address records is written off for the session" do
+      # Hackney raises :badarg instead of returning :nxdomain when the name has
+      # neither an A nor an AAAA record, so without this the defunct tracker was
+      # re-announced every cycle. `retry_in: "never"` is what makes
+      # PeerDiscovery.Announce drop it from the rotation.
+      assert %Error{reason: {:nxdomain, "tracker.invalid"}, retry_in: "never"} =
+               Tracker.badarg_error_for_test("http://tracker.invalid:80/announce")
+    end
+
+    test "a host that does resolve keeps the opaque reason" do
+      # :badarg has other sources than dead DNS; only the DNS case may disable a
+      # tracker permanently.
+      assert %Error{reason: :badarg, retry_in: nil} =
+               Tracker.badarg_error_for_test("http://127.0.0.1:1/announce")
+    end
+
+    test "a url with no host at all is not mistaken for a dead name" do
+      assert %Error{reason: :badarg} = Tracker.badarg_error_for_test("not a url")
+    end
+  end
+
   describe "decode_http_response_for_test/1 (BEP 23 compact + dictionary peers)" do
     test "parses compact IPv4 peers and interval fields" do
       peers_bin = <<1, 2, 3, 4, 6881::16, 5, 6, 7, 8, 8080::16>>
