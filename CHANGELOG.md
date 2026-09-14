@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.7 - 2026-09-12
+## 0.6.7 - 2026-09-14
 
 A measurement release. Every fix here is a case where the engine was doing
 something wrong *and the instruments said it was fine* — a tracker retried
