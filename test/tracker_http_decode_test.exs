@@ -3,7 +3,7 @@ defmodule TrackerHTTPDecodeTest do
 
   alias Tracker.{Error, Response}
 
-  describe "badarg_error_for_test/1 (Hackney raises :badarg for a DNS-dead host)" do
+  describe "badarg_error_for_test (a bare :badarg is never reported as such)" do
     test "a host with no address records is written off for the session" do
       # Hackney raises :badarg instead of returning :nxdomain when the name has
       # neither an A nor an AAAA record, so without this the defunct tracker was
@@ -13,15 +13,31 @@ defmodule TrackerHTTPDecodeTest do
                Tracker.badarg_error_for_test("http://tracker.invalid:80/announce")
     end
 
-    test "a host that does resolve keeps the opaque reason" do
+    test "a host that does resolve is not written off, and the reason names the family" do
       # :badarg has other sources than dead DNS; only the DNS case may disable a
-      # tracker permanently.
-      assert %Error{reason: :badarg, retry_in: nil} =
+      # tracker permanently. The reason carries the family so the log line has
+      # evidence instead of a bare atom.
+      assert %Error{reason: {:connect_badarg, :inet}, retry_in: nil} =
                Tracker.badarg_error_for_test("http://127.0.0.1:1/announce")
+
+      assert %Error{reason: {:connect_badarg, :inet6}, retry_in: nil} =
+               Tracker.badarg_error_for_test("http://127.0.0.1:1/announce", :inet6)
+    end
+
+    test "with a BEP 7 source bound, an unconfirmed :badarg is a family mismatch" do
+      # gen_tcp raises badarg (not einval) when the bound source address family
+      # differs from the dialled address family.
+      assert %Error{reason: {:bind_family_mismatch, :inet6}, retry_in: nil} =
+               Tracker.badarg_error_for_test(
+                 "http://127.0.0.1:1/announce",
+                 :inet6,
+                 {0, 0, 0, 0, 0, 0, 0, 1}
+               )
     end
 
     test "a url with no host at all is not mistaken for a dead name" do
-      assert %Error{reason: :badarg} = Tracker.badarg_error_for_test("not a url")
+      assert %Error{reason: {:connect_badarg, :inet}} =
+               Tracker.badarg_error_for_test("not a url")
     end
   end
 
@@ -637,6 +653,126 @@ defmodule TrackerHTTPDecodeTest do
     end
   end
 
+  describe "odd tracker replies are classified, never a bare :badarg" do
+    # The 2026-10 `tracker.openbittorrent.com` warnings: our own DNS lookup of
+    # the host failed (so we announced on both families), Hackney resolved only
+    # an A record, and the IPv6-bound announce dialled an IPv4 address.
+    # gen_tcp:connect/3 exits with `badarg` for a source/destination family
+    # mismatch, which HTTPoison surfaced as `{:error, %HTTPoison.Error{reason:
+    # :badarg}}`: a path the earlier DNS-dead fix did not cover.
+    test "an IPv6-bound announce to an IPv4 tracker address is a family mismatch" do
+      {port, _pid} = start_http_tracker(fn _req -> {200, "d8:intervali60ee"} end)
+
+      assert %Error{reason: {:bind_family_mismatch, :inet6}, retry_in: nil} =
+               Tracker.http_announce_for_test(
+                 "http://127.0.0.1:#{port}/announce",
+                 :inet6,
+                 {0, 0, 0, 0, 0, 0, 0, 1},
+                 http_timeout_ms: 5_000
+               )
+    end
+
+    test "the mismatch is an expected, debug-level failure" do
+      assert PeerDiscovery.Announce.expected_tracker_failure_reason?(
+               {:bind_family_mismatch, :inet6}
+             )
+    end
+
+    test "merge never lets the family-mismatch artefact mask the real error" do
+      mismatch = %Error{reason: {:bind_family_mismatch, :inet6}}
+      real = %Error{reason: {:http_status, 403}}
+
+      # The IPv6 result is prepended last, so it is first in the list.
+      assert %Error{reason: {:http_status, 403}} =
+               Tracker.merge_http_announces_for_test([mismatch, real])
+
+      # ...and with only the artefact available it is still reported.
+      assert %Error{reason: {:bind_family_mismatch, :inet6}} =
+               Tracker.merge_http_announces_for_test([mismatch])
+    end
+
+    test "an HTML 403 from a WAF is an http_status error" do
+      {port, _pid} =
+        start_http_tracker(fn _req ->
+          {403, "<html><body><h1>403 Forbidden</h1></body></html>",
+           [{"content-type", "text/html"}]}
+        end)
+
+      assert %Error{reason: {:http_status, 403}} = announce_loopback(port)
+    end
+
+    test "a redirect is an http_status error, not followed blindly" do
+      {port, _pid} =
+        start_http_tracker(fn _req ->
+          {301, "", [{"location", "https://tracker.example.invalid/announce"}]}
+        end)
+
+      assert %Error{reason: {:http_status, 301}} = announce_loopback(port)
+    end
+
+    test "a 200 HTML page is a permanent non-bencoded error" do
+      {port, _pid} = start_http_tracker(fn _req -> {200, "<html>welcome</html>"} end)
+
+      assert %Error{reason: :non_bencoded_response, retry_in: "never"} =
+               announce_loopback(port)
+    end
+
+    test "a gzip-compressed bencoded body is decompressed" do
+      body =
+        %{"interval" => 90, "peers" => <<1, 2, 3, 4, 6881::16>>}
+        |> Bento.encode!()
+        |> :zlib.gzip()
+
+      {port, _pid} = start_http_tracker(fn _req -> {200, body} end)
+
+      assert %Response{interval: 90, peers: [%Peer{ip: {1, 2, 3, 4}, port: 6881}]} =
+               announce_loopback(port)
+    end
+
+    test "a bencoded value that is not a dictionary carries evidence" do
+      for {body, kind} <- [{"i5e", "an integer"}, {"le", "a list"}, {"3:abc", "a string"}] do
+        {port, _pid} = start_http_tracker(fn _req -> {200, body} end)
+
+        assert %Error{reason: {:bad_response, message}} = announce_loopback(port)
+        assert message =~ kind
+      end
+    end
+
+    test "a truncated body (Content-Length larger than what was sent) is classified" do
+      port =
+        start_raw_tracker(
+          "HTTP/1.1 200 OK\r\nContent-Length: 500\r\nConnection: close\r\n\r\nd8:interval"
+        )
+
+      assert %Error{reason: reason} = announce_loopback(port)
+      refute reason == :badarg
+    end
+
+    test "nonsensical interval and count fields fall back to safe values" do
+      assert %Response{interval: 1800, min_interval: nil, complete: 0, incomplete: 0} =
+               Tracker.decode_http_response_for_test(%{
+                 "interval" => "abc",
+                 "min interval" => -1,
+                 "complete" => "many",
+                 "incomplete" => -3
+               })
+
+      assert %Response{interval: 1800} =
+               Tracker.decode_http_response_for_test(%{"interval" => -5})
+    end
+
+    test "dictionary peers with a bad port are dropped" do
+      peers = [
+        %{"ip" => "203.0.113.1", "port" => "6881"},
+        %{"ip" => "203.0.113.2", "port" => 70_000},
+        %{"ip" => "203.0.113.3", "port" => 6881}
+      ]
+
+      assert %Response{peers: [%Peer{ip: {203, 0, 113, 3}, port: 6881}]} =
+               Tracker.decode_http_response_for_test(%{"interval" => 60, "peers" => peers})
+    end
+  end
+
   describe "resolve_hosts/1 and expected_dns_failure?/1" do
     test "resolve_hosts returns localhost addresses without DNS" do
       assert {:ok, hosts} = Tracker.resolve_hosts("localhost")
@@ -649,6 +785,33 @@ defmodule TrackerHTTPDecodeTest do
       assert Tracker.expected_dns_failure?({:nxdomain, ~c"dead.example"})
       refute Tracker.expected_dns_failure?(:bad_response)
     end
+  end
+
+  defp announce_loopback(port) do
+    Tracker.http_announce_for_test("http://127.0.0.1:#{port}/announce", :inet, nil,
+      http_timeout_ms: 5_000
+    )
+  end
+
+  # Serves one verbatim response (no Content-Length bookkeeping) and then closes,
+  # so a test can send a lying Content-Length.
+  defp start_raw_tracker(raw_response) do
+    {:ok, listen} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, port} = :inet.port(listen)
+
+    pid =
+      spawn(fn ->
+        {:ok, socket} = :gen_tcp.accept(listen)
+        {:ok, _request} = :gen_tcp.recv(socket, 0, 5_000)
+        :ok = :gen_tcp.send(socket, raw_response)
+        :gen_tcp.close(socket)
+        :gen_tcp.close(listen)
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    port
   end
 
   defp start_http_tracker(responder) do

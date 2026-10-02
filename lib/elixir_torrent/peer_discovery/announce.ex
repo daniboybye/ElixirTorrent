@@ -1620,6 +1620,10 @@ defmodule PeerDiscovery.Announce do
 
   def expected_tracker_failure_reason?({:nxdomain, _}), do: true
 
+  # We probed an address family the tracker does not serve (BEP 7 bound source of
+  # one family, destination of the other); the other family carries the answer.
+  def expected_tracker_failure_reason?({:bind_family_mismatch, _family}), do: true
+
   # HTTPoison surfaces hackney's connect timeout as the `gen_statem` call that
   # timed out, not as a bare `:timeout`, so the connect-timeout case this list
   # exists to cover never matched and every one of them warned instead.
