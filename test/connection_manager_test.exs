@@ -555,6 +555,21 @@ defmodule Peer.ConnectionManagerTest do
       ]
     end
 
+    # Connected, choked, and has delivered before: never a snub candidate itself
+    # (not zero-byte, not unchoked) and not "productive" right now either.
+    defp choked_peer(id) do
+      [id: id, age_ms: 130_000, downloaded_bytes: 32_768, bitfield: :none, choke_me: true]
+    end
+
+    # An unchoked seed that holds `in_flight` of our requests and has sent nothing.
+    defp stalled_seed(id, in_flight) do
+      stale_zero_byte_peer(id, @snub_grace_ms + 10_000,
+        bitfield: :all,
+        choke_me: false,
+        in_flight: in_flight
+      )
+    end
+
     defp stale_zero_byte_peer(id, age_ms \\ @snub_grace_ms + 10_000, opts \\ []) do
       idle_ms = Keyword.get(opts, :idle_ms, age_ms)
 
@@ -564,8 +579,15 @@ defmodule Peer.ConnectionManagerTest do
         idle_ms: idle_ms,
         downloaded_bytes: 0,
         bitfield: Keyword.get(opts, :bitfield, :none),
-        choke_me: Keyword.get(opts, :choke_me, true)
+        choke_me: Keyword.get(opts, :choke_me, true),
+        in_flight: Keyword.get(opts, :in_flight, 0)
       ]
+    end
+
+    # Peers that make up the rest of the swarm: productive ones by default.
+    defp snub_filler(connected_count, extra_configs, opts) do
+      filler = Keyword.get(opts, :filler, &productive_peer/1)
+      for i <- 1..(connected_count - length(extra_configs))//1, do: filler.(<<i::160>>)
     end
 
     defp setup_snub_scenario(connected_count, extra_configs, opts \\ []) do
@@ -575,14 +597,7 @@ defmodule Peer.ConnectionManagerTest do
       start_swarm_only(hash)
       model_pid = start_download_model(hash, download_speed)
 
-      filler_count = connected_count - length(extra_configs)
-
-      base =
-        for i <- 1..filler_count do
-          productive_peer(<<i::160>>)
-        end
-
-      add_mock_peers(hash, base ++ extra_configs)
+      add_mock_peers(hash, snub_filler(connected_count, extra_configs, opts) ++ extra_configs)
       assert Torrent.Swarm.count(hash) == connected_count
       manager_pid = start_manager(hash)
 
@@ -723,7 +738,7 @@ defmodule Peer.ConnectionManagerTest do
       assert Peer.whereis(hash, active_id)
     end
 
-    test "does not snub useful seeder with zero downloaded bytes" do
+    test "does not snub a useful seeder we never gave any work (even among productive peers)" do
       seeder_id = <<701::160>>
 
       {hash, manager_pid} =
@@ -741,6 +756,57 @@ defmodule Peer.ConnectionManagerTest do
 
       assert Torrent.Swarm.count(hash) == 20
       assert Peer.whereis(hash, seeder_id)
+    end
+
+    # The seeder exemption exists because on a thin swarm the seed may be the only
+    # source. It is lifted only when other peers are demonstrably delivering AND the
+    # seed is sitting on requests we sent it.
+    test "snubs a silent seed that holds requests when other peers are delivering" do
+      seed_id = <<901::160>>
+      # 19 fillers from productive_peer/1: unchoked, delivered a block 1 s ago.
+      {hash, manager_pid} = setup_snub_scenario(20, [stalled_seed(seed_id, 4)])
+
+      tick(manager_pid)
+
+      assert Torrent.Swarm.count(hash) == 19
+      refute Peer.whereis(hash, seed_id)
+    end
+
+    test "keeps a silent seed that holds requests when too few others are delivering" do
+      seed_id = <<902::160>>
+      # Only 3 productive peers (< @plentiful_productive_sources); the rest are
+      # choked. Losing the seed here could cost real throughput.
+      configs = [stalled_seed(seed_id, 4) | Enum.map(1..3, &productive_peer(<<910 + &1::160>>))]
+
+      {hash, manager_pid} =
+        setup_snub_scenario(20, configs, filler: &choked_peer/1)
+
+      tick(manager_pid)
+
+      assert Torrent.Swarm.count(hash) == 20
+      assert Peer.whereis(hash, seed_id)
+    end
+
+    test "never evicts the sole source: a lone stalled seed among choked peers stays" do
+      seed_id = <<903::160>>
+
+      {hash, manager_pid} =
+        setup_snub_scenario(20, [stalled_seed(seed_id, 4)], filler: &choked_peer/1)
+
+      tick(manager_pid)
+
+      assert Torrent.Swarm.count(hash) == 20
+      assert Peer.whereis(hash, seed_id)
+    end
+
+    test "a stalled seed with nothing in flight is our scheduling's problem, not a snub" do
+      seed_id = <<904::160>>
+      {hash, manager_pid} = setup_snub_scenario(20, [stalled_seed(seed_id, 0)])
+
+      tick(manager_pid)
+
+      assert Torrent.Swarm.count(hash) == 20
+      assert Peer.whereis(hash, seed_id)
     end
 
     test "skips second snub batch within cooldown interval" do
@@ -1035,7 +1101,11 @@ defmodule Peer.ConnectionManagerTest.MockPeer do
           downloaded_bytes: downloaded_bytes,
           bitfield: Keyword.get(opts, :bitfield, :none),
           choke_me: Keyword.get(opts, :choke_me, true),
-          interested: Keyword.get(opts, :interested, false)
+          interested: Keyword.get(opts, :interested, false),
+          requests:
+            MapSet.new(
+              for i <- 1..Keyword.get(opts, :in_flight, 0)//1, do: {0, i * 16_384, 16_384}
+            )
       }
     end)
   end
