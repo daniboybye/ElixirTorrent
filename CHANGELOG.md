@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.6.8 - 2026-10-02
+
+A pipeline release. A log audit of a six-magnet session found that the swarm was
+never the limit: the engine kept its fastest peer idle at every piece boundary,
+let silent peers hold slots and blocks for minutes, and made every magnet wait
+about a minute before its first announce. Most fixes are scheduling and
+bookkeeping, and several of them replace a guess in the log with evidence.
+
+### Fixed
+
+- A magnet no longer waits ~55 s before its first tracker announce. The BEP 3
+  `event=stopped` goodbye for the metadata-fetch phase ran synchronously, in
+  waves of 8 trackers each waiting for its slowest dead one, before the download
+  could start. It is now a supervised background task (bounded per tracker, sent
+  exactly once instead of twice) and `metadata_ok` to first announce takes
+  milliseconds.
+- The first announce of a new torrent no longer returns `nil`. It fired before
+  the torrent's model row existed, `Announce` read the missing reply as
+  `{:unexpected_reply, nil}`, and every tracker of the torrent was benched for
+  five minutes at once. It is now a classified `:model_not_ready` that retries
+  after 5 s and logs at debug.
+- A bare `:badarg` from an HTTP announce is classified. Binding our source
+  address per family (BEP 7) against a host that only has an A record made
+  `gen_tcp` raise `:badarg`; the reason is now `{:bind_family_mismatch, family}`
+  or `{:connect_badarg, family}`, the other family's real answer is no longer
+  masked, gzip bodies are decoded, and a non-dictionary or out-of-range reply
+  becomes `{:bad_response, _}` instead of crashing the request task.
+- A piece that fails SHA-1 verification now carries evidence. Every accepted
+  block is recorded with its sender and CRC, so a failure reports whether the
+  bytes on disk match what the peer sent (`verdict=received`) or not
+  (`verdict=local`, our bug). A peer is blamed only when it was the single
+  contributor, never on a multi-source piece. Endgame no longer overwrites
+  neighbouring blocks with a duplicate that is not exactly our sub-piece.
+- A piece whose last file edge fell exactly one byte before the piece end lost
+  that file from its slice list, so the read returned `:error` and the caller
+  crashed with a badmatch (`FileHandle.files_for_index/4`).
+- A silent uTP peer is dropped after 6 consecutive retransmission timeouts or
+  60 s of silence, instead of holding its slot for 3-5 minutes while the RTO
+  backed off to 60 s. Any inbound packet resets the counter, so a lossy but
+  alive link survives.
+
+### Changed
+
+- Each peer's request window follows its measured download rate (about 3 s of
+  data, between 4 and 64 blocks) instead of a fixed 64. One peer can no longer
+  take a whole piece while others could share it. After a request timeout the
+  peer holds a single request until it delivers, and its blocks go to whoever
+  asks next.
+- A peer that exhausts its pinned piece re-pins to another active piece with
+  unclaimed blocks in the same step and keeps its requests in flight, so the
+  pipeline stays full across piece boundaries. Before, it waited for a new piece
+  to start or for the 2 s reconcile tick, and a fast peer sat idle most of the
+  time.
+- A trickling pin (a few blocks delivered, nothing for 30 s) is released, and a
+  silent seed that holds our requests is snubbed once at least four other peers
+  are delivering. The only working source is never evicted.
+
 ## 0.6.7 - 2026-09-14
 
 A measurement release. Every fix here is a case where the engine was doing
