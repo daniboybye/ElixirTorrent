@@ -771,40 +771,88 @@ defmodule Tracker do
     rescue
       e in CaseClauseError ->
         if badarg_clause?(e) do
-          badarg_error(url)
+          badarg_error(url, family, source)
         else
           reraise e, __STACKTRACE__
         end
     catch
       :exit, reason ->
-        %Error{reason: reason}
+        classify_http_error(reason, url, family, source)
 
       :error, :badarg ->
-        badarg_error(url)
+        badarg_error(url, family, source)
     end
   end
 
-  # Hackney raises `:badarg` out of its connect path — rather than returning
-  # `:nxdomain` — when the host has no address records at all. The UDP side
-  # resolves up front (`resolve_hosts/1`) and answers `retry_in: "never"`, which
-  # `PeerDiscovery.Announce` uses to drop a dead tracker from the rotation for
-  # the session. The HTTP side hands the URL straight to Hackney, so the same
-  # dead name came back as a bare `:badarg` with no `retry_in` and was
-  # re-announced on every cycle forever. Observed on the defunct
-  # `tracker.openbittorrent.com` (no A and no AAAA record): 6 announces an hour
-  # across 4 torrents, which is exactly what the "never" clause was written to
-  # stop for the rarbg trackers.
+  # A bare `:badarg` out of the HTTP client is not a diagnosis, it is the
+  # absence of one: it has reached us through three different doors (a raised
+  # `:error, :badarg`, an `exit(:badarg)` from a connect process, and Hackney's
+  # `{:error, %HTTPoison.Error{reason: :badarg}}`), and the original fix below
+  # only covered the first. Route every door through here so each one yields a
+  # classified reason that says what we believe happened.
+  @spec classify_http_error(term(), binary(), :inet | :inet6, :inet.ip_address() | nil) ::
+          Error.t()
+  defp classify_http_error(:badarg, url, family, source),
+    do: badarg_error(url, family, source)
+
+  defp classify_http_error(reason, _url, _family, _source), do: %Error{reason: reason}
+
+  # Where a bare `:badarg` comes from, in the order we can tell them apart:
   #
-  # `:badarg` has other possible sources, so confirm the DNS case before writing
-  # the tracker off; anything else keeps the old opaque reason.
-  @spec badarg_error(binary()) :: Error.t()
-  defp badarg_error(url) do
+  # 1. The host has no address records at all (the defunct
+  #    `tracker.openbittorrent.com` of 2026-09). The UDP side resolves up front
+  #    (`resolve_hosts/1`) and answers `retry_in: "never"`, which
+  #    `PeerDiscovery.Announce` uses to drop a dead tracker from the rotation
+  #    for the session. The HTTP side hands the URL straight to Hackney, so the
+  #    dead name used to come back as a `:badarg` with no `retry_in` and was
+  #    re-announced every cycle forever. "Dead" needs *two* resolvers to agree:
+  #    ours (`:inet.getaddrs`, via `resolve_hosts/1`) and Hackney's own
+  #    (`:inet_res`, see `hackney_happy.erl`). They are separate code paths over
+  #    separate caches, and against a flaky authoritative server (SERVFAIL on
+  #    AAAA, intermittent on A) they disagree: ours said "nxdomain" for a host
+  #    Hackney then connected to. Writing a live tracker off for the whole
+  #    session on one resolver's bad moment is far worse than one more retry.
+  #
+  # 2. We bound a BEP 7 source address and the family of that address differs
+  #    from the family of the address Hackney actually dialled. `gen_tcp:connect`
+  #    does not return `{:error, :einval}` for that mismatch, it fails with
+  #    `badarg` - e.g. an IPv6 source `{:ip, v6}` on a connect to an IPv4
+  #    tracker address. We bind per *family* but only know which families the
+  #    tracker serves if our own lookup succeeded; when it did not
+  #    (`unresolved_tracker_endpoints/1`) we announce on both and let the
+  #    mismatched one fail. That is harmless - the other family's announce
+  #    carries the result - but it must not be reported as a bare `:badarg`
+  #    that masks the real answer (see `merge_http_announces/1`).
+  #
+  # 3. Anything else: report the family so the log line carries evidence.
+  @spec badarg_error(binary(), :inet | :inet6, :inet.ip_address() | nil) :: Error.t()
+  defp badarg_error(url, family, source) do
     with host when is_binary(host) <- URI.parse(url).host,
-         {:error, _} <- resolve_hosts(host) do
+         {:error, _} <- resolve_hosts(host),
+         true <- client_resolver_finds_nothing?(host) do
       %Error{reason: {:nxdomain, host}, retry_in: "never"}
     else
-      _ -> %Error{reason: :badarg}
+      _ -> unresolved_badarg_error(family, source)
     end
+  end
+
+  @spec unresolved_badarg_error(:inet | :inet6, :inet.ip_address() | nil) :: Error.t()
+  defp unresolved_badarg_error(family, nil), do: %Error{reason: {:connect_badarg, family}}
+
+  defp unresolved_badarg_error(family, _source),
+    do: %Error{reason: {:bind_family_mismatch, family}}
+
+  # Ask the resolver Hackney itself uses (`inet_res`, A and AAAA). Only when it
+  # also finds nothing is the name really dead.
+  @spec client_resolver_finds_nothing?(binary()) :: boolean()
+  defp client_resolver_finds_nothing?(host) do
+    name = String.to_charlist(host)
+
+    Enum.all?([:a, :aaaa], fn type ->
+      match?({:error, _}, :inet_res.getbyname(name, type))
+    end)
+  catch
+    _, _ -> false
   end
 
   @spec announce_http_opts(:inet | :inet6, :inet.ip_address() | nil, request_opts()) :: keyword()
@@ -858,8 +906,14 @@ defmodule Tracker do
     decode_http_error_response(body, code)
   end
 
-  defp decode_http_announce_response({:error, %HTTPoison.Error{reason: reason}}, _, _, _, _) do
-    %Error{reason: reason}
+  defp decode_http_announce_response(
+         {:error, %HTTPoison.Error{reason: reason}},
+         url,
+         family,
+         ip,
+         _http_opts
+       ) do
+    classify_http_error(reason, url, family, ip)
   end
 
   defp decode_http_announce_response(other, _, _, _, _) do
@@ -902,8 +956,21 @@ defmodule Tracker do
   def http_hackney_opts_for_test(family, ip), do: http_hackney_opts(family, ip)
 
   @doc false
-  @spec badarg_error_for_test(binary()) :: Error.t()
-  def badarg_error_for_test(url), do: badarg_error(url)
+  @spec badarg_error_for_test(binary(), :inet | :inet6, :inet.ip_address() | nil) :: Error.t()
+  def badarg_error_for_test(url, family \\ :inet, source \\ nil),
+    do: badarg_error(url, family, source)
+
+  # Test seam: one HTTP announce attempt with an explicit family and BEP 7 source
+  # bind, bypassing the model/route plumbing of `request!/4`.
+  @doc false
+  @spec http_announce_for_test(
+          binary(),
+          :inet | :inet6,
+          :inet.ip_address() | nil,
+          request_opts()
+        ) :: Response.t() | Error.t()
+  def http_announce_for_test(url, family, source, opts \\ []),
+    do: http_announce_bound(url, family, source, opts)
 
   @doc false
   @spec loopback_tracker_for_test(binary()) :: boolean()
@@ -935,6 +1002,7 @@ defmodule Tracker do
         ) :: Response.t() | Error.t()
   defp decode_tracker_body(body, url, family, ip, headers, opts, depth) do
     body
+    |> maybe_gunzip()
     |> Bento.decode!()
     |> decode_http_response()
   rescue
@@ -972,6 +1040,21 @@ defmodule Tracker do
           %Error{reason: :non_bencoded_response, retry_in: "never"}
       end
   end
+
+  # Some HTTP front ends gzip a body we never asked to be compressed (we send no
+  # `Accept-Encoding`, so RFC 9110 says they must not, but a CDN/WAF in front of
+  # an old tracker does it anyway), and Hackney only decompresses on request.
+  # A gzip stream starts with the magic bytes 0x1F 0x8B, which can never begin
+  # a bencoded value (those start with `d`, `l`, `i` or a digit), so the magic
+  # alone is an unambiguous signal and no header parsing is needed.
+  @spec maybe_gunzip(binary()) :: binary()
+  defp maybe_gunzip(<<0x1F, 0x8B, _rest::binary>> = body) do
+    :zlib.gunzip(body)
+  catch
+    _kind, _reason -> body
+  end
+
+  defp maybe_gunzip(body), do: body
 
   @spec header_value(list(), binary()) :: binary() | nil
   defp header_value(headers, key) do
@@ -1043,14 +1126,35 @@ defmodule Tracker do
     peers_v6 = Map.get(map, "peers6", []) |> to_peers_v6()
 
     %Response{
-      interval: Map.get(map, "interval", default_interval()),
-      min_interval: Map.get(map, "min interval"),
-      complete: Map.get(map, "complete", 0),
-      incomplete: Map.get(map, "incomplete", 0),
+      # Tracker data is untrusted: a non-integer or negative interval would crash
+      # (or hammer, as a negative timer) the scheduler downstream, so anything
+      # that is not a non-negative integer falls back to the BEP 3 default.
+      interval: non_neg_int_or(Map.get(map, "interval"), default_interval()),
+      min_interval: non_neg_int_or(Map.get(map, "min interval"), nil),
+      complete: non_neg_int_or(Map.get(map, "complete"), 0),
+      incomplete: non_neg_int_or(Map.get(map, "incomplete"), 0),
       external_ip: valid_external_ip(Map.get(map, "external ip")),
       peers: peers_v4 ++ peers_v6
     }
   end
+
+  # BEP 3: the response is a bencoded *dictionary*. A bare integer, list or
+  # string is bencode but not a tracker reply (typically some unrelated service
+  # answering on that port); say what we got instead of crashing the request
+  # task, which would lose the failure entirely (no log, no retry backoff).
+  defp decode_http_response(other) do
+    %Error{reason: {:bad_response, "bencode top level is #{bencode_kind(other)}, not a dict"}}
+  end
+
+  @spec bencode_kind(term()) :: String.t()
+  defp bencode_kind(term) when is_integer(term), do: "an integer"
+  defp bencode_kind(term) when is_list(term), do: "a list"
+  defp bencode_kind(term) when is_binary(term), do: "a string"
+  defp bencode_kind(_term), do: "an unknown term"
+
+  @spec non_neg_int_or(term(), default) :: non_neg_integer() | default when default: term()
+  defp non_neg_int_or(value, _default) when is_integer(value) and value >= 0, do: value
+  defp non_neg_int_or(_value, default), do: default
 
   @spec decode_http_error_response(binary(), non_neg_integer()) :: Error.t()
   defp decode_http_error_response(body, status_code) do
@@ -1060,6 +1164,9 @@ defmodule Tracker do
       |> decode_http_response()
 
     case result do
+      # A non-2xx status with a body that is not a tracker dictionary: the status
+      # is the better evidence than "bad bencode".
+      %Error{reason: {:bad_response, _}} -> %Error{reason: {:http_status, status_code}}
       %Error{} = error -> error
       _response -> %Error{reason: {:http_status, status_code}}
     end
@@ -1094,10 +1201,18 @@ defmodule Tracker do
         Enum.reduce(oks, nil, fn resp, acc -> merge_resp(acc, resp) end)
 
       [] ->
-        # if both failed, return "best" error (first)
-        List.first(errs) || %Error{reason: :unknown}
+        # If both failed, return the "best" error. A `:bind_family_mismatch` is
+        # only the artefact of probing a family the tracker does not serve (see
+        # `badarg_error/3`); the other family's error is the tracker's real
+        # answer, so never let the artefact mask it.
+        Enum.find(errs, &(not family_mismatch?(&1))) || List.first(errs) ||
+          %Error{reason: :unknown}
     end
   end
+
+  @spec family_mismatch?(Error.t()) :: boolean()
+  defp family_mismatch?(%Error{reason: {:bind_family_mismatch, _family}}), do: true
+  defp family_mismatch?(_error), do: false
 
   @spec merge_resp(Response.t() | nil, Response.t()) :: Response.t()
   defp merge_resp(nil, %Response{} = b), do: b
@@ -1505,24 +1620,20 @@ defmodule Tracker do
   defp to_peers_v6(_), do: []
 
   @spec parse_peer_dicts(list(map())) :: list(Peer.t())
-  defp parse_peer_dicts(list) do
-    Enum.flat_map(list, fn
-      %{"peer id" => id, "port" => port, "ip" => ip} ->
-        case parse_ip(ip) do
-          {:ok, ip_tuple} -> [%Peer{id: id, port: port, ip: ip_tuple}]
-          :error -> []
-        end
+  defp parse_peer_dicts(list), do: Enum.flat_map(list, &parse_peer_dict/1)
 
-      %{"port" => port, "ip" => ip} ->
-        case parse_ip(ip) do
-          {:ok, ip_tuple} -> [%Peer{port: port, ip: ip_tuple}]
-          :error -> []
-        end
-
-      _ ->
-        []
-    end)
+  # BEP 3 dictionary model. The port comes from an untrusted tracker, so it must
+  # be a real TCP port (1..65535) before it can reach the dialer; a string or
+  # out-of-range port drops that one entry rather than the whole response.
+  @spec parse_peer_dict(term()) :: [Peer.t()]
+  defp parse_peer_dict(%{"port" => port, "ip" => ip} = entry) when port in 1..65_535 do
+    case parse_ip(ip) do
+      {:ok, ip_tuple} -> [%Peer{id: Map.get(entry, "peer id"), port: port, ip: ip_tuple}]
+      :error -> []
+    end
   end
+
+  defp parse_peer_dict(_entry), do: []
 
   @spec parse_ip(binary() | :inet.ip_address()) :: {:ok, :inet.ip_address()} | :error
   defp parse_ip(ip) when is_tuple(ip), do: {:ok, ip}
