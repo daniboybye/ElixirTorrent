@@ -23,7 +23,10 @@ defmodule Cycle3TrackerWireCoverageTest do
       hash = :crypto.strong_rand_bytes(20)
       port = start_http_tracker(Bento.encode!(%{"interval" => 1_800, "peers" => <<>>}))
 
-      assert nil == Tracker.request!("http://127.0.0.1:#{port}/announce", hash, :auto)
+      # Classified short-retry error (not `nil`, which Announce reported as
+      # `{:unexpected_reply, nil}`); still nothing is sent to the tracker.
+      assert %Error{reason: :model_not_ready, retry_in: 5} =
+               Tracker.request!("http://127.0.0.1:#{port}/announce", hash, :auto)
     end
 
     test "a UDP tracker whose host does not resolve is never retried" do

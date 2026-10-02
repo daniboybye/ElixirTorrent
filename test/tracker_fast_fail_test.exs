@@ -27,4 +27,17 @@ defmodule TrackerFastFailTest do
     assert match?(%Tracker.Error{}, result)
     assert elapsed < 5_000
   end
+
+  test "request! before the Torrent.Model row exists is a classified short-retry error, not nil" do
+    hash = :crypto.strong_rand_bytes(20)
+    refute Torrent.has_hash?(hash)
+
+    # Nothing is sent on the wire (no counters to put in the announce), so no
+    # network is touched; HTTP and UDP shapes share the same classification.
+    expected = %Tracker.Error{reason: :model_not_ready, retry_in: 5}
+
+    assert expected == Tracker.request!("http://127.0.0.1:1/announce", hash)
+    assert {nil, ^expected} = Tracker.request_with_event!("http://127.0.0.1:1/announce", hash)
+    assert {nil, ^expected} = Tracker.request_with_event!("udp://127.0.0.1:1/announce", hash)
+  end
 end

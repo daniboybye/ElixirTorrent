@@ -159,6 +159,46 @@ defmodule PeerDiscovery.AnnounceCoverageBatchTest do
                  Tracker.default_failure_interval() * 1_000 - 50
     end
 
+    # Regression: a torrent's first announce can race its Torrent.Model row. The
+    # task used to return `{nil, nil}`, which Announce logged as
+    # `{:unexpected_reply, nil}` (warning) and answered with the 5-minute tracker
+    # penalty. It must now be a quiet, short retry.
+    test "model_not_ready task result is a quiet short retry, not unexpected_reply" do
+      ref = make_ref()
+      announce = "http://127.0.0.1:1/model-not-ready"
+      hash = :crypto.strong_rand_bytes(20)
+      refute Torrent.has_hash?(hash)
+
+      state =
+        base_state(
+          hash: hash,
+          requests: %{ref => {announce, 0, 0}},
+          tier_batches: %{0 => 1}
+        )
+
+      # The real task function, so the test follows the producer's actual shape.
+      reply = Tracker.request_with_event!(announce, hash)
+      assert {nil, %Error{reason: :model_not_ready}} = reply
+
+      before = System.monotonic_time(:millisecond)
+
+      log =
+        capture_log([level: :warning], fn ->
+          failed = Announce.dispatch_task_message(state, {ref, reply})
+          send(self(), {:failed, failed})
+        end)
+
+      assert_received {:failed, failed}
+
+      assert log == ""
+      assert failed.requests == %{}
+      refute Announce.tier_batches_active?(failed)
+
+      deadline = failed.retry_after_ms[announce]
+      assert deadline >= before + 5_000 - 50
+      assert deadline < before + 30_000
+    end
+
     test "parallel_tracker_error ignores unknown ref" do
       ref = make_ref()
 
