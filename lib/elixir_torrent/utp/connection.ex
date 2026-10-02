@@ -20,6 +20,34 @@ defmodule UTP.Connection do
   @tick_ms 50
   @idle_timeout_ms 30_000
   @max_idle_probes 3
+
+  # Dead-link detection. uTP (BEP 29) rides on UDP, so there is no kernel
+  # connection state: if the peer vanished (client closed, NAT/CGNAT mapping
+  # expired or rebound to a new port) nothing tells us - UDP just goes silent.
+  # The ONLY signal is our own retransmission timer: "I sent data, nobody
+  # acknowledged it". The RTO doubles on every expiry (exponential back-off,
+  # capped at 60 s), so a naive "give up after N retransmits of one packet"
+  # (the old tx_count >= 10 rule) holds the peer slot for 1+2+4+...+60+60+60
+  # = 3-5 minutes. libutp/libtorrent give up after a handful of consecutive
+  # expiries instead; we do the same with two independent bounds, both
+  # measured over the *same silence* - i.e. they reset the moment ANY valid
+  # inbound packet (ACK, SACK, data, state) arrives, so a lossy / high-RTT
+  # but alive link keeps going:
+  #
+  #   * @max_consecutive_timeouts - RTO expiries in a row with nothing heard.
+  #     6 expiries = 31.5 s at the minimum RTO (500 ms), ~63 s at 1 s.
+  #   * @max_silence_ms - wall-clock cap, measured from the first expiry of
+  #     the streak, so a path with a large RTO (where 6 expiries would stretch
+  #     to several minutes) is still bounded to about RTO + 60 s.
+  #
+  # Both apply only while we have unacked data in flight: an idle connection
+  # with nothing to send has nothing to time out (BEP 29 keep-alive semantics
+  # are unchanged; see check_idle_timeout/2 for the zero-window/FIN-wait probe
+  # path). The give-up reuses shutdown/2, which notifies the owner
+  # ({:utp_closed, ref} -> Peer.Sender stops -> the controller releases the
+  # peer's requested blocks and the swarm slot is freed).
+  @max_consecutive_timeouts 6
+  @max_silence_ms 60_000
   # After shutdown we linger briefly so any final ACK for a FIN we sent can
   # arrive before we exit, then stop the process. Without this, shutdown/2 only
   # flipped a flag and left the GenServer running forever, ticking every 50ms.
@@ -58,7 +86,13 @@ defmodule UTP.Connection do
     pending_send: <<>>,
     recv_waiters: [],
     timer_ref: nil,
-    activity: %{last_send_ms: 0, last_recv_ms: 0, idle_probe_count: 0},
+    # silent_since_ms: monotonic ms of the first RTO expiry of the current
+    # silent streak, nil while the peer is being heard. Together with
+    # timeout_count it bounds how long a dead link may keep its slot (see
+    # @max_silence_ms). Kept inside `activity` (read with Map.get, written with
+    # Map.put) rather than as its own field: the struct is already at credo's
+    # 36-field limit and this is liveness bookkeeping like the other keys.
+    activity: %{last_send_ms: 0, last_recv_ms: 0, idle_probe_count: 0, silent_since_ms: nil},
     fin_sent: false,
     closed: false,
     accept_notified: false
@@ -324,11 +358,16 @@ defmodule UTP.Connection do
       %{
         state
         | reply_micro: reply_micro,
-          activity: %{
+          activity:
             state.activity
-            | last_recv_ms: now_ms(),
-              idle_probe_count: 0
-          },
+            |> Map.merge(%{last_recv_ms: now_ms(), idle_probe_count: 0, silent_since_ms: nil}),
+          # Any valid packet from the peer proves the path is alive in both
+          # directions, whatever it carries (even a duplicate ACK that frees
+          # no data). End the silent streak so a lossy or high-RTT but live
+          # link is never mistaken for a dead one. (update_rtt only resets
+          # this on an ACK of a never-retransmitted packet, which a lossy
+          # link may not produce for a long time.)
+          timeout_count: 0,
           peer_wnd: header.wnd_size
       }
 
@@ -783,7 +822,7 @@ defmodule UTP.Connection do
     {give_up, timed_out} = scan_unacked_timeouts(state, now)
 
     state
-    |> apply_timeout_scan_result(give_up, timed_out)
+    |> apply_timeout_scan_result(give_up, timed_out, now)
     |> check_idle_timeout(now)
   end
 
@@ -807,7 +846,7 @@ defmodule UTP.Connection do
     end)
   end
 
-  defp apply_timeout_scan_result(state, give_up, timed_out) do
+  defp apply_timeout_scan_result(state, give_up, timed_out, now) do
     case {give_up, timed_out} do
       {seq, _} when not is_nil(seq) ->
         Logger.debug("[utp] give_up seq=#{seq} peer=#{inspect({state.peer_ip, state.peer_port})}")
@@ -815,23 +854,52 @@ defmodule UTP.Connection do
         shutdown(state, :too_many_retransmits)
 
       {_, []} ->
-        state
+        # Nothing newly expired this tick, but the wall-clock silence cap may
+        # still be reached between two (long, back-off-doubled) expiries.
+        if silent_too_long?(state, now), do: give_up_silent(state), else: state
 
       {_, _} ->
-        retransmit_timed_out(state, timed_out)
+        retransmit_timed_out(state, timed_out, now)
     end
   end
 
-  defp retransmit_timed_out(state, timed_out) do
-    state =
+  defp retransmit_timed_out(state, timed_out, now) do
+    state = %{
       state
-      |> Map.put(:timeout_ms, min(state.timeout_ms * 2, 60_000))
-      |> Map.put(:timeout_count, state.timeout_count + 1)
-      |> put_led(LEDBAT.on_timeout(state.led))
+      | timeout_count: state.timeout_count + 1,
+        activity: Map.put(state.activity, :silent_since_ms, silent_since(state) || now)
+    }
 
-    Enum.reduce(timed_out, state, fn seq, acc ->
-      retransmit_unacked_seq(acc, seq)
-    end)
+    if state.timeout_count >= @max_consecutive_timeouts or silent_too_long?(state, now) do
+      give_up_silent(state)
+    else
+      state =
+        state
+        |> Map.put(:timeout_ms, min(state.timeout_ms * 2, 60_000))
+        |> put_led(LEDBAT.on_timeout(state.led))
+
+      Enum.reduce(timed_out, state, fn seq, acc ->
+        retransmit_unacked_seq(acc, seq)
+      end)
+    end
+  end
+
+  defp silent_since(state), do: Map.get(state.activity, :silent_since_ms)
+
+  defp silent_too_long?(state, now) do
+    case silent_since(state) do
+      nil -> false
+      since -> map_size(state.unacked) > 0 and now - since >= @max_silence_ms
+    end
+  end
+
+  defp give_up_silent(state) do
+    Logger.debug(
+      "[utp] utp_timeout peer=#{inspect({state.peer_ip, state.peer_port})} " <>
+        "timeouts=#{state.timeout_count} unacked=#{map_size(state.unacked)}"
+    )
+
+    shutdown(state, :utp_timeout)
   end
 
   defp retransmit_unacked_seq(acc, seq) do
