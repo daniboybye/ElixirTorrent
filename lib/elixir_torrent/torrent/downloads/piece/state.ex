@@ -457,8 +457,10 @@ defmodule Torrent.Downloads.Piece.State do
 
     {list, requests} = Enum.split_with(state.requests, &(&1.peer_id == peer_id))
 
+    # `:timeout` tells the peer controller WHY the blocks are being withdrawn, so
+    # it can stop handing the same peer the same blocks back — see do_reject/3.
     %__MODULE__{state | requests: requests}
-    |> do_reject(list)
+    |> do_reject(list, :timeout)
   end
 
   @spec down(t(), reference()) :: t() | {:abort, t()}
@@ -510,8 +512,8 @@ defmodule Torrent.Downloads.Piece.State do
     end
   end
 
-  @spec do_reject(t(), list(Request.t())) :: t()
-  defp do_reject(state, requests) do
+  @spec do_reject(t(), list(Request.t()), :reject | :timeout) :: t()
+  defp do_reject(state, requests, cause \\ :reject) do
     if not Enum.empty?(requests) and Enum.empty?(state.waiting) and is_nil(state.mode) do
       PiecesStatistic.set(state.hash, state.index, nil)
     end
@@ -521,13 +523,23 @@ defmodule Torrent.Downloads.Piece.State do
       # Timeouts/rejects re-queue blocks locally but must release the peer
       # controller's reqq accounting — otherwise stale MapSet entries block
       # the download pipeline even though this worker no longer tracks them.
-      Peer.cancel(state.hash, peer_id, state.index, begin, length)
+      withdraw_from_peer(cause, state, peer_id, begin, length)
     end)
 
     state
     |> Map.update!(:waiting, &requeue_rejected(&1, state, requests))
     |> restart_stall_timer()
   end
+
+  # A peer's own reject (BEP 6) is a clean answer: it is alive and told us "no", so
+  # it just loses the slot. A timeout is silence for 30 s: the same cleanup, plus a
+  # penalty so the peer is not given the same blocks straight back (a dead peer
+  # otherwise re-took its whole 64-block window every cycle, hostage-style).
+  defp withdraw_from_peer(:timeout, state, peer_id, begin, length),
+    do: Peer.cancel_timed_out(state.hash, peer_id, state.index, begin, length)
+
+  defp withdraw_from_peer(:reject, state, peer_id, begin, length),
+    do: Peer.cancel(state.hash, peer_id, state.index, begin, length)
 
   # Normal mode: rejected/timed-out blocks go back to waiting. Endgame: re-queue
   # only when redundancy on that subpiece dropped below the cap so choked peers

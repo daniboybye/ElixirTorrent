@@ -80,6 +80,16 @@ defmodule Peer.Controller.State do
     # but deliver nothing (libtorrent-style idle-while-unchoked, ~30s).
     last_block_at: 0,
     downloaded_bytes: 0,
+    # How many blocks to keep in flight to this peer — see request_window/2. One
+    # field on purpose (the struct is at credo's field limit):
+    #   bucket_at / cur / prev: sliding-window download-rate estimator (see
+    #     download_rate/2) — two adjacent buckets of @rate_bucket_ms; `bucket_at`
+    #     is when the current bucket began (nil until the first block), `cur` /
+    #     `prev` the bytes received in the current / previous bucket;
+    #   penalty: set when one of this peer's requests timed out, cleared by its
+    #     next block. While set the peer may hold only ONE request (see
+    #     cancel_timed_out/4).
+    pace: %{bucket_at: nil, cur: 0, prev: 0, penalty: false},
     # Monotonic ms when `status` was pinned to the current piece index. Used to
     # release peers stuck choked with zero bytes on one piece (endgame monopoly).
     pinned_at: 0,
@@ -136,6 +146,12 @@ defmodule Peer.Controller.State do
           connected_at: non_neg_integer(),
           last_block_at: non_neg_integer(),
           downloaded_bytes: non_neg_integer(),
+          pace: %{
+            bucket_at: integer() | nil,
+            cur: non_neg_integer(),
+            prev: non_neg_integer(),
+            penalty: boolean()
+          },
           pinned_at: non_neg_integer(),
           pin_downloaded_bytes: non_neg_integer(),
           superseed_piece: Torrent.index() | :all | nil,
@@ -154,6 +170,33 @@ defmodule Peer.Controller.State do
   # far below what mainstream clients accept (they advertise reqq 250-500); when
   # a peer advertises a smaller reqq we honor it instead of overflowing its queue.
   @max_unanswered_requests 64
+  # ...but 64 is a CEILING, not a quota. Handing every peer the full 64 on
+  # unchoke let the first peer to ask take a whole 1 MiB piece regardless of how
+  # fast it was: live, slow uTP seeds delivering 1-2 KB/s each sat on 57-61
+  # blocks for 90+ s (a 30 s timeout cycle re-handed them the same blocks) while
+  # fast peers, with every block of the 12 active pieces already claimed, had
+  # nothing to request and sat idle in 20-38 of 40 snapshots. A queue only has to
+  # cover the bandwidth-delay product — rate x RTT — to keep a peer's pipe full;
+  # anything beyond that is blocks held hostage for nobody's benefit. So the
+  # window follows the measured rate: enough blocks for @request_queue_secs of
+  # data at the peer's current speed (libtorrent's request_queue_time, 3 s),
+  # between @min_request_window and the 64 above. A peer fast enough to need
+  # 64 (>= ~350 KB/s) is unchanged; one at 24 KB/s holds 5, not 64.
+  @request_queue_secs 3
+  # Where an unmeasured peer starts: 64 KiB, i.e. ~430 KB/s at 150 ms RTT, so a
+  # fast peer's first window already measures a rate that justifies growing.
+  @min_request_window 4
+  # Rate estimator bucket length: the estimate averages the last 2-4 s, so a peer
+  # that goes quiet decays to zero within 2 buckets and falls back to the minimum.
+  @rate_bucket_ms 2_000
+  # A peer with a timed-out request may hold exactly one request until it delivers
+  # a block (see cancel_timed_out/4).
+  @penalised_request_window 1
+  # A peer pinned to a piece that is unchoked, holds requests, and has delivered
+  # less than this on the pin AND nothing for @trickle_idle_ms is not "working on"
+  # the piece, it is sitting on it. 256 KiB = a quarter of a 1 MiB piece.
+  @trickle_pin_bytes 262_144
+  @trickle_idle_ms 30_000
   # A withdrawn block stays recognisable for as long as it can plausibly still be
   # in flight: at most one full pipeline per withdrawal, and a peer can be
   # re-pinned before the previous round's answers land, so allow a few rounds.
@@ -234,7 +277,8 @@ defmodule Peer.Controller.State do
           idle_ms: non_neg_integer(),
           useful?: boolean(),
           seeder?: boolean(),
-          choke_me?: boolean()
+          choke_me?: boolean(),
+          in_flight: non_neg_integer()
         }
   def eviction_info(%__MODULE__{} = state) do
     now = System.monotonic_time(:millisecond)
@@ -245,7 +289,11 @@ defmodule Peer.Controller.State do
       idle_ms: max(now - state.last_block_at, 0),
       useful?: useful_for_download?(state),
       seeder?: state.bitfield == :all,
-      choke_me?: state.choke_me
+      choke_me?: state.choke_me,
+      # Blocks we have asked this peer for and not yet received. Lets the snub rule
+      # tell "asked and got nothing" (a stalled peer) from "never asked" (we simply
+      # had no work for it) — only the former is the peer's fault.
+      in_flight: MapSet.size(state.requests) + state.pending_requests
     }
   end
 
@@ -792,6 +840,25 @@ defmodule Peer.Controller.State do
     |> make_request()
   end
 
+  @doc """
+  `cancel/4` for a block whose request timed out in the piece worker.
+
+  The worker re-queues the block, and `cancel/4` then immediately tops the peer's
+  pipeline back up — from the front of the same queue, so the peer that just sat on
+  a block for 30 s was handed it (and the rest of its old window) straight back.
+  Live, the same dead peer re-took 57-61 blocks every cycle while faster peers had
+  nothing to ask for. A timeout is the strongest evidence we get that a peer is not
+  answering, so it is penalised the way libtorrent does: the peer may hold ONE
+  request until it delivers a block (`count_block/2` lifts the penalty). Its other
+  blocks stay with the worker for whoever asks next; one probe request is enough
+  to find out whether the peer is alive without costing the swarm a piece.
+  """
+  @spec cancel_timed_out(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
+  def cancel_timed_out(%__MODULE__{} = state, index, begin, length) do
+    # Penalty first: cancel/4 ends in make_request/1, which must already see it.
+    cancel(%__MODULE__{state | pace: %{state.pace | penalty: true}}, index, begin, length)
+  end
+
   @spec request(t(), Torrent.index(), Torrent.begin(), Torrent.length()) :: t()
   def request(state, index, begin, length) do
     unless member_request?(state, index, begin, length) do
@@ -1276,13 +1343,81 @@ defmodule Peer.Controller.State do
 
   @spec count_block(t(), Torrent.length()) :: t()
   defp count_block(%__MODULE__{} = state, length) do
+    now = System.monotonic_time(:millisecond)
+
     %__MODULE__{
       state
       | rank: state.rank + length,
         downloaded_bytes: state.downloaded_bytes + length,
         pin_downloaded_bytes: state.pin_downloaded_bytes + length,
-        last_block_at: System.monotonic_time(:millisecond)
+        last_block_at: now,
+        # A delivered block proves the peer is alive: lift any timeout penalty
+        # (the rate-based window then takes over, and decays to the minimum if the
+        # peer was only briefly responsive).
+        pace: %{track_rate(state.pace, now, length) | penalty: false}
     }
+  end
+
+  # Adds `bytes` to the current rate bucket, rolling the buckets forward first.
+  @spec track_rate(map(), integer(), non_neg_integer()) :: map()
+  defp track_rate(%{bucket_at: nil} = pace, now, bytes),
+    do: %{pace | bucket_at: now, cur: bytes, prev: 0}
+
+  defp track_rate(pace, now, bytes) do
+    {at, cur, prev} = roll_rate(pace, now)
+    %{pace | bucket_at: at, cur: cur + bytes, prev: prev}
+  end
+
+  # Moves the (at, cur, prev) bucket triple forward to `now`: one bucket elapsed
+  # shifts cur into prev, two or more means the whole window is empty.
+  @spec roll_rate(map(), integer()) :: {integer(), non_neg_integer(), non_neg_integer()}
+  defp roll_rate(%{bucket_at: at, cur: cur, prev: prev}, now) do
+    elapsed = now - at
+
+    cond do
+      elapsed < @rate_bucket_ms -> {at, cur, prev}
+      elapsed < 2 * @rate_bucket_ms -> {at + @rate_bucket_ms, 0, cur}
+      true -> {now, 0, 0}
+    end
+  end
+
+  @doc """
+  Measured download rate from this peer in bytes/second, over the last 2-4 s.
+
+  A sliding window built from two buckets: the whole current bucket plus the
+  not-yet-expired share of the previous one, divided by the bucket length. Needs no
+  timer — it is rolled lazily when read or written — and a peer that stops sending
+  decays to 0 on its own, which a plain "bytes / seconds since connect" would not.
+  """
+  @spec download_rate(t(), integer()) :: non_neg_integer()
+  def download_rate(%__MODULE__{pace: %{bucket_at: nil}}, _now), do: 0
+
+  def download_rate(%__MODULE__{pace: pace}, now) do
+    {at, cur, prev} = roll_rate(pace, now)
+    # `prev` counts only for the part of its bucket still inside the window.
+    prev_share = prev * (@rate_bucket_ms - (now - at)) / @rate_bucket_ms
+    trunc((cur + prev_share) * 1000 / @rate_bucket_ms)
+  end
+
+  @doc """
+  How many blocks we are willing to have in flight to this peer right now.
+
+  Follows the peer's measured rate (see `@request_queue_secs`), is clamped to
+  `@min_request_window..@max_unanswered_requests`, never exceeds the peer's own
+  BEP 10 `reqq`, and collapses to a single request while a timeout penalty stands.
+  """
+  @spec request_window(t(), integer()) :: pos_integer()
+  def request_window(%__MODULE__{} = state, now \\ System.monotonic_time(:millisecond)) do
+    min(adaptive_window(state, now), max_unanswered_requests(state))
+  end
+
+  defp adaptive_window(%__MODULE__{pace: %{penalty: true}}, _now), do: @penalised_request_window
+
+  defp adaptive_window(%__MODULE__{} = state, now) do
+    block = Downloads.Piece.max_length()
+    # ceil(rate * secs / block): the blocks that fit in @request_queue_secs of data.
+    wanted = div(download_rate(state, now) * @request_queue_secs + block - 1, block)
+    min(max(wanted, @min_request_window), @max_unanswered_requests)
   end
 
   # DHT (BEP 5 § BitTorrent Protocol Extension)
@@ -2101,9 +2236,7 @@ defmodule Peer.Controller.State do
   # fill_request_pipeline could queue many blocks before callbacks landed —
   # exceeding BEP 10 reqq and getting requests silently dropped by peers.
   defp full_requests_queue?(state),
-    do:
-      MapSet.size(state.requests) + state.pending_requests >=
-        max_unanswered_requests(state)
+    do: MapSet.size(state.requests) + state.pending_requests >= request_window(state)
 
   @spec increment_pending(t()) :: t()
   defp increment_pending(%__MODULE__{} = state),
@@ -2148,10 +2281,27 @@ defmodule Peer.Controller.State do
   @doc false
   @spec stale_useless_pin?(t()) :: boolean()
   def stale_useless_pin?(%__MODULE__{status: idx} = state) when is_integer(idx) do
-    state.pin_downloaded_bytes == 0 and pin_age_ms(state) >= useless_pin_threshold_ms(state)
+    (state.pin_downloaded_bytes == 0 or trickling_pin?(state)) and
+      pin_age_ms(state) >= useless_pin_threshold_ms(state)
   end
 
   def stale_useless_pin?(_), do: false
+
+  # "Delivered nothing" is too strict a test for sitting on a piece: a peer that
+  # trickles one block and then goes quiet has pin_downloaded_bytes > 0 forever
+  # and was never released. Live: slow seeds held 57-61 blocks for 78-103 s having
+  # delivered 48-224 KiB, the last block 72-96 s earlier. So a pin is also stale
+  # when the peer is unchoked and holding requests, has delivered under
+  # @trickle_pin_bytes on this pin, and has been silent for @trickle_idle_ms.
+  # Releasing it cancels its requests (`interested/2` -> clear_in_flight_requests)
+  # and returns the blocks to the piece for peers that are actually delivering.
+  @spec trickling_pin?(t()) :: boolean()
+  defp trickling_pin?(%__MODULE__{choke_me: true}), do: false
+
+  defp trickling_pin?(%__MODULE__{} = state) do
+    MapSet.size(state.requests) > 0 and state.pin_downloaded_bytes < @trickle_pin_bytes and
+      System.monotonic_time(:millisecond) - state.last_block_at >= @trickle_idle_ms
+  end
 
   @spec useless_pin_threshold_ms(t()) :: non_neg_integer()
   defp useless_pin_threshold_ms(%__MODULE__{choke_me: true} = state),

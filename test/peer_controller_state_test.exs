@@ -418,6 +418,57 @@ defmodule PeerControllerStateTest do
     end
   end
 
+  describe "a trickling pin is released" do
+    # Slow seeds were measured holding 57-61 blocks for 78-103 s after delivering
+    # 48-224 KiB, the last block 72-96 s earlier. They never qualified as "useless"
+    # because pin_downloaded_bytes > 0, so nothing ever took the blocks back.
+    defp trickler(hash, overrides) do
+      now = System.monotonic_time(:millisecond)
+
+      base_state(
+        hash,
+        4,
+        Keyword.merge(
+          [
+            status: 0,
+            choke_me: false,
+            requests: MapSet.new([{0, 0, @piece_len}]),
+            pin_downloaded_bytes: 100_000,
+            pinned_at: now - 90_000,
+            last_block_at: now - 80_000
+          ],
+          overrides
+        )
+      )
+    end
+
+    test "an unchoked peer holding requests that stalled after a trickle is stale" do
+      assert State.stale_useless_pin?(trickler(:crypto.strong_rand_bytes(20), []))
+    end
+
+    test "a peer that delivered recently is left alone" do
+      now = System.monotonic_time(:millisecond)
+      hash = :crypto.strong_rand_bytes(20)
+      refute State.stale_useless_pin?(trickler(hash, last_block_at: now - 2_000))
+    end
+
+    test "a peer that delivered most of a piece is not a trickler even if quiet" do
+      hash = :crypto.strong_rand_bytes(20)
+      refute State.stale_useless_pin?(trickler(hash, pin_downloaded_bytes: 600_000))
+    end
+
+    test "a peer holding no requests has nothing to release" do
+      hash = :crypto.strong_rand_bytes(20)
+      refute State.stale_useless_pin?(trickler(hash, requests: MapSet.new()))
+    end
+
+    test "a young pin gets the full snub threshold before it can be released" do
+      now = System.monotonic_time(:millisecond)
+      hash = :crypto.strong_rand_bytes(20)
+      refute State.stale_useless_pin?(trickler(hash, pinned_at: now - 30_000))
+    end
+  end
+
   describe "reject, cancel, and piece accounting" do
     test "handle_reject clears matching in-flight request" do
       hash = :crypto.strong_rand_bytes(20)
