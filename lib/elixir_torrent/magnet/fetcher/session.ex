@@ -157,15 +157,26 @@ defmodule Magnet.Fetcher.Session do
     hash_hex = Torrent.hex_encoded_hash(state.magnet.hash)
 
     Logger.info("[magnet_fetch] metadata_ok hash=#{hash_hex} round=#{round}")
-    Fetcher.announce_stopped(state.magnet.hash, trackers)
 
     if not private? do
       :ok = Fetcher.announce_dht_for_metadata(state.magnet.hash)
     end
 
+    # The goodbye must not GATE the download. `stopped` only tells the tracker to
+    # drop the temporary fetch-phase announce from its peer list (BEP 3); the real
+    # download's `started` announce is what yields peers. Doing it inline made every
+    # magnet wait for the slowest dead tracker (HTTP ~8 s, UDP black hole up to
+    # 50 s, in waves of 8 trackers) ≈ 55-60 s before the first real announce.
+    #
+    # So dispatch it detached (supervised task, returns immediately) and then hand
+    # off. Dispatching it BEFORE the hand-off keeps the useful ordering on live
+    # trackers (stopped lands in ms, well before the new Announce's `started`, so
+    # the goodbye cannot erase the fresh registration). `announced_trackers` is
+    # cleared so `terminate/2` does not send a second goodbye for the same set.
+    :ok = Fetcher.announce_stopped_async(state.magnet.hash, trackers)
     :ok = Fetcher.on_metadata_ok(state.magnet, path)
     notify_done(state, {:ok, path})
-    {:stop, :normal, state}
+    {:stop, :normal, %{state | announced_trackers: []}}
   end
 
   defp handle_round_result({:error, :info_hash_mismatch}, state) do
@@ -193,9 +204,9 @@ defmodule Magnet.Fetcher.Session do
     kill_round_worker(state)
     Registry.unregister(Registry, {:magnet_fetch, state.magnet.hash})
 
-    if state.announced_trackers != [] do
-      Fetcher.announce_stopped(state.magnet.hash, state.announced_trackers)
-    end
+    # Cancel/expiry/crash path: best-effort goodbye, detached so process exit (and
+    # the supervisor's shutdown timeout) never waits on a dead tracker.
+    :ok = Fetcher.announce_stopped_async(state.magnet.hash, state.announced_trackers)
 
     Magnet.Bootstrap.stop(state.magnet.hash)
     :ok
