@@ -1569,6 +1569,15 @@ defmodule PeerDiscovery.Announce do
   # which asks the *user* to do something ("Please redownload the torrent…")
   # about a torrent it never named.
   @spec log_tracker_failure(Torrent.hash(), String.t(), term()) :: :ok
+  defp log_tracker_failure(hash, announce, :model_not_ready) do
+    # Not a tracker failure: nothing was sent because this torrent's own
+    # counters weren't registered yet. Retried shortly; debug only.
+    Logger.debug(
+      "[tracker_announce] deferred hash=#{Torrent.hex_encoded_hash(hash)} " <>
+        "announce=#{announce} reason=model_not_ready"
+    )
+  end
+
   defp log_tracker_failure(hash, announce, reason) do
     message =
       "[tracker] announce_failed hash=#{Torrent.hex_encoded_hash(hash)} " <>

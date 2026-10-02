@@ -44,6 +44,23 @@ defmodule Tracker do
   @spec default_failure_interval() :: pos_integer()
   def default_failure_interval, do: 5 * 60
 
+  # Seconds to wait before re-announcing after `:model_not_ready` (see
+  # `model_not_ready_error/0`). The torrent's `Torrent.Model` row appears within
+  # milliseconds of start, so a few seconds is enough; the 5-minute failure
+  # interval would bench a perfectly healthy tracker for no reason.
+  @model_not_ready_retry_sec 5
+
+  # The first announce of a torrent can fire before its `Torrent.Model` row (the
+  # uploaded/downloaded/left/event counters every announce must carry — BEP 3 /
+  # BEP 15) exists. Without counters we cannot build a valid request, so we send
+  # nothing on the wire. That is OUR readiness problem, not the tracker's
+  # fault: report it as a classified, short-retry error instead of `nil`, which
+  # Announce used to treat as an "unexpected reply" and answer with a 5-minute
+  # penalty plus a warning for every tracker of the torrent at once.
+  @spec model_not_ready_error() :: Error.t()
+  def model_not_ready_error,
+    do: %Error{reason: :model_not_ready, retry_in: @model_not_ready_retry_sec}
+
   @type request_opts :: [
           max_udp_attempts: 0..8,
           http_timeout_ms: pos_integer()
@@ -72,7 +89,7 @@ defmodule Tracker do
           "[tracker_announce] deferred hash=#{Torrent.hex_encoded_hash(hash)} reason=model_not_ready"
         )
 
-        nil
+        model_not_ready_error()
     end
   end
 
@@ -228,7 +245,7 @@ defmodule Tracker do
 
   @doc false
   @spec request_with_event!(binary(), Torrent.hash(), request_opts()) ::
-          {0..3 | nil, Response.t() | Error.t() | nil}
+          {0..3 | nil, Response.t() | Error.t()}
   def request_with_event!(announce, hash, opts \\ []) do
     case resolve_stats(hash, :auto) do
       {:ok, {uploaded, downloaded, left, event}} ->
@@ -241,8 +258,10 @@ defmodule Tracker do
 
         {event, request!(announce, hash, stats, opts)}
 
+      # No event to report: the model row isn't there yet (see
+      # `model_not_ready_error/0`), so no request went out.
       :skip ->
-        {nil, nil}
+        {nil, model_not_ready_error()}
     end
   end
 
@@ -1188,7 +1207,7 @@ defmodule Tracker do
   defp udp_announce(socket, ip, port, connection_id, hash, stats, family, opts) do
     case resolve_stats(hash, stats) do
       :skip ->
-        %Error{reason: :model_not_ready, retry_in: "short"}
+        model_not_ready_error()
 
       {:ok, announce_stats} ->
         do_udp_announce(socket, ip, port, connection_id, hash, announce_stats, family, opts)
