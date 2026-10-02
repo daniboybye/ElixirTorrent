@@ -46,6 +46,24 @@ defmodule Peer.Controller do
     |> GenServer.cast({:cancel, [index, begin, length]})
   end
 
+  @doc """
+  Like `cancel/5`, for a block whose request timed out in the piece worker: the
+  peer is also penalised to one outstanding request until it delivers a block.
+  See `Peer.Controller.State.cancel_timed_out/4`.
+  """
+  @spec cancel_timed_out(
+          Torrent.hash(),
+          Peer.id(),
+          Torrent.index(),
+          Torrent.begin(),
+          Torrent.length()
+        ) :: :ok
+  def cancel_timed_out(hash, id, index, begin, length) do
+    make_key(hash, id)
+    |> via()
+    |> GenServer.cast({:cancel_timed_out, [index, begin, length]})
+  end
+
   @spec seed(Peer.key()) :: :ok
   def seed(key), do: GenServer.cast(via(key), {:seed, []})
 

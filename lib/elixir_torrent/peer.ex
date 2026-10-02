@@ -126,6 +126,8 @@ defmodule Peer do
 
   defdelegate cancel(hash, id, index, begin, length), to: Controller
 
+  defdelegate cancel_timed_out(hash, id, index, begin, length), to: Controller
+
   defdelegate choke(hash, id), to: Controller
 
   defdelegate unchoke(hash, id), to: Controller

@@ -348,6 +348,227 @@ defmodule PeerRequestPipelineTest do
     end
   end
 
+  describe "request window follows the measured rate" do
+    # Pieces here are 64 blocks and the torrent has 12 of them: Model switches to
+    # endgame (where a block is NOT removed from `waiting` when handed out) once
+    # <= 10 pieces remain, which would hide the quota behaviour under test.
+    #
+    # A fixed 64-block queue let the first peer that asked take a whole 1 MiB piece
+    # whatever its speed. The window now covers ~3 s of the peer's own rate (its
+    # bandwidth-delay product with slack), between 4 and 64 blocks.
+    @mib 1_048_576
+
+    test "an unmeasured peer starts small" do
+      state = base_peer_state(:crypto.strong_rand_bytes(20))
+      assert PeerState.request_window(state, 1_000) == 4
+      assert PeerState.download_rate(state, 1_000) == 0
+    end
+
+    test "the window scales with rate and is capped at the old fixed depth" do
+      now = 10_000
+      at = fn rate -> rate_state(rate, now) end
+
+      # 24 KB/s (the slow-seed case measured live) needs ~5 blocks, not 64.
+      assert PeerState.request_window(at.(24_000), now) == 5
+      # 100 KB/s: 300 KB of data in 3 s = 19 blocks.
+      assert PeerState.request_window(at.(100_000), now) == 19
+      # A fast peer keeps the full pipeline: nothing slower than before.
+      assert PeerState.request_window(at.(@mib), now) == 64
+      assert PeerState.request_window(at.(50 * @mib), now) == 64
+    end
+
+    test "the peer's own reqq still caps the window" do
+      state = rate_state(@mib, 10_000)
+      state = %{state | ltep: %Peer.LTEP.Session{peer: %{reqq: 10}}}
+      assert PeerState.request_window(state, 10_000) == 10
+    end
+
+    test "a peer that goes quiet decays back to the minimum window" do
+      state = rate_state(@mib, 10_000)
+      assert PeerState.request_window(state, 10_000) == 64
+      # Two empty buckets later nothing of the old rate is left.
+      assert PeerState.download_rate(state, 10_000 + 2 * 2_000 + 1) == 0
+      assert PeerState.request_window(state, 10_000 + 2 * 2_000 + 1) == 4
+    end
+
+    test "a stream of delivered blocks grows the window" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, 64 * @piece_len), fn _ ->
+        blocks = for i <- 0..39, do: {0, i * @piece_len, @piece_len}
+
+        state =
+          base_peer_state(hash)
+          |> Map.put(:status, 0)
+          |> Map.put(:requests, MapSet.new(blocks))
+
+        assert PeerState.request_window(state) == 4
+
+        # 40 blocks = 640 KiB land well inside one 2 s bucket (~320 KB/s), which
+        # is enough to want ~60 blocks in flight.
+        grown =
+          Enum.reduce(blocks, state, fn {i, b, l}, st -> PeerState.handle_piece(st, i, b, l) end)
+
+        assert grown.downloaded_bytes == 40 * @piece_len
+        assert PeerState.request_window(grown) > 40
+      end)
+    end
+
+    test "a slow peer cannot take a whole piece; a fast one still can" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 12, 64 * @piece_len)
+
+      with_model(torrent, fn _ ->
+        {:ok, piece_pid} = start_piece_worker(hash, 0)
+        slow_peer = ensure_peer_registered(hash, @peer_a)
+        fast_peer = ensure_peer_registered(hash, @peer_b)
+        Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        on_exit(fn -> stop_piece(piece_pid) end)
+
+        pinned = fn id ->
+          base_peer_state(hash, id)
+          |> Map.put(:status, 0)
+          |> Map.put(:interested, true)
+          |> Map.put(:choke_me, false)
+        end
+
+        slow = PeerState.handle_unchoke(pinned.(@peer_a))
+        assert slow.pending_requests == 4
+        assert length(:sys.get_state(piece_pid).waiting) == 60
+
+        # The fast peer arrives second and still finds the rest of the piece.
+        fast_state = %{pinned.(@peer_b) | pace: pace(now_ms(), 4 * @mib)}
+        fast = PeerState.handle_unchoke(fast_state)
+        assert fast.pending_requests == 60
+        assert :sys.get_state(piece_pid).waiting == []
+
+        drain_request_casts(64)
+        cleanup_workers(piece_pid, slow_peer)
+        stop_piece(fast_peer)
+      end)
+    end
+  end
+
+  describe "a timed-out peer is not handed its blocks back" do
+    test "cancel_timed_out leaves the peer one request, not its old window" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 12, 64 * @piece_len)
+
+      with_model(torrent, fn _ ->
+        {:ok, piece_pid} = start_piece_worker(hash, 0)
+        peer = ensure_peer_registered(hash, @peer_a)
+        Piece.download(piece_pid, fn -> :ok end, fn -> :ok end)
+        on_exit(fn -> stop_piece(piece_pid) end)
+
+        held = for i <- 0..4, do: {0, i * @piece_len, @piece_len}
+        # The piece worker no longer lists the five blocks the peer sat on: they
+        # were re-queued by the timeout, which is the state cancel runs against.
+        :sys.replace_state(piece_pid, fn st ->
+          %{st | waiting: Enum.map(held, fn {_, b, l} -> {b, l} end) ++ st.waiting}
+        end)
+
+        state =
+          base_peer_state(hash, @peer_a)
+          |> Map.put(:status, 0)
+          |> Map.put(:interested, true)
+          |> Map.put(:choke_me, false)
+          |> Map.put(:requests, MapSet.new(held))
+          # A good rate: without the penalty this peer would refill to 64.
+          |> Map.put(:pace, pace(now_ms(), 4 * @mib))
+
+        penalised =
+          Enum.reduce(held, state, fn {i, b, l}, st ->
+            PeerState.cancel_timed_out(st, i, b, l)
+          end)
+
+        assert penalised.pace.penalty
+        assert MapSet.size(penalised.requests) == 0
+        assert penalised.pending_requests == 1
+        assert PeerState.request_window(penalised) == 1
+
+        # Contrast: an ordinary cancel (duplicate in endgame) refills the window.
+        refilled =
+          Enum.reduce(held, state, fn {i, b, l}, st -> PeerState.cancel(st, i, b, l) end)
+
+        assert refilled.pending_requests > 1
+
+        drain_request_casts(1 + refilled.pending_requests)
+        cleanup_workers(piece_pid, peer)
+      end)
+    end
+
+    test "the first block it delivers lifts the penalty" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      state =
+        base_peer_state(hash)
+        |> Map.put(:status, 0)
+        |> Map.put(:pace, %{pace(nil, 0) | penalty: true})
+        |> Map.put(:requests, MapSet.new([{0, 0, @piece_len}]))
+
+      assert PeerState.request_window(state) == 1
+      delivered = PeerState.handle_piece(state, 0, 0, @piece_len)
+      refute delivered.pace.penalty
+      assert PeerState.request_window(delivered) >= 4
+    end
+
+    test "Piece.State.timeout/2 tells the peer controller it was a timeout" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 3)
+      key = Peer.make_key(hash, @peer_a)
+
+      with_model(torrent, fn _ ->
+        {:ok, _pid} = start_mock_controller(hash, @peer_a)
+
+        :sys.replace_state({:via, Registry, {Registry, {key, Peer.Controller}}}, fn state ->
+          %{
+            state
+            | status: 0,
+              requests: MapSet.new([{0, 0, @piece_len}]),
+              interested: true,
+              choke_me: false
+          }
+        end)
+
+        piece_state =
+          State.make({hash, 0})
+          |> State.download(fn -> :ok end, fn -> :ok end)
+          |> Map.put(:waiting, [])
+          |> Map.put(:requests, [
+            %Request{peer_id: @peer_a, subpiece: {0, @piece_len}, timer: nil}
+          ])
+
+        _ = State.timeout(piece_state, @peer_a)
+        sync_controller_requests(key)
+
+        assert :sys.get_state({:via, Registry, {Registry, {key, Peer.Controller}}}).pace.penalty
+      end)
+    end
+
+    test "a peer's own reject is not a timeout and carries no penalty" do
+      hash = :crypto.strong_rand_bytes(20)
+      torrent = sample_torrent(hash, 3)
+      key = Peer.make_key(hash, @peer_a)
+
+      with_model(torrent, fn _ ->
+        {:ok, _pid} = start_mock_controller(hash, @peer_a)
+
+        piece_state =
+          State.make({hash, 0})
+          |> State.download(fn -> :ok end, fn -> :ok end)
+          |> Map.put(:waiting, [])
+          |> Map.put(:requests, [
+            %Request{peer_id: @peer_a, subpiece: {0, @piece_len}, timer: nil}
+          ])
+
+        _ = State.reject(piece_state, @peer_a, 0, @piece_len)
+        sync_controller_requests(key)
+
+        refute :sys.get_state({:via, Registry, {Registry, {key, Peer.Controller}}}).pace.penalty
+      end)
+    end
+  end
+
   describe "piece worker teardown releases peer request slots" do
     test "abnormal terminate clears in-flight requests on peer controller" do
       hash = :crypto.strong_rand_bytes(20)
@@ -419,6 +640,17 @@ defmodule PeerRequestPipelineTest do
       socket: nil
     })
   end
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
+
+  # A peer state whose rate estimator reads `rate` bytes/s at `now`: the whole
+  # current bucket (2 s) holds rate * 2 bytes.
+  defp rate_state(rate, now) do
+    base_peer_state(:crypto.strong_rand_bytes(20))
+    |> Map.put(:pace, pace(now, rate * 2))
+  end
+
+  defp pace(bucket_at, cur), do: %{bucket_at: bucket_at, cur: cur, prev: 0, penalty: false}
 
   defp with_model(torrent, fun) do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
