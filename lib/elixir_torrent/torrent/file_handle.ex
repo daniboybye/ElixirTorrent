@@ -43,6 +43,7 @@ defmodule Torrent.FileHandle do
 
   defdelegate check?(hash, index), to: Piece
   defdelegate check?(hash, index, context), to: Piece
+  defdelegate check_audited(hash, index, digests), to: Piece
 
   defdelegate read(hash, index, begin, length), to: Piece
 

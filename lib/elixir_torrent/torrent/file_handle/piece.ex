@@ -74,6 +74,30 @@ defmodule Torrent.FileHandle.Piece do
     call(hash, index, {:check?, hash, index, context}, 60 * 1_000)
   end
 
+  # `{begin, length, crc32}` — what the downloader says it wrote for one block.
+  @type digest :: {Torrent.begin(), Torrent.length(), non_neg_integer()}
+  # `:zeros` = the block is all zero bytes on disk (it never landed, or was wiped);
+  # `:altered` = something other than what was received is stored there.
+  @type mismatch :: {Torrent.begin(), Torrent.length(), :zeros | :altered}
+
+  @doc """
+  Like `check?/2` (`:download` context), but when the hash FAILS it also says which
+  blocks on disk differ from what the downloader received.
+
+  Why: a failed SHA-1 over 1 MiB cannot tell "a peer sent bad bytes" from "good
+  bytes reached us and we lost or changed them" (a dropped write, a misplaced
+  write). Comparing a per-block CRC taken at receive time with the bytes read back
+  here answers it: no mismatch means the disk holds exactly what the peers sent,
+  so the data was bad on the wire/at the source; a mismatch is OUR fault and must
+  not be blamed on a peer. The comparison runs only on the failure path, on the
+  bytes this very check already read, so a healthy piece pays nothing extra.
+  """
+  @spec check_audited(Torrent.hash(), Torrent.index(), [digest()]) ::
+          true | {false, [mismatch()]}
+  def check_audited(hash, index, digests) do
+    call(hash, index, {:check_audited, hash, index, digests}, 60 * 1_000)
+  end
+
   @spec read(Torrent.hash(), Torrent.index(), Torrent.begin(), Torrent.length()) ::
           {:ok, binary()} | :error
   def read(hash, index, begin, length),
@@ -132,7 +156,8 @@ defmodule Torrent.FileHandle.Piece do
   end
 
   @spec handle_call(term(), GenServer.from(), t()) ::
-          {:reply, :ok | boolean() | {:ok, binary()} | :error, t(), timeout()}
+          {:reply, :ok | boolean() | {false, [mismatch()]} | {:ok, binary()} | :error, t(),
+           timeout()}
   def handle_call(:flush, _, piece) do
     piece = flush_pending_writes(piece)
     {:reply, :ok, piece, @timeout_idle}
@@ -141,6 +166,18 @@ defmodule Torrent.FileHandle.Piece do
   def handle_call({:check?, hash, index, context}, _, piece) do
     piece = flush_pending_writes(piece)
     {:reply, hash_check(hash, index, piece, piece.files, context), piece, @timeout_idle}
+  end
+
+  def handle_call({:check_audited, hash, index, digests}, _, piece) do
+    piece = flush_pending_writes(piece)
+
+    reply =
+      case hash_check(hash, index, piece, piece.files, :download, digests) do
+        {false, mismatches} -> {false, mismatches}
+        {true, _} -> true
+      end
+
+    {:reply, reply, piece, @timeout_idle}
   end
 
   def handle_call({:read, begin, length}, _, piece) do
@@ -332,18 +369,39 @@ defmodule Torrent.FileHandle.Piece do
     end)
   end
 
+  # Boolean for the long-standing callers (`check?`, resume `check/4`).
   defp hash_check(torrent_hash, index, piece, fds, context) do
+    {res, _audit} = hash_check(torrent_hash, index, piece, fds, context, nil)
+    res
+  end
+
+  # `digests` (or nil) is only consulted when the hash fails; then the second
+  # element lists the blocks whose stored bytes differ from what was received.
+  defp hash_check(torrent_hash, index, piece, fds, context, digests) do
     {:ok, block} = do_read(piece.offset, piece.length, fds)
     res = verify_piece_hash(torrent_hash, index, piece, block)
 
     if res do
       handle_hash_check_success(torrent_hash, index, context)
+      {true, []}
     else
+      mismatches = audit_blocks(block, digests)
       handle_hash_check_failure(torrent_hash, index, piece, fds, block, context)
+      {false, mismatches}
     end
-
-    res
   end
+
+  defp audit_blocks(_block, nil), do: []
+
+  defp audit_blocks(block, digests) do
+    for {begin, length, crc} <- digests,
+        stored = binary_slice(block, begin, length),
+        :erlang.crc32(stored) != crc or byte_size(stored) != length do
+      {begin, length, if(all_zero?(stored), do: :zeros, else: :altered)}
+    end
+  end
+
+  defp all_zero?(bin), do: :binary.copy(<<0>>, byte_size(bin)) == bin
 
   defp verify_piece_hash(torrent_hash, index, piece, block) do
     case FileHandle.context(torrent_hash) do

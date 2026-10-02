@@ -265,37 +265,82 @@ defmodule Torrent.Downloads.Piece do
       "[piece_download] hash=#{hash_hex} index=#{state.index} blocks_complete verifying"
     )
 
-    if FileHandle.check?(state.hash, state.index) do
-      Logger.debug("[piece_download] hash=#{hash_hex} index=#{state.index} verified complete")
-      state.downloaded.()
-      {:stop, :normal, state}
-    else
-      Logger.warning("[piece_download] hash=#{hash_hex} index=#{state.index} verify_failed")
-      report_corrupt_source(state, hash_hex)
-      fire_dealt(state)
-      {:stop, {:shutdown, :wrong_subpiece}, state}
+    case FileHandle.check_audited(state.hash, state.index, State.received_digests(state)) do
+      true ->
+        Logger.debug("[piece_download] hash=#{hash_hex} index=#{state.index} verified complete")
+        state.downloaded.()
+        {:stop, :normal, state}
+
+      {false, mismatches} ->
+        report_verify_failure(state, hash_hex, mismatches)
+        fire_dealt(state)
+        {:stop, {:shutdown, :wrong_subpiece}, state}
     end
   end
 
   defp finish_if_complete(state), do: {:noreply, state}
 
-  # A piece that fails its SHA-1 was assembled from bad bytes. When one peer
-  # supplied every block, it is provably the source, so tell its controller —
-  # otherwise nothing stops us re-requesting the same piece from the same peer
-  # forever. With several contributors the failure cannot be attributed and the
-  # piece is simply retried.
-  defp report_corrupt_source(%State{} = state, hash_hex) do
-    case State.sole_contributor(state) do
-      nil ->
-        :ok
+  # A piece that fails its SHA-1 was assembled from bad bytes — but "bad bytes" has
+  # two very different causes, and only one of them is a peer's fault:
+  #
+  #   * `:received` — the disk holds exactly what the peers sent (every block's
+  #     CRC taken at receive time still matches), so the corruption was already in
+  #     the data when it reached us: a peer with a bad store, a poisoner, or a
+  #     middlebox/NAT mangling a UDP (uTP) datagram — uTP has no checksum of its
+  #     own beyond UDP's weak 16-bit one.
+  #   * `:local` — bytes on disk differ from what was received (a block that never
+  #     landed, a misplaced or overwritten write), or a block was never accepted at
+  #     all. The peers delivered correct data and punishing them would be wrong.
+  #
+  # Only in the `:received` case, and only when ONE peer supplied every block, is
+  # that peer a provable culprit (libtorrent likewise attributes per block and
+  # confirms by re-downloading from a single peer before it bans anyone); with
+  # several contributors we cannot tell whose block was bad, so nobody is blamed
+  # and the piece is simply retried. Whatever the verdict, the line below carries
+  # the evidence (who sent how many blocks, duplicates, late replies) so a live
+  # failure can be settled from the log alone.
+  defp report_verify_failure(%State{} = state, hash_hex, mismatches) do
+    verdict = verdict(state, mismatches)
+    culprit = if verdict == :received, do: State.sole_contributor(state)
 
-      peer_id ->
-        Logger.warning(
-          "[piece_download] hash=#{hash_hex} index=#{state.index} corrupt_source peer=#{Peer.log_id(peer_id)}"
-        )
+    Logger.warning(
+      "[piece_download] hash=#{hash_hex} index=#{state.index} verify_failed " <>
+        "verdict=#{verdict} blame=#{blame_label(culprit)} " <>
+        "contributors=#{State.contributors_summary(state)} " <>
+        "blocks=#{map_size(state.blocks)} unaccounted=#{State.unaccounted_blocks(state)} " <>
+        "duplicates=#{state.duplicates} late=#{state.late} " <>
+        "overwritten=#{state.overwritten} malformed=#{state.malformed} " <>
+        "mismatch=#{mismatch_summary(mismatches)}"
+    )
 
-        Peer.Controller.hash_check_failed({peer_id, state.hash}, state.index)
+    if culprit do
+      Logger.warning(
+        "[piece_download] hash=#{hash_hex} index=#{state.index} corrupt_source peer=#{Peer.log_id(culprit)}"
+      )
+
+      Peer.Controller.hash_check_failed({culprit, state.hash}, state.index)
     end
+
+    :ok
+  end
+
+  defp verdict(%State{} = state, mismatches) do
+    if mismatches == [] and State.unaccounted_blocks(state) == 0, do: :received, else: :local
+  end
+
+  defp blame_label(nil), do: "none"
+  defp blame_label(peer_id), do: Peer.log_id(peer_id)
+
+  defp mismatch_summary([]), do: "none"
+
+  defp mismatch_summary(mismatches) do
+    shown =
+      mismatches
+      |> Enum.take(8)
+      |> Enum.map_join(",", fn {begin, _length, kind} -> "#{begin}:#{kind}" end)
+
+    extra = length(mismatches) - 8
+    if extra > 0, do: "#{shown},+#{extra}", else: shown
   end
 
   # Best-effort invocation of the controller's pump-wake closure. It is
