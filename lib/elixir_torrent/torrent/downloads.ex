@@ -45,6 +45,50 @@ defmodule Torrent.Downloads do
 
   defdelegate request(hash, index, peer_id, callback), to: Piece
 
+  @doc """
+  Hand `peer_id` one block from ANY active piece `eligible?` accepts.
+
+  A peer works down one pinned piece, and a piece is small (1 MiB = 64 blocks): a
+  fast peer drains it in well under a second. If the next piece is only chosen by
+  an outside signal (a new piece starting, the 2 s reconcile tick) the peer's
+  request queue falls to zero at every piece boundary and the TCP/uTP pipe sits
+  empty until that signal arrives. A request pipeline only helps while it stays
+  full across boundaries, so the peer must be able to continue on the next piece
+  in the same step, from the blocks nobody has claimed yet. libtorrent's picker
+  does the same: one pick spans pieces up to the peer's desired queue size.
+
+  `eligible?` is evaluated first and locally (no process call): it is where the
+  caller applies what only it knows about the peer (has the piece, not choked for
+  it, not a corrupt source, not the piece that just drained). Candidates are tried
+  in ascending index order so peers converge on the same piece and finish it
+  rather than leaving many half-done; each candidate costs one bounded in-memory
+  `Piece.request/4`, and a piece with nothing to give (`:noop`) or a dead worker
+  (`:error`) just moves on to the next.
+
+  Returns `{:ok, index}` for the piece that accepted (its worker will invoke
+  `callback` with the block) or `:none`. It only ever looks at pieces that are
+  already active, so it can never start a piece and the parallel-piece cap is
+  untouched; the request window is the caller's to enforce before calling.
+  """
+  @spec request_any(
+          Torrent.hash(),
+          Peer.id(),
+          (Torrent.index() -> boolean()),
+          Piece.callback_peer_request()
+        ) :: {:ok, Torrent.index()} | :none
+  def request_any(hash, peer_id, eligible?, callback) when is_function(eligible?, 1) do
+    hash
+    |> active_indices()
+    |> Enum.sort()
+    |> Enum.filter(eligible?)
+    |> Enum.find_value(:none, fn index ->
+      case Piece.request(hash, index, peer_id, callback) do
+        :ok -> {:ok, index}
+        _noop_or_dead -> nil
+      end
+    end)
+  end
+
   defdelegate response(hash, index, peer_id, begin, block), to: Piece
 
   defdelegate reject(hash, index, peer_id, begin, length), to: Piece

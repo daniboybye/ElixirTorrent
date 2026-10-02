@@ -13,6 +13,8 @@ defmodule PeerRequestPipelineTest do
   @piece_len 16_384
   @peer_a <<11::160>>
   @peer_b <<22::160>>
+  @peer_c <<33::160>>
+  @mib 1_048_576
 
   setup do
     {:ok, _} = Application.ensure_all_started(:elixir_torrent)
@@ -356,8 +358,6 @@ defmodule PeerRequestPipelineTest do
     # A fixed 64-block queue let the first peer that asked take a whole 1 MiB piece
     # whatever its speed. The window now covers ~3 s of the peer's own rate (its
     # bandwidth-delay product with slack), between 4 and 64 blocks.
-    @mib 1_048_576
-
     test "an unmeasured peer starts small" do
       state = base_peer_state(:crypto.strong_rand_bytes(20))
       assert PeerState.request_window(state, 1_000) == 4
@@ -569,6 +569,431 @@ defmodule PeerRequestPipelineTest do
     end
   end
 
+  describe "a drained pin continues on another active piece" do
+    # Pieces are 4 blocks here and the torrent has 12, so it is not in endgame
+    # (<= 10 pieces left). Everything runs through the real `Downloads` supervisor
+    # and real piece workers: `request_any/4` only looks at *active* pieces, which
+    # are the supervisor's children.
+    #
+    # Why it matters: a peer works down ONE pinned piece and a piece is small, so a
+    # fast peer reaches its end within a fraction of a second. If the next piece is
+    # only chosen by an outside signal (new piece started / 2 s reconcile), the
+    # request queue drains to zero at every boundary and the pipe sits empty. The
+    # queue has to stay full across the boundary, so the peer continues on its own.
+    @blocks 4
+
+    test "reaching the end of its piece, the peer immediately requests the next one" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        start_active_piece(hash, 0)
+        start_active_piece(hash, 1)
+
+        state = working_peer(hash, @peer_a, 0)
+        after_unchoke = PeerState.handle_unchoke(state)
+
+        # Piece 0 gave its 4 blocks, then :noop, then piece 1 gave 4 more: no outside
+        # signal, one step. The pin followed the work.
+        assert after_unchoke.pending_requests == 2 * @blocks
+        assert after_unchoke.status == 1
+
+        wanted = take_requests(2 * @blocks)
+        assert Enum.frequencies_by(wanted, &elem(&1, 0)) == %{0 => @blocks, 1 => @blocks}
+        assert length(Enum.uniq(wanted)) == 2 * @blocks
+        refute_receive {:"$gen_cast", {:request, _}}, 0
+      end)
+    end
+
+    test "requests already in flight to the old piece are kept and still accepted" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        start_active_piece(hash, 0)
+        start_active_piece(hash, 1)
+
+        crossed = PeerState.handle_unchoke(working_peer(hash, @peer_a, 0))
+        assert crossed.status == 1
+
+        # The piece worker's callbacks land in the controller as `request/4`.
+        in_flight =
+          Enum.reduce(take_requests(2 * @blocks), crossed, fn {i, b, l}, st ->
+            PeerState.request(st, i, b, l)
+          end)
+
+        # Crossing the boundary did NOT cancel piece 0's requests (that is what
+        # interested/2 does when the Swarm moves a peer for good).
+        assert MapSet.size(in_flight.requests) == 2 * @blocks
+        assert Enum.count(in_flight.requests, &(elem(&1, 0) == 0)) == @blocks
+
+        # ...so a block of piece 0 arriving while we are pinned to piece 1 is a
+        # normal answer to our own request, not a protocol violation.
+        delivered = PeerState.handle_piece(in_flight, 0, 0, @piece_len)
+        assert %PeerState{} = delivered
+        assert delivered.downloaded_bytes == @piece_len
+        assert MapSet.size(delivered.requests) == 2 * @blocks - 1
+      end)
+    end
+
+    test "the window is respected across the boundary and refills one block at a time" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        start_active_piece(hash, 0)
+        piece_one = start_active_piece(hash, 1)
+
+        state =
+          working_peer(hash, @peer_a, 0)
+          |> Map.put(:ltep, %Peer.LTEP.Session{peer: %{reqq: 6}})
+
+        crossed = PeerState.handle_unchoke(state)
+
+        # 4 from piece 0 + only 2 from piece 1: the window (6) caps the peer, so
+        # the other two blocks of piece 1 stay free for somebody else.
+        assert crossed.pending_requests == 6
+        assert crossed.status == 1
+        assert length(:sys.get_state(piece_one).waiting) == 2
+
+        in_flight =
+          Enum.reduce(take_requests(6), crossed, fn {i, b, l}, st ->
+            PeerState.request(st, i, b, l)
+          end)
+
+        # Each delivered block frees one slot, refilled from piece 1 — the queue
+        # does not drain at the boundary.
+        one = PeerState.handle_piece(in_flight, 0, 0, @piece_len)
+        assert one.pending_requests == 1
+        assert [{1, _, _}] = take_requests(1)
+
+        two = PeerState.handle_piece(one, 0, @piece_len, @piece_len)
+        assert two.pending_requests == 2
+        assert [{1, _, _}] = take_requests(1)
+        assert :sys.get_state(piece_one).waiting == []
+      end)
+    end
+
+    test "a pin on a dead piece worker is replaced by another active piece" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        start_active_piece(hash, 1)
+
+        # Piece 7 has no worker (it just verified, or died).
+        after_unchoke = PeerState.handle_unchoke(working_peer(hash, @peer_a, 7))
+
+        assert after_unchoke.status == 1
+        assert after_unchoke.pending_requests == @blocks
+        # A cleared pin starts a fresh clock (0 means "never pinned"; monotonic time
+        # may be negative, so test for "set", not for sign).
+        assert after_unchoke.pinned_at != 0
+        assert length(take_requests(@blocks)) == @blocks
+      end)
+    end
+
+    test "the same assignment keeps its pin clock across the boundary" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        start_active_piece(hash, 0)
+        start_active_piece(hash, 1)
+
+        pinned_at = now_ms() - 5_000
+
+        state =
+          working_peer(hash, @peer_a, 0)
+          |> Map.merge(%{pinned_at: pinned_at, pin_downloaded_bytes: 123})
+
+        crossed = PeerState.handle_unchoke(state)
+        assert crossed.status == 1
+        # `stale_useless_pin?/1` measures how long a peer has gone without
+        # delivering; restarting that clock at every boundary would hide a dead one.
+        assert crossed.pinned_at == pinned_at
+        assert crossed.pin_downloaded_bytes == 123
+        take_requests(2 * @blocks)
+      end)
+    end
+
+    test "a peer that lacks the other piece does not move" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        start_active_piece(hash, 0)
+        piece_one = start_active_piece(hash, 1)
+
+        # Only piece 0 is set in this peer's bitfield (12 pieces = 2 bytes).
+        only_zero = working_peer(hash, @peer_a, 0) |> Map.put(:bitfield, <<0b1000_0000, 0>>)
+        after_unchoke = PeerState.handle_unchoke(only_zero)
+
+        assert after_unchoke.status == 0
+        assert after_unchoke.pending_requests == @blocks
+        assert length(:sys.get_state(piece_one).waiting) == @blocks
+        take_requests(@blocks)
+      end)
+    end
+
+    test "a piece this peer served with a bad hash is not picked again" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        start_active_piece(hash, 0)
+        piece_one = start_active_piece(hash, 1)
+        start_active_piece(hash, 2)
+
+        state =
+          working_peer(hash, @peer_a, 0) |> Map.put(:hash_failures, MapSet.new([1]))
+
+        after_unchoke = PeerState.handle_unchoke(state)
+
+        assert after_unchoke.status == 2
+        assert length(:sys.get_state(piece_one).waiting) == @blocks
+        assert Enum.all?(take_requests(2 * @blocks), &(elem(&1, 0) in [0, 2]))
+      end)
+    end
+
+    test "choked: only an allowed-fast piece may be continued on" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        start_active_piece(hash, 0)
+        piece_one = start_active_piece(hash, 1)
+        # Someone else already claimed all of piece 0: it is drained for us.
+        claim_all(hash, 0, @peer_b)
+        take_requests(@blocks)
+
+        choked = fn fast_set ->
+          working_peer(hash, @peer_a, 0)
+          |> Map.merge(%{
+            choke_me: true,
+            fast_extension: %Peer.Controller.FastExtension{allowed_fast_me: fast_set}
+          })
+        end
+
+        # Choked, and piece 1 is not in the allowed-fast set: nothing may be asked.
+        stay = PeerState.cancel(choked.(MapSet.new([0])), 0, 0, @piece_len)
+        assert stay.status == 0
+        assert stay.pending_requests == 0
+        assert length(:sys.get_state(piece_one).waiting) == @blocks
+
+        # BEP 6: the allowed-fast set may be requested while choked.
+        moved = PeerState.cancel(choked.(MapSet.new([0, 1])), 0, 0, @piece_len)
+        assert moved.status == 1
+        assert moved.pending_requests == 1
+        assert [{1, _, _}] = take_requests(1)
+      end)
+    end
+
+    test "fully choked without allowed-fast: no request, no re-pin" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        start_active_piece(hash, 0)
+        piece_one = start_active_piece(hash, 1)
+        claim_all(hash, 0, @peer_b)
+        take_requests(@blocks)
+
+        choked = working_peer(hash, @peer_a, 0) |> Map.put(:choke_me, true)
+        stay = PeerState.cancel(choked, 0, 0, @piece_len)
+
+        assert stay.status == 0
+        assert stay.pending_requests == 0
+        assert length(:sys.get_state(piece_one).waiting) == @blocks
+      end)
+    end
+
+    test "a penalised peer may hold one request, across the boundary too" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        start_active_piece(hash, 0)
+        piece_one = start_active_piece(hash, 1)
+        claim_all(hash, 0, @peer_b)
+        take_requests(@blocks)
+
+        # Its request timed out: queue 1. Its pin (piece 0) has nothing for it.
+        penalised = PeerState.cancel_timed_out(working_peer(hash, @peer_a, 0), 0, 0, @piece_len)
+
+        assert penalised.pace.penalty
+        assert penalised.status == 1
+        assert penalised.pending_requests == 1
+        assert length(:sys.get_state(piece_one).waiting) == @blocks - 1
+
+        # With its one request outstanding it asks for nothing more, anywhere.
+        still = PeerState.cancel(penalised, 0, 0, @piece_len)
+        assert still.pending_requests == 1
+        assert length(:sys.get_state(piece_one).waiting) == @blocks - 1
+        take_requests(1)
+      end)
+    end
+
+    test "peers do not over-claim: each stays within its own window" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        for index <- 0..2, do: start_active_piece(hash, index)
+
+        # An unmeasured peer starts with a window of 4; the fast one is capped by
+        # its reqq at 6. Together they take 10 of the 12 blocks, not all of them.
+        slow = PeerState.handle_unchoke(unmeasured_peer(hash, @peer_a, 0))
+        fast = fast_peer_with_reqq(hash, @peer_b, 0, 6) |> PeerState.handle_unchoke()
+
+        assert slow.pending_requests == 4
+        assert fast.pending_requests == 6
+        assert fast.status == 2
+
+        # A third peer arrives and still finds the rest.
+        late = PeerState.handle_unchoke(unmeasured_peer(hash, @peer_c, 2))
+        assert late.pending_requests == 2
+
+        # All 12 blocks of the 3 pieces were handed out exactly once.
+        wanted = take_requests(12)
+        assert length(Enum.uniq(wanted)) == 12
+        refute_receive {:"$gen_cast", {:request, _}}, 0
+      end)
+    end
+
+    test "endgame is unchanged: a drained pin does not hop to another piece" do
+      hash = :crypto.strong_rand_bytes(20)
+      # left <= 10 pieces' worth of bytes => the torrent is in endgame.
+      torrent = sample_torrent(hash, 12, @blocks * @piece_len, left: 4 * @blocks * @piece_len)
+
+      with_model(torrent, fn _ ->
+        assert Torrent.get(hash, :mode) == :endgame
+        start_downloads(hash)
+        start_active_piece(hash, 0)
+        piece_one = start_active_piece(hash, 1)
+
+        after_unchoke = PeerState.handle_unchoke(working_peer(hash, @peer_a, 0))
+
+        # Endgame workers hold a block in `waiting` until it is delivered, so piece
+        # 0 hands each block once to this peer and then says :noop. The Swarm's
+        # hash-based spreading owns where the peer goes next, not this fast path.
+        assert after_unchoke.status == 0
+        assert after_unchoke.pending_requests == @blocks
+        assert :sys.get_state(piece_one).requests == []
+        take_requests(@blocks)
+      end)
+    end
+
+    test "an empty look is not repeated on every block, but is retried once it ages" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        start_active_piece(hash, 0)
+        claim_all(hash, 0, @peer_b)
+        take_requests(@blocks)
+
+        state = working_peer(hash, @peer_a, 0)
+        missed = PeerState.cancel(state, 0, 0, @piece_len)
+        assert missed.status == 0
+        assert is_integer(missed.pace.scan_at)
+
+        # A piece with work appears right after the empty look.
+        piece_one = start_active_piece(hash, 1)
+
+        throttled = PeerState.cancel(missed, 0, 0, @piece_len)
+        assert throttled.status == 0
+        assert length(:sys.get_state(piece_one).waiting) == @blocks
+
+        aged = put_in(throttled.pace.scan_at, now_ms() - 1_000)
+        moved = PeerState.cancel(aged, 0, 0, @piece_len)
+        assert moved.status == 1
+        assert moved.pending_requests == 1
+        take_requests(1)
+      end)
+    end
+
+    test "Downloads.request_any/4 tries active pieces in index order and skips drained ones" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        for index <- [2, 0, 1], do: start_active_piece(hash, index)
+        ensure_peer_registered(hash, @peer_a)
+        claim_all(hash, 0, @peer_b)
+        take_requests(@blocks)
+
+        # The piece worker invokes the callback, so capture this process first.
+        test_pid = self()
+        callback = fn i, b, l -> send(test_pid, {:asked, i, b, l}) end
+
+        # Piece 0 is drained, so the lowest piece with a block is 1.
+        assert {:ok, 1} = Downloads.request_any(hash, @peer_a, fn _ -> true end, callback)
+        assert_received {:asked, 1, _begin, @piece_len}
+
+        # `eligible?` is applied before any piece is asked.
+        assert {:ok, 2} = Downloads.request_any(hash, @peer_a, &(&1 == 2), callback)
+        assert_received {:asked, 2, _begin, @piece_len}
+
+        assert :none = Downloads.request_any(hash, @peer_a, fn _ -> false end, callback)
+        assert :none = Downloads.request_any(hash, @peer_a, &(&1 == 99), callback)
+        refute_received {:asked, _, _, _}
+      end)
+    end
+
+    test "Downloads.request_any/4 finds nothing when no piece is active" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        assert :none =
+                 Downloads.request_any(hash, @peer_a, fn _ -> true end, fn _, _, _ ->
+                   flunk("no piece is active, nothing may be requested")
+                 end)
+      end)
+    end
+
+    test "through the real controller: unchoke fills the queue across two pieces" do
+      hash = :crypto.strong_rand_bytes(20)
+      key = Peer.make_key(hash, @peer_a)
+      via = {:via, Registry, {Registry, {key, Peer.Controller}}}
+
+      with_model(sample_torrent(hash, 12, @blocks * @piece_len), fn _ ->
+        start_downloads(hash)
+        start_active_piece(hash, 0)
+        start_active_piece(hash, 1)
+        {:ok, _controller} = start_mock_controller(hash, @peer_a)
+
+        :sys.replace_state(via, fn st ->
+          %{
+            st
+            | status: 0,
+              bitfield: :all,
+              interested: true,
+              pieces_count: 12,
+              pace: pace(now_ms(), 4 * @mib)
+          }
+        end)
+
+        Peer.Controller.handle_unchoke(key)
+
+        # The unchoke is handled, and the piece workers' callback casts were sent
+        # while it was; the second sync drains them from the controller's mailbox.
+        TestSupport.Sync.sync(via)
+        state = TestSupport.Sync.sync(via)
+
+        assert state.status == 1
+        assert state.pending_requests == 0
+        assert MapSet.size(state.requests) == 2 * @blocks
+
+        assert state.requests
+               |> MapSet.to_list()
+               |> Enum.map(&elem(&1, 0))
+               |> Enum.uniq()
+               |> Enum.sort() == [0, 1]
+      end)
+    end
+  end
+
   describe "piece worker teardown releases peer request slots" do
     test "abnormal terminate clears in-flight requests on peer controller" do
       hash = :crypto.strong_rand_bytes(20)
@@ -650,7 +1075,8 @@ defmodule PeerRequestPipelineTest do
     |> Map.put(:pace, pace(now, rate * 2))
   end
 
-  defp pace(bucket_at, cur), do: %{bucket_at: bucket_at, cur: cur, prev: 0, penalty: false}
+  defp pace(bucket_at, cur),
+    do: %{bucket_at: bucket_at, cur: cur, prev: 0, penalty: false, scan_at: nil}
 
   defp with_model(torrent, fun) do
     {:ok, model_pid} = Torrent.Model.start_link(torrent)
@@ -680,6 +1106,62 @@ defmodule PeerRequestPipelineTest do
 
   defp sync_controller_requests(key) do
     TestSupport.Sync.sync({:via, Registry, {Registry, {key, Peer.Controller}}})
+  end
+
+  # The real Downloads supervisor for `hash`, so `Downloads.active_indices/1` (the
+  # definition of "active piece" the request fast path uses) sees the workers.
+  defp start_downloads(hash), do: start_supervised!(Downloads.child_spec(hash))
+
+  defp start_active_piece(hash, index) do
+    :ok = Downloads.piece(hash, index, fn -> :ok end, fn -> :ok end)
+    pid = Piece.whereis(hash, index)
+    # Drain the :download cast so the worker has read its mode before any request.
+    TestSupport.Sync.sync(pid)
+    pid
+  end
+
+  # An unchoked, interested peer that has every piece and is pinned to `index`,
+  # downloading fast enough that its window is the full 64 (only reqq limits it).
+  defp working_peer(hash, id, index) do
+    ensure_peer_registered(hash, id)
+
+    base_peer_state(hash, id)
+    |> Map.merge(%{
+      status: index,
+      interested: true,
+      choke_me: false,
+      bitfield: :all,
+      pieces_count: 12,
+      pace: pace(now_ms(), 4 * @mib)
+    })
+  end
+
+  # Same, but never measured: the window starts at the minimum of 4.
+  defp unmeasured_peer(hash, id, index),
+    do: %{working_peer(hash, id, index) | pace: pace(nil, 0)}
+
+  defp fast_peer_with_reqq(hash, id, index, reqq),
+    do: %{working_peer(hash, id, index) | ltep: %Peer.LTEP.Session{peer: %{reqq: reqq}}}
+
+  # `peer_id` takes every unclaimed block of `index`, as another peer that got
+  # there first would. The callbacks land in this test process; callers drain them.
+  defp claim_all(hash, index, peer_id) do
+    ensure_peer_registered(hash, peer_id)
+    pid = self()
+
+    Enum.each(1..@blocks, fn _ ->
+      assert :ok =
+               Downloads.request(hash, index, peer_id, fn i, b, l ->
+                 GenServer.cast(pid, {:request, [i, b, l]})
+               end)
+    end)
+  end
+
+  defp take_requests(count) when count > 0 do
+    for _ <- 1..count do
+      assert_receive {:"$gen_cast", {:request, [index, begin, length]}}, 5_000
+      {index, begin, length}
+    end
   end
 
   defp drain_request_casts(count) when is_integer(count) and count >= 0 do
