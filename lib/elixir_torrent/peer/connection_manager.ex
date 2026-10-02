@@ -46,6 +46,13 @@ defmodule Peer.ConnectionManager do
   # Unchoked but no block data for this long → snub (libtorrent-style). Shorter
   # than @snub_grace_ms so we drop stallers before the wall-clock zero-byte path.
   @idle_unchoked_snub_ms 30_000
+  # A seeder is normally exempt from the snub below (see snub_exempt?/2), because
+  # on a thin swarm it may be the only source we have. That exemption stops being
+  # a kindness once other peers are demonstrably delivering: an unchoked seed that
+  # is sitting on our requests and sending nothing then only occupies a connection
+  # slot and a few blocks. This many OTHER peers must have delivered a block within
+  # the idle window before it applies; below it, the sole/few sources stay safe.
+  @plentiful_productive_sources 4
 
   @spec start_link(Torrent.hash()) :: GenServer.on_start()
   def start_link(hash) do
@@ -486,9 +493,17 @@ defmodule Peer.ConnectionManager do
   end
 
   defp select_snub_eviction_pids(candidates, connected) do
+    productive = productive_source_count(candidates)
+
     candidates
-    |> Enum.filter(&snub_eligible?/1)
+    |> Enum.filter(&snub_eligible?(&1, productive))
     |> Enum.sort_by(fn {_pid, info} -> eviction_sort_key(info) end)
+    |> take_snub_batch(connected)
+  end
+
+  # At most @snub_evict_batch, and never below the micro-swarm floor.
+  defp take_snub_batch(sorted_candidates, connected) do
+    sorted_candidates
     |> Enum.reduce({[], connected}, fn {pid, _info}, {acc, remaining} ->
       if length(acc) < @snub_evict_batch and remaining - 1 >= @low_connected_threshold do
         {[pid | acc], remaining - 1}
@@ -500,14 +515,32 @@ defmodule Peer.ConnectionManager do
     |> Enum.reverse()
   end
 
-  defp snub_eligible?({_pid, info}) do
-    not snub_exempt?(info) and (zero_byte_snub?(info) or idle_unchoked_snub?(info))
+  defp snub_eligible?({_pid, info}, productive) do
+    not snub_exempt?(info, productive) and (zero_byte_snub?(info) or idle_unchoked_snub?(info))
   end
 
   # Seeders with overlapping usefulness (bitfield :all) may show zero downloaded_bytes
   # until the first unchoke/block — snubbing them frees dial slots we need them for.
-  defp snub_exempt?(%{useful?: true, seeder?: true}), do: true
-  defp snub_exempt?(_), do: false
+  #
+  # The exemption is lifted for a seeder that (1) holds requests we sent it
+  # (`in_flight > 0`: it was asked and stayed silent — a seed we never gave work to
+  # is our scheduling's fault, not its) and (2) has at least
+  # @plentiful_productive_sources other peers delivering. `productive` counts only
+  # peers that are NOT themselves snub candidates, so evicting the stalled ones can
+  # never talk the manager into evicting the last working source.
+  defp snub_exempt?(%{useful?: true, seeder?: true} = info, productive) do
+    not (Map.get(info, :in_flight, 0) > 0 and productive >= @plentiful_productive_sources)
+  end
+
+  defp snub_exempt?(_info, _productive), do: false
+
+  # Peers that are unchoked, have delivered bytes, and did so within the idle
+  # window: the ones actually carrying the download.
+  defp productive_source_count(candidates) do
+    Enum.count(candidates, fn {_pid, info} ->
+      not info.choke_me? and info.downloaded_bytes > 0 and info.idle_ms < @idle_unchoked_snub_ms
+    end)
+  end
 
   # Wall-clock zero-byte snub: connected long enough but never delivered.
   defp zero_byte_snub?(info) do
