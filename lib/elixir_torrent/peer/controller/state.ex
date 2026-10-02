@@ -88,13 +88,17 @@ defmodule Peer.Controller.State do
     #     `prev` the bytes received in the current / previous bucket;
     #   penalty: set when one of this peer's requests timed out, cleared by its
     #     next block. While set the peer may hold only ONE request (see
-    #     cancel_timed_out/4).
-    pace: %{bucket_at: nil, cur: 0, prev: 0, penalty: false},
+    #     cancel_timed_out/4);
+    #   scan_at: monotonic ms of the last look at the OTHER active pieces that came
+    #     back empty (see continue_on_other_piece/1), so a peer with nothing to
+    #     request does not re-scan them on every block that arrives.
+    pace: %{bucket_at: nil, cur: 0, prev: 0, penalty: false, scan_at: nil},
     # Monotonic ms when `status` was pinned to the current piece index. Used to
     # release peers stuck choked with zero bytes on one piece (endgame monopoly).
     pinned_at: 0,
-    # Bytes received while pinned to the current `status` index (reset on pin
-    # change). Distinguishes a fresh useless pin from prior progress on another
+    # Bytes received while pinned to the current `status` index (reset when the
+    # Swarm moves the pin; kept when the peer continues on another piece by itself,
+    # see continue_on_other_piece/1). Distinguishes a fresh useless pin from prior progress on another
     # piece still reflected in `downloaded_bytes`.
     pin_downloaded_bytes: 0,
     superseed_piece: nil,
@@ -150,7 +154,8 @@ defmodule Peer.Controller.State do
             bucket_at: integer() | nil,
             cur: non_neg_integer(),
             prev: non_neg_integer(),
-            penalty: boolean()
+            penalty: boolean(),
+            scan_at: integer() | nil
           },
           pinned_at: non_neg_integer(),
           pin_downloaded_bytes: non_neg_integer(),
@@ -197,6 +202,10 @@ defmodule Peer.Controller.State do
   # the piece, it is sitting on it. 256 KiB = a quarter of a 1 MiB piece.
   @trickle_pin_bytes 262_144
   @trickle_idle_ms 30_000
+  # After a look at the other active pieces found nothing for a peer, do not look
+  # again for this long. Each look is one bounded call per candidate piece, and a
+  # peer with nothing to request is woken by every block it receives.
+  @repin_scan_ms 100
   # A withdrawn block stays recognisable for as long as it can plausibly still be
   # in flight: at most one full pipeline per withdrawal, and a peer can be
   # re-pinned before the previous round's answers land, so allow a few rounds.
@@ -1866,23 +1875,115 @@ defmodule Peer.Controller.State do
          ) do
       :error ->
         # Piece worker is gone (verify-fail, timeout, race between our
-        # pin and the worker exiting). Clear the pin so the next
-        # Swarm.interested_for_piece edge (or a fresh :interested cast
-        # from the controller) can re-pin us to a live piece.
+        # pin and the worker exiting). Clear the pin, then carry on with another
+        # active piece if there is one; otherwise the next
+        # Swarm.interested_for_piece edge (or a fresh :interested cast from the
+        # controller) re-pins us to a live piece.
         log_download(state, "request_skip piece_dead index=#{index}", :debug)
-        clear_pin(state)
+
+        state
+        |> clear_pin()
+        |> continue_on_other_piece()
 
       :noop ->
         # Piece alive but nothing to hand out (waiting=[], endgame cap).
         # Do not touch pending_requests — pre-ack cast used to inflate
         # reqq here and false-saturate fill_request_pipeline.
         log_download(state, "request_skip piece_drained index=#{index}", :debug)
-        state
+        continue_on_other_piece(state)
 
       :ok ->
         log_download(state, "request_queued index=#{index}", :debug)
         increment_pending(state)
     end
+  end
+
+  # The piece we are pinned to has nothing more for us — keep the pipeline full by
+  # moving on to another ACTIVE piece, in this same step.
+  #
+  # Pieces are small (1 MiB = 64 blocks), so a fast peer reaches the end of one in
+  # well under a second. Waiting for an outside signal to name the next piece (a
+  # new piece starting, or the 2 s reconcile tick) let its request queue fall to
+  # zero at every boundary: live, a 2 MB/s peer had no pin and nothing in flight in
+  # 70% of snapshots while 5-6 active pieces held ~400 unclaimed blocks. A
+  # request queue only covers the bandwidth-delay product if the next block is
+  # already requested when the last one arrives, so the peer has to be able to
+  # continue across the boundary on its own.
+  #
+  # Deliberately NOT `interested/2`: that cancels every in-flight request because
+  # the Swarm is moving us for good. Here the requests to the piece we leave are
+  # still valid and will arrive; cancelling them would hand their blocks back to
+  # the worker and empty the very pipeline we are trying to keep full. The caller
+  # has already checked the request window, so one request here keeps us within it.
+  #
+  # Skipped in endgame, where the Swarm spreads peers over the remaining pieces by
+  # a stable hash and redundancy caps decide who may ask for what; hopping
+  # between pieces here would fight that. `:none` leaves us exactly where we were
+  # before this existed — waiting for the next piece start or reconcile tick.
+  @spec continue_on_other_piece(t()) :: t()
+  defp continue_on_other_piece(%__MODULE__{} = state) do
+    now = System.monotonic_time(:millisecond)
+
+    if repin_scan_due?(state, now) and not endgame?(state.hash) do
+      scan_other_pieces(state, now)
+    else
+      state
+    end
+  end
+
+  defp scan_other_pieces(%__MODULE__{} = state, now) do
+    pid = self()
+    from = state.status
+
+    result =
+      Downloads.request_any(
+        state.hash,
+        state.id,
+        &repin_candidate?(state, &1, from),
+        &GenServer.cast(pid, {:request, [&1, &2, &3]})
+      )
+
+    case result do
+      {:ok, index} ->
+        log_download(state, "request_repin from=#{inspect(from)} to=#{index}", :debug)
+
+        state
+        |> move_pin(index)
+        |> increment_pending()
+
+      :none ->
+        %__MODULE__{state | pace: %{state.pace | scan_at: now}}
+    end
+  end
+
+  @spec repin_scan_due?(t(), integer()) :: boolean()
+  defp repin_scan_due?(%__MODULE__{pace: %{scan_at: nil}}, _now), do: true
+  defp repin_scan_due?(%__MODULE__{pace: %{scan_at: at}}, now), do: now - at >= @repin_scan_ms
+
+  # The peer-side half of "may we ask this peer for that piece": it must have the
+  # piece, must not be a proven bad source for it, and while it chokes us only the
+  # BEP 6 allowed-fast set may be requested. Window and penalty were enforced by
+  # the caller (`full_requests_queue?/1`), and `Downloads.request_any/4` only
+  # offers pieces that are already active.
+  @spec repin_candidate?(t(), Torrent.index(), Torrent.index() | nil) :: boolean()
+  defp repin_candidate?(%__MODULE__{} = state, index, from) do
+    index != from and has_index?(state, index) and
+      not MapSet.member?(state.hash_failures, index) and
+      (not state.choke_me or FastExtension.download?(state.fast_extension, index))
+  end
+
+  # Same assignment, next piece: keep `pinned_at` / `pin_downloaded_bytes` so the
+  # "useless pin" tests still measure how long the peer has gone without delivering,
+  # instead of restarting that clock at every boundary. A cleared pin starts fresh.
+  @spec move_pin(t(), Torrent.index()) :: t()
+  defp move_pin(%__MODULE__{status: nil} = state, index), do: apply_pin(state, index)
+  defp move_pin(%__MODULE__{} = state, index), do: %{state | status: index}
+
+  @spec endgame?(Torrent.hash()) :: boolean()
+  defp endgame?(hash) do
+    Torrent.get(hash, :mode) == :endgame
+  catch
+    :exit, _ -> false
   end
 
   @spec check_interested(t()) :: t()
