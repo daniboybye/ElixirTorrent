@@ -285,6 +285,95 @@ defmodule Magnet.FetcherDirectSessionTest do
     end
   end
 
+  describe "Fetcher.Session metadata_ok does not wait for the BEP 3 stopped goodbye" do
+    setup do
+      Application.put_env(:elixir_torrent, :magnet_fetcher,
+        max_fetch_lifetime_ms: 86_400_000,
+        round_backoff_base_ms: 30_000
+      )
+
+      on_exit(fn -> flush_mailbox() end)
+      :ok
+    end
+
+    # Regression (live session, 6 magnets): the `event=stopped` goodbye for the
+    # temporary fetch-phase announce ran INLINE before `on_metadata_ok`, so the real
+    # download's first tracker announce waited ~55-60 s for the slowest dead tracker.
+    # The tracker below accepts the connection, reads the request and then never
+    # answers (a black hole) until the test releases it.
+    test "reaches on_metadata_ok while a black-holed tracker still holds the goodbye" do
+      {_, info_blob, hash} = build_multi_piece_info_blob!(pad_bytes: 100)
+      ref = make_ref()
+      path = Magnet.Fetcher.torrent_path(hash)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, Magnet.build_torrent!(session_magnet(hash), info_blob))
+      on_exit(fn -> File.rm(path) end)
+
+      test_pid = self()
+
+      Application.put_env(:elixir_torrent, :metadata_ok_handler, fn mag, written_path ->
+        send(test_pid, {:metadata_ok_handler, mag.hash, written_path})
+        :ok
+      end)
+
+      tasks_before = Task.Supervisor.children(PeerDiscovery.Requests)
+      {port, server} = start_black_hole_tracker!()
+      tracker = "http://127.0.0.1:#{port}/announce"
+      state = base_state(hash: hash, ref: ref, round: 1)
+
+      # Inline goodbye would block here until the client's 8 s HTTP timeout fires.
+      assert {:stop, :normal, final_state} =
+               Session.handle_info({:round_result, {:ok, path, [tracker], false}}, state)
+
+      assert_receive {:metadata_ok_handler, ^hash, ^path}, @timeout
+      assert_receive {:magnet_fetch, ^ref, {:ok, ^path}}, @timeout
+
+      # The goodbye IS sent (exactly one stopped announce to the tracker)...
+      assert_receive {:black_hole_request, ^server, request}, @timeout
+      assert request =~ "event=stopped"
+
+      # ...and was still in flight, i.e. the client had not given up, when the
+      # session had already handed off the download.
+      refute_received {:black_hole_client_closed, ^server}
+
+      # exactly-once: terminate/2 must not repeat the goodbye for the same trackers
+      assert final_state.announced_trackers == []
+      assert :ok = Session.terminate(:normal, final_state)
+      refute_received {:black_hole_request, ^server, _}
+
+      # No leaked process: once the tracker finally hangs up, the detached task ends.
+      [task] = Task.Supervisor.children(PeerDiscovery.Requests) -- tasks_before
+      task_ref = Process.monitor(task)
+      send(server, :release)
+      assert_receive {:DOWN, ^task_ref, :process, ^task, _}, @timeout
+    end
+
+    test "cancel path (terminate/2) sends the goodbye detached and returns immediately" do
+      hash = :crypto.strong_rand_bytes(20)
+      tasks_before = Task.Supervisor.children(PeerDiscovery.Requests)
+      {port, server} = start_black_hole_tracker!()
+      tracker = "http://127.0.0.1:#{port}/announce"
+      state = base_state(hash: hash) |> Map.put(:announced_trackers, [tracker])
+
+      assert :ok = Session.terminate(:normal, state)
+
+      assert_receive {:black_hole_request, ^server, request}, @timeout
+      assert request =~ "event=stopped"
+      refute_received {:black_hole_client_closed, ^server}
+
+      [task] = Task.Supervisor.children(PeerDiscovery.Requests) -- tasks_before
+      task_ref = Process.monitor(task)
+      send(server, :release)
+      assert_receive {:DOWN, ^task_ref, :process, ^task, _}, @timeout
+    end
+
+    test "announce_stopped_async/2 with no trackers spawns nothing" do
+      before = Task.Supervisor.children(PeerDiscovery.Requests)
+      assert :ok = Magnet.Fetcher.announce_stopped_async(:crypto.strong_rand_bytes(20), [])
+      assert Task.Supervisor.children(PeerDiscovery.Requests) == before
+    end
+  end
+
   describe "Fetcher.fetch_metadata_from_peer_for_test pool ordering" do
     test "falls back to later peer when primary open fails" do
       {_, info_blob, hash} = build_multi_piece_info_blob!(pad_bytes: 100)
@@ -536,6 +625,40 @@ defmodule Magnet.FetcherDirectSessionTest do
       round_worker: Keyword.get(opts, :round_worker, nil),
       started_at_ms: Keyword.get(opts, :started_at_ms, System.monotonic_time(:millisecond))
     }
+  end
+
+  # Loopback HTTP tracker that reads the announce request, reports it to the test and
+  # then stays silent (black hole) until `:release`. Reports `:black_hole_client_closed`
+  # if the announcing client gives up first — the signature of an inline, blocking wait.
+  defp start_black_hole_tracker! do
+    test_pid = self()
+
+    {:ok, listen} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, port} = :inet.port(listen)
+
+    {pid, mon} = spawn_monitor(fn -> black_hole_serve(listen, test_pid) end)
+
+    on_exit(fn ->
+      Process.exit(pid, :kill)
+      Process.demonitor(mon, [:flush])
+      :gen_tcp.close(listen)
+    end)
+
+    {port, pid}
+  end
+
+  defp black_hole_serve(listen, test_pid) do
+    {:ok, socket} = :gen_tcp.accept(listen)
+    {:ok, request} = :gen_tcp.recv(socket, 0, @timeout)
+    send(test_pid, {:black_hole_request, self(), request})
+    :ok = :inet.setopts(socket, active: true)
+
+    receive do
+      :release -> :gen_tcp.close(socket)
+      {:tcp_closed, ^socket} -> send(test_pid, {:black_hole_client_closed, self()})
+    end
   end
 
   defp flush_mailbox do

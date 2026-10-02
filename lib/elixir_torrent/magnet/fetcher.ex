@@ -16,6 +16,11 @@ defmodule Magnet.Fetcher do
   @metadata_peer_timeout_ms 40_000
   @tracker_task_timeout_ms 50_000
   @tracker_max_concurrency 8
+  # BEP 3 `event=stopped` goodbye is best-effort housekeeping on the tracker's side, so
+  # it runs detached with its own, tighter bounds: every fetch tracker in parallel and
+  # a short per-tracker cap (a dead tracker must not hold a task for the old 50 s).
+  @goodbye_max_concurrency 32
+  @goodbye_task_timeout_ms 15_000
   @tracker_request_opts [max_udp_attempts: 1, http_timeout_ms: 8_000]
 
   @round_backoff_base_ms 30_000
@@ -331,6 +336,35 @@ defmodule Magnet.Fetcher do
   @doc false
   @spec announce_stopped(Torrent.hash(), [String.t()]) :: :ok
   def announce_stopped(hash, trackers), do: announce_stopped_impl(hash, trackers)
+
+  @doc """
+  Fire-and-forget variant of `announce_stopped/2`: returns `:ok` immediately.
+
+  BEP 3 `event=stopped` only tells a tracker to drop the temporary announce the
+  magnet-fetch phase made; nothing the download needs depends on the answer. The
+  goodbye therefore runs in a task under `PeerDiscovery.Requests` (supervised, so no
+  leaked process and no link to the caller) with its own bounded timeouts, and a
+  hung or dead tracker can neither delay the caller nor crash it.
+  """
+  @spec announce_stopped_async(Torrent.hash(), [String.t()]) :: :ok
+  def announce_stopped_async(_hash, []), do: :ok
+
+  def announce_stopped_async(hash, trackers) do
+    case Task.Supervisor.start_child(PeerDiscovery.Requests, fn ->
+           announce_stopped_impl(
+             hash,
+             trackers,
+             @goodbye_max_concurrency,
+             @goodbye_task_timeout_ms
+           )
+         end) do
+      {:ok, _pid} -> :ok
+      _ -> :ok
+    end
+  catch
+    # Supervisor already gone (application shutdown): the goodbye is optional.
+    :exit, _ -> :ok
+  end
 
   @doc """
   Invoked when metadata has been verified and written to `path`.
@@ -703,19 +737,26 @@ defmodule Magnet.Fetcher do
       []
   end
 
-  @spec announce_stopped_impl(Torrent.hash(), [String.t()]) :: :ok
-  defp announce_stopped_impl(_hash, []), do: :ok
+  @spec announce_stopped_impl(Torrent.hash(), [String.t()], pos_integer(), pos_integer()) :: :ok
+  defp announce_stopped_impl(
+         hash,
+         trackers,
+         concurrency \\ @tracker_max_concurrency,
+         timeout \\ @tracker_task_timeout_ms
+       )
 
-  defp announce_stopped_impl(hash, trackers) do
+  defp announce_stopped_impl(_hash, [], _concurrency, _timeout), do: :ok
+
+  defp announce_stopped_impl(hash, trackers, concurrency, timeout) do
     stats = [uploaded: 0, downloaded: 0, left: 0, event: Torrent.stopped()]
 
     trackers
     |> Enum.uniq()
     |> Task.async_stream(
       fn tracker -> announce_tracker_stopped(tracker, hash, stats) end,
-      max_concurrency: @tracker_max_concurrency,
+      max_concurrency: concurrency,
       ordered: false,
-      timeout: @tracker_task_timeout_ms,
+      timeout: timeout,
       on_timeout: :kill_task
     )
     |> Stream.run()
