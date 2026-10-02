@@ -29,7 +29,24 @@ defmodule Torrent.Downloads.Piece.State do
     # fails its hash check was assembled from bad bytes, and when one peer
     # supplied all of them BEP 3 gives us a provable culprit — see
     # `sole_contributor/1`.
-    contributors: %{}
+    contributors: %{},
+    # Receipt ledger: for every block whose bytes are on disk, WHO sent it and a
+    # CRC-32 of exactly what we handed to `FileHandle.write/4`. A failed SHA-1 only
+    # says "some byte of this 1 MiB is wrong"; this ledger lets the failure path
+    # re-read the piece and tell "the peer sent bad bytes" (disk == ledger) from
+    # "the bytes were fine when they reached us and we lost/changed them" (disk !=
+    # ledger) — see `received_digests/1` and `FileHandle.check_audited/3`.
+    blocks: %{},
+    # Evidence counters for the failure log (never consulted for control flow):
+    #   duplicates  - blocks that arrived for a subpiece already finished/unknown
+    #   late        - blocks accepted from a peer with no live request of its own
+    #                 (our request timed out / was re-assigned, or it was unsolicited)
+    #   overwritten - endgame duplicates that replaced bytes already on disk
+    #   malformed   - endgame blocks whose begin/length are not one of our subpieces
+    duplicates: 0,
+    late: 0,
+    overwritten: 0,
+    malformed: 0
   ]
 
   @type timer :: reference() | nil
@@ -43,7 +60,12 @@ defmodule Torrent.Downloads.Piece.State do
           mode: Piece.mode(),
           monitoring: map(),
           requests: list(Request.t()),
-          contributors: %{optional(Peer.id()) => pos_integer()}
+          contributors: %{optional(Peer.id()) => pos_integer()},
+          blocks: %{optional(Torrent.begin()) => {Peer.id(), Torrent.length(), non_neg_integer()}},
+          duplicates: non_neg_integer(),
+          late: non_neg_integer(),
+          overwritten: non_neg_integer(),
+          malformed: non_neg_integer()
         }
 
   @subpiece_length Piece.max_length()
@@ -238,20 +260,92 @@ defmodule Torrent.Downloads.Piece.State do
     {list, requests} = Enum.split_with(state.requests, &(&1.subpiece == subpiece))
 
     if Enum.empty?(list) and not Enum.member?(state.waiting, subpiece) do
-      handle_untracked_response(state, begin, block)
+      handle_untracked_response(state, peer_id, begin, block)
     else
       handle_tracked_response(state, peer_id, begin, block, subpiece, list, requests, length)
     end
   end
 
-  defp handle_untracked_response(%__MODULE__{} = state, begin, block) do
+  # A block for a subpiece that is neither waiting nor in flight: a late copy of
+  # something we already finished (our request was cancelled / re-assigned and
+  # the peer answered anyway — BEP 3 has no "request withdrawn" ack for a cancel
+  # that crosses the reply on the wire), or one nobody asked for.
+  defp handle_untracked_response(%__MODULE__{} = state, peer_id, begin, block) do
+    state = %__MODULE__{state | duplicates: state.duplicates + 1}
+
     # Endgame: a corrupt block may arrive first and drop the subpiece from
     # `waiting`; accept later duplicates so a good copy can overwrite disk.
+    #
+    # Only a block that is exactly one of OUR subpieces may do that. The
+    # tracked path is safe by construction (it matches `waiting`/`requests`),
+    # but this one accepts "anything in bounds", so a peer answering with a
+    # differently sized block (say 32 KiB at begin 0) would silently clobber the
+    # neighbouring blocks of other peers — and the resulting hash failure would
+    # then be pinned on whoever happened to supply the rest of the piece.
     if state.mode == :endgame do
-      FileHandle.write(state.hash, state.index, begin, block)
+      overwrite_in_endgame(state, peer_id, begin, block)
+    else
+      state
     end
+  end
 
-    state
+  defp overwrite_in_endgame(%__MODULE__{} = state, peer_id, begin, block) do
+    if own_subpiece?(state, begin, byte_size(block)) do
+      FileHandle.write(state.hash, state.index, begin, block)
+      note_overwrite(state, peer_id, begin, block)
+    else
+      %__MODULE__{state | malformed: state.malformed + 1}
+    end
+  end
+
+  # The same bytes again change nothing on disk; different bytes replace what a
+  # previous peer delivered, so the ledger and the credit must follow the disk.
+  defp note_overwrite(%__MODULE__{blocks: blocks} = state, peer_id, begin, block) do
+    crc = :erlang.crc32(block)
+
+    case Map.get(blocks, begin) do
+      {_old_peer, _len, ^crc} ->
+        state
+
+      {old_peer, _len, _old_crc} ->
+        %__MODULE__{
+          state
+          | overwritten: state.overwritten + 1,
+            contributors: move_credit(state.contributors, old_peer, peer_id)
+        }
+        |> put_block(peer_id, begin, block)
+
+      nil ->
+        # Never accepted through the normal path yet bytes are landing on disk:
+        # record them (and credit the sender) so the failure audit and the blame
+        # both agree with what is actually stored.
+        %__MODULE__{state | contributors: Map.update(state.contributors, peer_id, 1, &(&1 + 1))}
+        |> put_block(peer_id, begin, block)
+    end
+  end
+
+  defp move_credit(contributors, same, same), do: contributors
+
+  defp move_credit(contributors, from, to) do
+    contributors
+    |> Map.update(from, 0, &(&1 - 1))
+    |> then(fn c -> if Map.get(c, from) <= 0, do: Map.delete(c, from), else: c end)
+    |> Map.update(to, 1, &(&1 + 1))
+  end
+
+  defp put_block(%__MODULE__{} = state, peer_id, begin, block) do
+    %__MODULE__{
+      state
+      | blocks: Map.put(state.blocks, begin, {peer_id, byte_size(block), :erlang.crc32(block)})
+    }
+  end
+
+  # `make_subpieces/3` cuts the piece into @subpiece_length blocks, the last one
+  # short. Anything else is not a block we ever asked for.
+  defp own_subpiece?(%__MODULE__{} = state, begin, length) do
+    piece_len = Model.piece_length(state.hash, state.index)
+
+    rem(begin, @subpiece_length) == 0 and length == min(@subpiece_length, piece_len - begin)
   end
 
   defp handle_tracked_response(
@@ -268,16 +362,61 @@ defmodule Torrent.Downloads.Piece.State do
 
     Enum.each(list, &cancel_duplicate_request(state, peer_id, begin, length, &1))
 
-    state = %__MODULE__{
-      state
-      | requests: requests,
-        waiting: List.delete(state.waiting, subpiece),
-        contributors: Map.update(state.contributors, peer_id, 1, &(&1 + 1))
-    }
+    # `list` holds every live request for this subpiece. If none is this peer's,
+    # the block is a late reply to a request we already gave up on (or never made).
+    late? = not Enum.any?(list, &(&1.peer_id == peer_id))
+
+    state =
+      %__MODULE__{
+        state
+        | requests: requests,
+          waiting: List.delete(state.waiting, subpiece),
+          contributors: Map.update(state.contributors, peer_id, 1, &(&1 + 1)),
+          late: if(late?, do: state.late + 1, else: state.late)
+      }
+      |> put_block(peer_id, begin, block)
 
     with %__MODULE__{mode: :endgame, waiting: []} <- state do
       state.requests_are_dealt.()
       state
+    end
+  end
+
+  @doc """
+  What we handed to the disk, per block: `[{begin, length, crc32}]`.
+
+  `FileHandle.check_audited/3` compares it with what is actually stored when a piece
+  fails its SHA-1, which separates a peer that sent bad bytes from a fault on our
+  own side of the wire.
+  """
+  @spec received_digests(t()) :: [{Torrent.begin(), Torrent.length(), non_neg_integer()}]
+  def received_digests(%__MODULE__{blocks: blocks}) do
+    for {begin, {_peer, length, crc}} <- Enum.sort(blocks), do: {begin, length, crc}
+  end
+
+  @doc """
+  How many blocks of this piece were never accepted. A worker that declares the
+  piece complete with a gap here lost track of a block — never a peer's fault.
+  """
+  @spec unaccounted_blocks(t()) :: non_neg_integer()
+  def unaccounted_blocks(%__MODULE__{} = state) do
+    piece_len = Model.piece_length(state.hash, state.index)
+    max(div(piece_len + @subpiece_length - 1, @subpiece_length) - map_size(state.blocks), 0)
+  end
+
+  @doc """
+  Per-peer block counts for the failure log, e.g. `peer-a:40,peer-b:24`.
+  """
+  @spec contributors_summary(t()) :: String.t()
+  def contributors_summary(%__MODULE__{contributors: contributors}) do
+    case contributors do
+      empty when map_size(empty) == 0 ->
+        "none"
+
+      contributors ->
+        contributors
+        |> Enum.sort_by(fn {_peer, count} -> -count end)
+        |> Enum.map_join(",", fn {peer_id, count} -> "#{Peer.log_id(peer_id)}:#{count}" end)
     end
   end
 
