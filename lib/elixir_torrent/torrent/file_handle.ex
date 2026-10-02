@@ -149,6 +149,18 @@ defmodule Torrent.FileHandle do
     end
   end
 
+  @doc false
+  # Test seam (repo `*_for_test` convention): the slicing is pure list math, so
+  # it is exercised directly with hand-built layouts instead of a whole Store.
+  @spec files_for_index_for_test(
+          non_neg_integer(),
+          [{non_neg_integer(), term()}],
+          pos_integer(),
+          pos_integer()
+        ) :: {non_neg_integer(), [{term(), non_neg_integer()}]}
+  def files_for_index_for_test(index, files, piece_len, length),
+    do: files_for_index(index, files, piece_len, length)
+
   # Slice `all_files` down to the {io_device, length} tuples spanning `index`,
   # plus the byte offset of the piece inside the first of those files. Pure list
   # arithmetic over the cumulative end-offsets Store built with Enum.scan/2.
@@ -159,14 +171,34 @@ defmodule Torrent.FileHandle do
   defp files_for_index(index, files, piece_len, length) do
     begin_offset = index * piece_len
 
-    # right are the files whose end is before begin_offset
+    # Exclusive end offset of the piece: it covers bytes [begin_offset, end_offset).
+    end_offset = begin_offset + length
+
+    # `left` = files that end at or before the piece start (E <= begin). They
+    # hold none of the piece's bytes (this also drops zero-length files and gap
+    # entries sitting right at the start edge). `right` = everything from the
+    # first file that still has a byte at/after begin_offset.
     {left, right} = Enum.split_while(files, &(elem(&1, 0) <= begin_offset))
 
     offset_from_first_file = begin_offset - elem(List.last([{0, nil} | left]), 0)
 
-    {files, [last_file | _]} = Enum.split_while(right, &(elem(&1, 0) < begin_offset + length - 1))
+    # A file contains the piece's LAST byte (end_offset - 1) iff its exclusive
+    # end E satisfies E >= end_offset, i.e. E > end_offset - 1. So every file
+    # with E < end_offset is a "middle" file (it ends strictly inside the piece),
+    # and the first file with E >= end_offset is the last one. The old `E <
+    # end_offset - 1` test mis-handled E == end_offset - 1: that file ends one
+    # byte BEFORE the piece's last byte, yet was taken as the last file, so the
+    # real last file was dropped and the piece came up one byte short (read/write
+    # then failed with a badmatch). E == end_offset (piece ends exactly on a file
+    # edge) is correctly the last file.
+    {middle, rest} = Enum.split_while(right, &(elem(&1, 0) < end_offset))
 
-    {offset_from_first_file, normalize_file_entries(files ++ [last_file])}
+    # `rest` is only empty if the layout is shorter than the piece (corrupt
+    # context) - then we return what exists instead of raising on a match, and
+    # the caller's read/write reports `:error` for the short piece.
+    last = Enum.take(rest, 1)
+
+    {offset_from_first_file, normalize_file_entries(middle ++ last)}
   end
 
   defp normalize_file_entries(entries) do
