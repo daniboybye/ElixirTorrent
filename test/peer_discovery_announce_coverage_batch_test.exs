@@ -445,6 +445,32 @@ defmodule PeerDiscovery.AnnounceCoverageBatchTest do
       assert log =~ "hash=#{Torrent.hex_encoded_hash(state.hash)}"
     end
 
+    test "a repeated tracker failure warns once per tracker and reason" do
+      state = base_state(tier_batches: %{0 => 10})
+      reason = "Please redownload the torrent"
+
+      fail = fn announce, why ->
+        ref = make_ref()
+        state = %{state | requests: %{ref => {announce, 0, 0}}}
+        _ = Announce.dispatch_task_message(state, {ref, %Error{reason: why, retry_in: nil}})
+      end
+
+      log =
+        capture_log([level: :warning], fn ->
+          fail.("http://127.0.0.1:1/a", reason)
+          fail.("http://127.0.0.1:1/a", reason)
+          fail.("http://127.0.0.1:1/a", reason)
+          fail.("http://127.0.0.1:1/a", "something else")
+          fail.("http://127.0.0.1:1/b", reason)
+        end)
+
+      lines = Enum.filter(String.split(log, "\n"), &(&1 =~ "announce_failed"))
+      assert length(lines) == 3
+      assert Enum.count(lines, &(&1 =~ "announce=http://127.0.0.1:1/a reason=\"Please")) == 1
+      assert Enum.count(lines, &(&1 =~ "something else")) == 1
+      assert Enum.count(lines, &(&1 =~ "announce=http://127.0.0.1:1/b")) == 1
+    end
+
     test "an expected dead-tracker reason stays out of the warning stream" do
       ref = make_ref()
       announce = "http://127.0.0.1:1/gone"
