@@ -158,7 +158,7 @@ defmodule PeerDiscovery.Announce do
     if starved_with_no_tracker_peers?(state) do
       :ok
     else
-      min_sec = state.tracker_min_interval_sec || @announce_floor_sec
+      min_sec = global_min_interval_sec(state)
       interval_sec = tracker_announce_interval_sec(state)
       required_ms = max(min_sec, interval_sec) * 1_000
 
@@ -1042,6 +1042,7 @@ defmodule PeerDiscovery.Announce do
       |> put_in([Access.key!(:peers), announce], response.peers)
       |> Map.put(:tracker_interval_sec, response.interval)
       |> Map.put(:tracker_min_interval_sec, response.min_interval)
+      |> hold_tracker_for_min_interval(announce, response.min_interval)
       |> mark_tier_batch_success(tier_index, response.peers)
       |> maybe_stamp_last_tracker_announce(response, now)
 
@@ -1173,6 +1174,34 @@ defmodule PeerDiscovery.Announce do
     |> dec_tier_batch(tier_index)
   end
 
+  # BEP 3 `min interval` is the answering tracker's rule: "do not re-announce to
+  # me more often than this". It says nothing about the other trackers of the
+  # torrent. It used to be stored once per torrent and applied as the floor of
+  # the whole announce loop, so a single tracker answering `min interval: 1800`
+  # held a torrent with one connected peer to one announce round per 30 minutes
+  # across all 21 trackers, while its siblings re-announced every 30 s. Now it
+  # holds back that tracker only, through the same per-tracker deadline a
+  # failure uses; the loop's own floor comes from `global_min_interval_sec/1`.
+  @spec hold_tracker_for_min_interval(%__MODULE__{}, String.t(), term()) :: %__MODULE__{}
+  defp hold_tracker_for_min_interval(state, announce, min_interval)
+       when is_integer(min_interval) and min_interval > 0,
+       do: put_tracker_retry_after(state, announce, min_interval)
+
+  defp hold_tracker_for_min_interval(state, _announce, _min_interval), do: state
+
+  # Under target, every tracker's own `min interval` is enforced per tracker (see
+  # above), so the loop only keeps the generic floor. At target the loop runs on
+  # the tracker's `interval` anyway, and the last answer's `min interval` stays a
+  # floor for it, as before.
+  @spec global_min_interval_sec(%__MODULE__{}) :: pos_integer()
+  defp global_min_interval_sec(%__MODULE__{hash: hash} = state) do
+    if Swarm.count(hash) < @swarm_target_peers do
+      @announce_floor_sec
+    else
+      state.tracker_min_interval_sec || @announce_floor_sec
+    end
+  end
+
   @spec put_tracker_retry_after(%__MODULE__{}, String.t(), non_neg_integer()) :: %__MODULE__{}
   defp put_tracker_retry_after(%__MODULE__{} = state, announce, timeout_seconds) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_seconds * 1_000
@@ -1208,7 +1237,7 @@ defmodule PeerDiscovery.Announce do
   @spec parallel_tier_reschedule_sec(%__MODULE__{}, non_neg_integer()) :: non_neg_integer()
   defp parallel_tier_reschedule_sec(%__MODULE__{hash: hash} = state, fallback_sec) do
     connected = Swarm.count(hash)
-    min_sec = state.tracker_min_interval_sec || @announce_floor_sec
+    min_sec = global_min_interval_sec(state)
 
     cond do
       connected < @swarm_target_peers ->
@@ -1269,7 +1298,7 @@ defmodule PeerDiscovery.Announce do
   @spec tracker_announce_interval_sec(%__MODULE__{}) :: pos_integer()
   defp tracker_announce_interval_sec(%__MODULE__{hash: hash} = state) do
     connected = Swarm.count(hash)
-    min_sec = state.tracker_min_interval_sec || @announce_floor_sec
+    min_sec = global_min_interval_sec(state)
 
     cond do
       connected < @swarm_target_peers ->

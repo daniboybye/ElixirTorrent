@@ -463,19 +463,21 @@ defmodule PeerDiscoveryAnnounceTest do
     assert Torrent.get(hash, :event) == Torrent.completed()
   end
 
-  test "tracker_announce_allowed? enforces floor once a tracker yielded peers" do
+  test "under target, one tracker's min interval does not slow the whole announce loop" do
+    # No Swarm for this hash → Swarm.count/1 is 0, i.e. under target. A tracker's
+    # BEP 3 `min interval` is its own rule; the loop keeps the generic 30 s floor.
     now = 1_000_000
 
     state =
       base_state(
         last_tracker_announce_ms: now,
-        tracker_min_interval_sec: 45,
+        tracker_min_interval_sec: 1_800,
         peers: %{"udp://tracker.example:6969/announce" => [%Peer{ip: {1, 2, 3, 4}, port: 6881}]}
       )
 
-    assert {:wait, wait_ms} = Announce.tracker_announce_allowed?(state, now + 30_000)
-    assert wait_ms >= 15_000
-    assert :ok = Announce.tracker_announce_allowed?(state, now + 45_000)
+    assert {:wait, wait_ms} = Announce.tracker_announce_allowed?(state, now + 5_000)
+    assert wait_ms <= 25_000
+    assert :ok = Announce.tracker_announce_allowed?(state, now + 30_000)
   end
 
   test "tracker_announce_allowed? never allows re-announce within 30s floor once stamped" do
@@ -939,18 +941,49 @@ defmodule PeerDiscoveryAnnounceTest do
                Announce.tracker_announce_allowed?(new_state, System.monotonic_time(:millisecond))
     end
 
-    test "successful announce with peers still enforces min-interval floor" do
-      now = 4_000_000
+    test "a tracker's min interval holds back that tracker only" do
+      hash = <<79::160>>
+      ref = make_ref()
+      strict = "udp://strict.example:6969/announce"
+      sibling = "udp://sibling.example:6969/announce"
+
+      {:ok, model_pid} =
+        Torrent.Model.start_link(%Torrent{
+          hash: hash,
+          metadata: %{"info" => %{"name" => "min-interval", "private" => 1}},
+          left: 1_000,
+          last_index: 0,
+          last_piece_length: 1_000,
+          peer_status: :seed
+        })
+
+      on_exit(fn -> safe_stop(model_pid, 5_000) end)
 
       state =
         base_state(
-          last_tracker_announce_ms: now,
-          tracker_min_interval_sec: 45,
-          peers: %{"udp://live.example:6969/announce" => [%Peer{ip: {1, 1, 1, 1}, port: 6881}]}
+          hash: hash,
+          tiers: [[strict], [sibling]],
+          requests: %{ref => {strict, 0, 0}},
+          tier_batches: %{0 => 1},
+          peers: %{}
         )
 
-      assert {:wait, wait_ms} = Announce.tracker_announce_allowed?(state, now + 30_000)
-      assert wait_ms >= 15_000
+      response = %Response{
+        peers: [%Peer{ip: {1, 1, 1, 1}, port: 6881}],
+        complete: 1,
+        incomplete: 0,
+        interval: 1_800,
+        min_interval: 1_800
+      }
+
+      before = System.monotonic_time(:millisecond)
+      new_state = Announce.dispatch_task_message(state, {ref, {Torrent.started(), response}})
+
+      assert new_state.retry_after_ms[strict] >= before + 1_800_000
+      refute Map.has_key?(new_state.retry_after_ms, sibling)
+      # The loop itself stays on the 30 s floor while the swarm is under target.
+      last = new_state.last_tracker_announce_ms
+      assert :ok = Announce.tracker_announce_allowed?(new_state, last + 30_000)
     end
 
     test "under-target fan-out starts up to four announcable tiers in parallel" do
