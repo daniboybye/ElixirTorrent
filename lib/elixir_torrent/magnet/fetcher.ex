@@ -302,10 +302,44 @@ defmodule Magnet.Fetcher do
   end
 
   @spec stop_bootstrap_and_return(Magnet.t(), term()) :: term()
+  defp stop_bootstrap_and_return(magnet, {:ok, _path, _trackers, private?} = ok) do
+    :ok = release_bootstrap(magnet, private?)
+    ok
+  end
+
   defp stop_bootstrap_and_return(magnet, result) do
     Magnet.Bootstrap.stop(magnet.hash)
     result
   end
+
+  @doc """
+  Stop the metadata swarm once metadata is verified, keeping its connections' endpoints.
+
+  The endpoints it was connected to are marked first (`Peer.Endpoints.release_for_handoff/1`),
+  so our own teardown is not scored as churn against them, and stashed in
+  `PeerDiscovery.SeedPeers` ahead of everything `on_metadata_ok/3` adds — they go
+  first in the download's pool. A private torrent (BEP 27) does not carry them over.
+  Idempotent: a second call finds nothing connected.
+  """
+  @spec release_bootstrap(Magnet.t(), boolean()) :: :ok
+  def release_bootstrap(%Magnet{hash: hash}, private?) do
+    connected = Peer.Endpoints.release_for_handoff(hash)
+    :ok = Magnet.Bootstrap.stop(hash)
+
+    if connected != [] and not private? do
+      :ok = PeerDiscovery.SeedPeers.put(hash, endpoint_peers(connected))
+
+      Logger.debug(
+        "[magnet_fetch] swarm_release hash=#{Torrent.hex_encoded_hash(hash)} connected=#{length(connected)}"
+      )
+    end
+
+    :ok
+  end
+
+  @spec endpoint_peers([{:inet.ip_address(), :inet.port_number()}]) :: [Peer.t()]
+  defp endpoint_peers(endpoints),
+    do: Enum.map(endpoints, fn {ip, port} -> %Peer{ip: ip, port: port} end)
 
   @spec try_direct_after_swarm_fail(
           Magnet.t(),
@@ -369,15 +403,25 @@ defmodule Magnet.Fetcher do
   @doc """
   Invoked when metadata has been verified and written to `path`.
 
-  Calls the optional `:metadata_ok_handler` application env callback `{magnet, path}`.
+  Hands the peers of the metadata phase to the download (see `release_bootstrap/2`
+  and `handoff_peers/3`),
+  then calls the optional `:metadata_ok_handler` application env callback
+  `{magnet, path}`.
+
+  Options:
+    * `:peers` — endpoints discovered during the fetch (trackers, DHT, x.pe)
+    * `:private?` — the verified info dictionary sets BEP 27 `private`
   """
-  @spec on_metadata_ok(Magnet.t(), Path.t()) :: :ok
-  def on_metadata_ok(%Magnet{} = magnet, path) when is_binary(path) do
-    Magnet.Bootstrap.stop(magnet.hash)
-    # BEP 9 § Magnet URI format — hand off x.pe endpoints so the fresh Announce
-    # process seeds them into ConnectionManager instead of losing them with the
-    # fetcher shutdown. Announce.take consumes the entry on first start.
-    _ = PeerDiscovery.SeedPeers.put(magnet.hash, magnet.x_pe_peers)
+  @spec on_metadata_ok(Magnet.t(), Path.t(), keyword()) :: :ok
+  def on_metadata_ok(%Magnet{} = magnet, path, opts \\ []) when is_binary(path) do
+    # Usually already done by the round that fetched the metadata; this covers
+    # every other path to here.
+    :ok = release_bootstrap(magnet, Keyword.get(opts, :private?, false))
+    peers = handoff_peers(magnet, [], opts)
+    log_handoff(magnet.hash, peers)
+    # Announce.init takes the entry on first start and offers it to the
+    # ConnectionManager next to the first tracker answers.
+    _ = PeerDiscovery.SeedPeers.put(magnet.hash, peers)
 
     case Application.get_env(:elixir_torrent, :metadata_ok_handler) do
       handler when is_function(handler, 2) ->
@@ -386,6 +430,44 @@ defmodule Magnet.Fetcher do
       _ ->
         :ok
     end
+  end
+
+  @handoff_max_peers 200
+
+  @doc """
+  The endpoints the download starts from when a magnet's metadata arrives.
+
+  libtorrent keeps a magnet's peer connections when the metadata completes: it is
+  one torrent before and after. Here the metadata phase is a separate swarm that
+  is stopped, so without a hand-off the download began with nothing and waited
+  for the first tracker answer — while the fetch had just learned dozens of peers
+  and was connected to some of them. Behind CGNAT, where ~1% of IPv4 dials
+  connect, an endpoint that accepted us seconds ago is the best candidate there is.
+
+  Order: endpoints we were connected to, then x.pe (BEP 9), then the rest of the
+  discovered pool, IPv6 first because it is the family that dials from this kind
+  of host. A private torrent (BEP 27) keeps only x.pe: its peers may come only
+  from its tracker, and the fetch pool can hold DHT peers.
+  """
+  @spec handoff_peers(Magnet.t(), [{:inet.ip_address(), :inet.port_number()}], keyword()) ::
+          [Peer.t()]
+  def handoff_peers(%Magnet{} = magnet, connected, opts) do
+    if Keyword.get(opts, :private?, false) do
+      magnet.x_pe_peers
+    else
+      discovered = Enum.sort_by(Keyword.get(opts, :peers, []), &(not ipv6_peer?(&1)))
+
+      (endpoint_peers(connected) ++ magnet.x_pe_peers ++ discovered)
+      |> Enum.uniq_by(&peer_key/1)
+      |> Enum.take(@handoff_max_peers)
+    end
+  end
+
+  @spec log_handoff(Torrent.hash(), [Peer.t()]) :: :ok
+  defp log_handoff(hash, peers) do
+    Logger.info(
+      "[magnet_fetch] peer_handoff hash=#{Torrent.hex_encoded_hash(hash)} peers=#{length(peers)}"
+    )
   end
 
   @doc false

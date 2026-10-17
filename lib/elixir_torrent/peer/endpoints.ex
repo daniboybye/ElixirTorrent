@@ -95,11 +95,38 @@ defmodule Peer.Endpoints do
     :exit, _ -> []
   end
 
+  @doc """
+  List the endpoints connected for `hash` and mark them as handed off.
+
+  A magnet's metadata phase runs its own short-lived swarm under the same hash,
+  and stopping it drops every connection within seconds of the handshake, which
+  is exactly what the churn rule reads as a peer not worth re-dialling. Those are
+  the endpoints we most want back: they just accepted us. Their disconnect is ours,
+  so it must not reach `Peer.DialBackoff`.
+
+  This is a call, so the marks are in place before the caller tears the swarm down
+  and before any `:DOWN` can arrive.
+  """
+  @spec release_for_handoff(Torrent.hash()) :: [{:inet.ip_address(), :inet.port_number()}]
+  def release_for_handoff(hash) do
+    GenServer.call(__MODULE__, {:release_for_handoff, hash})
+  catch
+    :exit, _ -> []
+  end
+
   @impl GenServer
   def init(_) do
     table = :ets.new(@table, [:set, :protected, read_concurrency: true])
     peer_ids = :ets.new(@peer_id_table, [:set, :protected, read_concurrency: true])
-    {:ok, %{table: table, peer_ids: peer_ids, monitors: %{}, reasons: %{}}}
+
+    {:ok,
+     %{
+       table: table,
+       peer_ids: peer_ids,
+       monitors: %{},
+       reasons: %{},
+       handoffs: MapSet.new()
+     }}
   end
 
   @impl GenServer
@@ -149,7 +176,12 @@ defmodule Peer.Endpoints do
     now = System.monotonic_time(:millisecond)
     # A note left by a previous connection to this endpoint describes that one,
     # not the connection starting now.
-    state = %{state | reasons: Map.delete(state.reasons, key)}
+    state = %{
+      state
+      | reasons: Map.delete(state.reasons, key),
+        handoffs: MapSet.delete(state.handoffs, key)
+    }
+
     # Registration is the proof of reachability the dial backoff is asking for:
     # connect and the BEP 3 handshake both completed. Inbound peers count too —
     # if they reached us, our earlier dial timeouts were about their NAT, not a
@@ -198,13 +230,18 @@ defmodule Peer.Endpoints do
   end
 
   def handle_call({:list, hash}, _, %{table: table} = state) do
-    # :ets.match/2 returns [[ip, port], ...] — not [{ip, port}, pid].
-    endpoints =
-      table
-      |> :ets.match({{hash, :"$1", :"$2"}, :_})
-      |> Enum.map(fn [ip, port] -> {ip, port} end)
+    {:reply, endpoints_for(table, hash), state}
+  end
 
-    {:reply, endpoints, state}
+  def handle_call({:release_for_handoff, hash}, _, %{table: table} = state) do
+    endpoints = endpoints_for(table, hash)
+
+    handoffs =
+      Enum.reduce(endpoints, state.handoffs, fn {ip, port}, acc ->
+        MapSet.put(acc, endpoint_key(hash, ip, port))
+      end)
+
+    {:reply, endpoints, %{state | handoffs: handoffs}}
   end
 
   @impl GenServer
@@ -216,10 +253,18 @@ defmodule Peer.Endpoints do
       {{key, connected_at}, monitors} ->
         :ets.delete(state.table, key)
         drop_peer_id(state.peer_ids, key)
-        maybe_backoff_churn(key, connected_at)
+        handed_off? = MapSet.member?(state.handoffs, key)
+        if not handed_off?, do: maybe_backoff_churn(key, connected_at)
         {noted, reasons} = Map.pop(state.reasons, key)
         log_disconnect(key, noted || reason)
-        {:noreply, %{state | monitors: monitors, reasons: reasons}}
+
+        {:noreply,
+         %{
+           state
+           | monitors: monitors,
+             reasons: reasons,
+             handoffs: MapSet.delete(state.handoffs, key)
+         }}
     end
   end
 
@@ -233,6 +278,15 @@ defmodule Peer.Endpoints do
     else
       :ok
     end
+  end
+
+  # :ets.match/2 returns [[ip, port], ...] — not [{ip, port}, pid].
+  @spec endpoints_for(:ets.table(), Torrent.hash()) ::
+          [{:inet.ip_address(), :inet.port_number()}]
+  defp endpoints_for(table, hash) do
+    table
+    |> :ets.match({{hash, :"$1", :"$2"}, :_})
+    |> Enum.map(fn [ip, port] -> {ip, port} end)
   end
 
   @spec endpoint_key(Torrent.hash(), :inet.ip_address(), :inet.port_number()) ::
