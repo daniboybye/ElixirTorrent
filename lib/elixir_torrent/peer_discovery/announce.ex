@@ -1585,11 +1585,30 @@ defmodule PeerDiscovery.Announce do
 
     # Dead public trackers are the common case in real announce-lists and BEP 12
     # already fails over tiers, so only unexpected reasons warn — otherwise
-    # server.log is unreadable under CGNAT churn.
-    if expected_tracker_failure_reason?(reason) do
+    # server.log is unreadable under CGNAT churn. An unexpected reason warns once
+    # per tracker and reason for this torrent session: a tracker's own `failure
+    # reason` is usually permanent ("PID system is active and pid was not found"
+    # was repeated every ~6 min for each of nine torrents), and saying it again
+    # tells the user nothing new.
+    if expected_tracker_failure_reason?(reason) or not first_warning?(announce, reason) do
       Logger.debug(message)
     else
       Logger.warning(message)
+    end
+  end
+
+  # Announce is one process per torrent, so its dictionary is exactly the
+  # per-torrent-session scope (the same mechanism `Torrent.Controller` uses for
+  # its pending wake).
+  @spec first_warning?(String.t(), term()) :: boolean()
+  defp first_warning?(announce, reason) do
+    key = {:tracker_failure_warned, announce, reason}
+
+    if Process.get(key) do
+      false
+    else
+      Process.put(key, true)
+      true
     end
   end
 
