@@ -174,7 +174,13 @@ defmodule Magnet.Fetcher.Session do
     # the goodbye cannot erase the fresh registration). `announced_trackers` is
     # cleared so `terminate/2` does not send a second goodbye for the same set.
     :ok = Fetcher.announce_stopped_async(state.magnet.hash, trackers)
-    :ok = Fetcher.on_metadata_ok(state.magnet, path)
+
+    :ok =
+      Fetcher.on_metadata_ok(state.magnet, path,
+        peers: Map.values(state.known_peers),
+        private?: private?
+      )
+
     notify_done(state, {:ok, path})
     {:stop, :normal, %{state | announced_trackers: []}}
   end
