@@ -31,6 +31,15 @@ defmodule Peer.ConnectionManager do
   # bounded (a batch already runs at most 20 concurrent connects internally).
   @max_in_flight_dials 40
   @max_dial_batches 3
+  # A complete torrent dials only to find peers to upload to. It has nothing to
+  # gain from the leecher's starvation policy (escalation reads its download
+  # speed, which is 0 for a seed, as "starving"): measured on 17 seeding torrents,
+  # every manager kept 3 batches / ~40 endpoints in flight for hours, the busiest
+  # ~195k reductions/s, with a short-lived uTP connection per attempt. So a seed
+  # dials one small batch at a time, at the normal cadence, and never to a peer
+  # that is itself known to be a seed (it can take nothing from us).
+  @seed_batch 8
+  @seed_max_dial_batches 1
   @normal_interval_ms 3_000
   @escalated_interval_ms 1_000
   @low_speed_bytes_per_sec 32_768
@@ -311,13 +320,21 @@ defmodule Peer.ConnectionManager do
   defp maybe_dial(state, connected) when connected >= @swarm_cap, do: {:noreply, state}
 
   defp maybe_dial(%{hash: hash} = state, connected) do
-    headroom = @max_in_flight_dials - MapSet.size(state.in_flight)
+    {max_in_flight, max_batches} = dial_limits(hash)
+    headroom = max_in_flight - MapSet.size(state.in_flight)
 
-    if headroom <= 0 or state.batches >= @max_dial_batches do
+    if headroom <= 0 or state.batches >= max_batches do
       {:noreply, state}
     else
       dial_batch(state, min(batch_size(hash, connected), headroom))
     end
+  end
+
+  @spec dial_limits(Torrent.hash()) :: {pos_integer(), pos_integer()}
+  defp dial_limits(hash) do
+    if seeding?(hash),
+      do: {@seed_batch, @seed_max_dial_batches},
+      else: {@max_in_flight_dials, @max_dial_batches}
   end
 
   defp maybe_dial_or_noreply(state, connected) do
@@ -343,11 +360,15 @@ defmodule Peer.ConnectionManager do
   end
 
   defp select_dial_peers(%{queue: queue, in_flight: in_flight}, hash, batch) do
+    seeding? = seeding?(hash)
+
     hash
     |> prioritize_dial_queue(DialQueue.peers(queue))
     # An endpoint stays in the queue until its dial resolves, so overlapping
     # batches would otherwise pick the same one twice.
-    |> Enum.reject(&MapSet.member?(in_flight, {&1.ip, &1.port}))
+    |> Enum.reject(
+      &(MapSet.member?(in_flight, {&1.ip, &1.port}) or (seeding? and &1.seed == true))
+    )
     |> Handshakes.select_peers_to_dial(hash, batch)
   end
 
@@ -363,13 +384,14 @@ defmodule Peer.ConnectionManager do
 
     in_flight = MapSet.union(state.in_flight, MapSet.new(selected_keys))
     batches = state.batches + 1
+    {max_in_flight, max_batches} = dial_limits(hash)
 
     %{
       state
       | in_flight: in_flight,
         batches: batches,
         dial_tasks: [dial_task | state.dial_tasks],
-        dialing?: MapSet.size(in_flight) >= @max_in_flight_dials or batches >= @max_dial_batches,
+        dialing?: MapSet.size(in_flight) >= max_in_flight or batches >= max_batches,
         dial_task: dial_task
     }
   end
@@ -393,7 +415,11 @@ defmodule Peer.ConnectionManager do
   end
 
   defp batch_size(hash, connected) do
-    if escalate?(hash, connected), do: @escalated_batch, else: @default_batch
+    cond do
+      seeding?(hash) -> @seed_batch
+      escalate?(hash, connected) -> @escalated_batch
+      true -> @default_batch
+    end
   end
 
   defp tick_interval(hash, connected) do
@@ -403,6 +429,7 @@ defmodule Peer.ConnectionManager do
   defp escalate?(hash, connected) do
     cond do
       connected >= @target_connected -> false
+      seeding?(hash) -> false
       connected < @low_connected_threshold -> true
       low_download_speed?(hash) and connected < div(@target_connected, 2) -> true
       # Under CGNAT, connected count ≠ useful unchoked seeders: many peers can be
@@ -458,6 +485,17 @@ defmodule Peer.ConnectionManager do
     end
   catch
     _ -> true
+  end
+
+  @spec seeding?(Torrent.hash()) :: boolean()
+  defp seeding?(hash) do
+    case Torrent.get(hash, [:peer_status, :left]) do
+      [:seed, _] -> true
+      [_, 0] -> true
+      _ -> false
+    end
+  catch
+    :exit, _ -> false
   end
 
   # Never evict download-usefulness peers on completed torrents — seeding slots

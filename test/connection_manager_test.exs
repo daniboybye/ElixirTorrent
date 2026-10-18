@@ -961,6 +961,49 @@ defmodule Peer.ConnectionManagerTest do
       refute MapSet.member?(state.in_flight, {{10, 0, 1, 1}, 7001})
     end
 
+    test "a seeding torrent dials one small batch and never to a known seed" do
+      hash = :crypto.strong_rand_bytes(20)
+
+      {:ok, model} =
+        Torrent.Model.start_link(%Torrent{
+          hash: hash,
+          metadata: %{"name" => "seeding-dial-test"},
+          left: 0,
+          last_index: 0,
+          last_piece_length: 1000,
+          peer_status: :seed
+        })
+
+      on_exit(fn -> TestSupport.Sync.safe_stop(model, 1_000) end)
+      pid = start_isolated_manager(hash)
+      on_exit(fn -> TestSupport.Sync.safe_stop(pid, 1_000) end)
+
+      # TEST-NET-3 addresses: routable, so selection keeps them, while the test
+      # config's `dial_scope: :this_host` refuses them at the connect call, so
+      # the batch never reaches the network.
+      leechers = for n <- 1..20, do: %Peer{ip: {203, 0, 113, n}, port: 40_000 + n, seed: false}
+      seeds = for n <- 1..20, do: %Peer{ip: {203, 0, 113, 100 + n}, port: 41_000 + n, seed: true}
+
+      queue =
+        Enum.reduce(leechers ++ seeds, %{}, &DialQueue.offer(&2, [&1], :discovery))
+
+      :sys.replace_state(pid, fn state ->
+        %{state | queue: queue, in_flight: MapSet.new(), batches: 0, dialing?: false}
+      end)
+
+      :ok = GenServer.cast(pid, :dial_now)
+      state = :sys.get_state(pid)
+
+      assert state.batches == 1
+      assert state.dialing?
+      assert MapSet.size(state.in_flight) in 1..8
+      refute Enum.any?(state.in_flight, fn {_ip, port} -> port > 41_000 end)
+
+      # One batch is the cap: a second dial_now starts nothing more.
+      :ok = GenServer.cast(pid, :dial_now)
+      assert :sys.get_state(pid).batches == 1
+    end
+
     test "dial_now while already dialing does not start a second batch" do
       hash = :crypto.strong_rand_bytes(20)
       pid = start_isolated_manager(hash)
