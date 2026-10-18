@@ -40,6 +40,74 @@ defmodule UTPDeadLinkTest do
     {:ok, udp: udp, peer_udp: peer_udp, peer_port: peer_port}
   end
 
+  describe "a connection whose dialler is gone" do
+    # Connected and idle, nothing in flight: neither the RTO nor the silence
+    # rule can fire, so the only thing that can end it is its owner going away.
+    test "is torn down when the process that dialled it dies before the hand-off", ctx do
+      %{udp: udp, peer_udp: peer_udp, peer_port: peer_port} = ctx
+      {dialler, dialler_mon, _release} = TestSupport.Sync.spawn_blocked()
+
+      assert {:ok, {:utp, pid} = socket} =
+               Connection.start_client(udp, @ip, peer_port, conn_id: 41_201, owner: dialler)
+
+      assert {:ok, {_ip, _port, _syn}} = :gen_udp.recv(peer_udp, 0, 1_000)
+      send(pid, {:utp_packet, packet(Packet.st_state(), 41_201, 9_000, 1), <<>>, []})
+      assert :ok = Connection.await_connected(socket, 1_000)
+
+      mon = Process.monitor(pid)
+      Process.exit(dialler, :kill)
+      TestSupport.Sync.await_down(dialler_mon, dialler, 1_000)
+
+      assert_receive {:DOWN, ^mon, :process, ^pid, :normal}, 2_500
+    end
+
+    test "survives its dialler once the connection was handed on", ctx do
+      %{udp: udp, peer_udp: peer_udp, peer_port: peer_port} = ctx
+      {dialler, dialler_mon, _release} = TestSupport.Sync.spawn_blocked()
+
+      assert {:ok, {:utp, pid} = socket} =
+               Connection.start_client(udp, @ip, peer_port, conn_id: 41_202, owner: dialler)
+
+      assert {:ok, {_ip, _port, _syn}} = :gen_udp.recv(peer_udp, 0, 1_000)
+      send(pid, {:utp_packet, packet(Packet.st_state(), 41_202, 9_000, 1), <<>>, []})
+      assert :ok = Connection.await_connected(socket, 1_000)
+      :ok = Connection.controlling_process(socket, self())
+
+      Process.exit(dialler, :kill)
+      TestSupport.Sync.await_down(dialler_mon, dialler, 1_000)
+
+      refute :sys.get_state(pid).closed
+      :ok = Connection.close(socket)
+    end
+
+    test "Dispatcher.connect makes the caller the owner", ctx do
+      %{peer_udp: peer_udp, peer_port: peer_port} = ctx
+      parent = self()
+
+      dialler =
+        spawn(fn ->
+          send(parent, {:dialled, Dispatcher.connect(@ip, peer_port, [], 5_000)})
+        end)
+
+      # The SYN on the wire means the connection process exists and is waiting.
+      assert {:ok, {_ip, _port, _syn}} = :gen_udp.recv(peer_udp, 0, 1_000)
+
+      [conn] =
+        for p <- Process.list(),
+            {:dictionary, d} <- [Process.info(p, :dictionary)],
+            is_list(d),
+            d[:"$initial_call"] == {Connection, :init, 1},
+            :sys.get_state(p).peer_port == peer_port,
+            do: p
+
+      assert :sys.get_state(conn).owner == dialler
+      mon = Process.monitor(conn)
+      Process.exit(dialler, :kill)
+      assert_receive {:DOWN, ^mon, :process, ^conn, :normal}, 2_500
+      refute_received {:dialled, _}
+    end
+  end
+
   describe "a silent peer" do
     test "is dropped after consecutive RTO expiries with nothing heard, reason :utp_timeout",
          ctx do
