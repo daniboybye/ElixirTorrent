@@ -105,7 +105,14 @@ defmodule UTP.Connection do
   def start_client(udp_socket, ip, port, opts \\ []) do
     recv_conn_id = Keyword.get(opts, :conn_id, :rand.uniform(65_534))
     send_conn_id = rem(recv_conn_id + 1, 65_536)
-    start_link(udp_socket, ip, port, :client, :syn_sent, recv_conn_id, send_conn_id, 1)
+
+    with {:ok, {:utp, pid}} = ok <-
+           start_link(udp_socket, ip, port, :client, :syn_sent, recv_conn_id, send_conn_id, 1) do
+      # Cast after `start_link/8`'s own `:boot` cast, from the same process, so
+      # it is processed after the state is in place.
+      if owner = Keyword.get(opts, :owner), do: GenServer.cast(pid, {:initial_owner, owner})
+      ok
+    end
   end
 
   @spec start_server(port(), :inet.ip_address(), :inet.port_number(), 0..65_535) ::
@@ -231,6 +238,10 @@ defmodule UTP.Connection do
       end
 
     {:noreply, state}
+  end
+
+  def handle_cast({:initial_owner, owner}, state) do
+    {:noreply, monitor_initial_owner(state, owner)}
   end
 
   def handle_cast(:close, state) do
@@ -1002,6 +1013,21 @@ defmodule UTP.Connection do
   end
 
   defp satisfy_recv_waiter(other, {s, rest}), do: {s, rest ++ [other]}
+
+  # A client connection is owned from birth by the process that dialled it, until
+  # `controlling_process/2` hands it to the peer. Without that, a connection whose
+  # dialler died between `connect` and the hand-off (a dial task killed at its
+  # batch timeout, a handshake that crashed) had no owner at all: once connected
+  # and idle, nothing is in flight, so neither the RTO nor the silence rule ever
+  # fires, and it lived for the rest of the session. Measured on a 22-hour node:
+  # 76 connected client connections with no owner, the oldest silent for 17.7 h.
+  # A `controlling_process/2` that already ran wins.
+  @spec monitor_initial_owner(%__MODULE__{}, pid()) :: %__MODULE__{}
+  defp monitor_initial_owner(%{owner_ref: nil} = state, owner) when is_pid(owner) do
+    %{state | owner: owner, owner_ref: Process.monitor(owner)}
+  end
+
+  defp monitor_initial_owner(state, _owner), do: state
 
   defp shutdown(state, reason) do
     if state.closed do

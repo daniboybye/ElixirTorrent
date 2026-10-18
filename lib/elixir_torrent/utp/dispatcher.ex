@@ -75,7 +75,10 @@ defmodule UTP.Dispatcher do
   @spec connect(:inet.ip_address(), :inet.port_number(), keyword(), timeout()) ::
           {:ok, UTP.Connection.socket_ref()} | {:error, term()}
   def connect(ip, port, opts \\ [], timeout \\ @default_connect_timeout) do
-    opts = Keyword.put_new(opts, :timeout, timeout)
+    # The caller owns the connection until it hands it on with
+    # `controlling_process/2`; the connection dies with it (see
+    # `UTP.Connection.monitor_initial_owner/2`).
+    opts = Keyword.merge([timeout: timeout, owner: self()], opts)
 
     case start_connect(ip, port, opts) do
       {:ok, socket_ref} ->
