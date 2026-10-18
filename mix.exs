@@ -1,7 +1,7 @@
 defmodule ElixirTorrent.MixProject do
   use Mix.Project
 
-  @version "0.6.8"
+  @version "0.7.0"
 
   def project do
     [

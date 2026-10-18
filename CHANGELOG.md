@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.7.0 - 2026-10-18
+
+A magnet release. When a magnet's metadata arrived, the download threw away every
+peer the metadata phase had found and started from nothing, and penalised the peer
+it had just been talking to. It now starts from that pool. Discovery and the uTP
+transport also stop wasting slots: one tracker's rule no longer throttles the
+others, and a uTP connection whose dial was abandoned no longer lives forever.
+
+### Added
+
+- A magnet's download starts from the peers its metadata phase found: the ones it
+  was connected to first, then `x.pe` peers, then the rest of the discovered pool,
+  IPv6 first (up to 200). Before, it started with no peers and waited for its first
+  tracker answer. A private torrent (BEP 27) still carries over only `x.pe` peers.
+
+### Fixed
+
+- Stopping a magnet's metadata phase no longer counts its own connections as
+  churn. Every peer it had just connected to was blocked from re-dialling for five
+  minutes, exactly the peers that had proven reachable.
+- One tracker's `min interval` no longer throttles every tracker of the torrent.
+  A single tracker answering `min interval: 1800` held a torrent with one peer to
+  one announce round per 30 minutes across all its trackers; the value now applies
+  to that tracker only, as BEP 3 defines it.
+- A tracker's own failure reason (for example a private tracker asking for a
+  re-downloaded torrent) is logged as a warning once per tracker and reason, not on
+  every retry.
+- A uTP connection whose dialler died before handing it on (a dial abandoned at its
+  timeout, a failed handshake) is closed with it. Before, an idle connected link
+  with nothing in flight was never timed out and stayed for the rest of the
+  session.
+
+### Changed
+
+- The HTTP transport chain moves to hackney 4.8.5 (h2 0.12.4, quic 2.1.1,
+  webtransport 0.4.8).
+
 ## 0.6.8 - 2026-10-02
 
 A pipeline release. A log audit of a six-magnet session found that the swarm was
@@ -107,7 +144,6 @@ speed of 0 B/s reported on a torrent moving at 100 KB/s.
   the source is still piece-granular, so a swarm delivering in bursts still
   oscillates, and a torrent slower than one piece per window reads 0 until its
   first piece lands.
-
 - A packed `values` string in a `get_peers` response is no longer mistaken for an
   IPv6 peer. **18 is a multiple of 6**, so a string carrying three compact IPv4
   peers has exactly the size of one compact IPv6 peer, and the decoder tested the
