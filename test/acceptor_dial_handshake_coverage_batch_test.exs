@@ -1812,11 +1812,52 @@ defmodule AcceptorDialHandshakeCoverageBatchTest do
           flunk("peer Controller unavailable hash=#{inspect(hash)} peer=#{inspect(peer_id)}")
       end
 
-    unless predicate.(state) do
-      flunk("peer state predicate failed hash=#{inspect(hash)} peer=#{inspect(peer_id)}")
+    if predicate.(state) do
+      state
+    else
+      await_traced_state(pid, predicate, hash, peer_id)
     end
+  end
 
-    state
+  # The sender and controller barriers above only cover messages already in a
+  # mailbox. Under load the wire bytes can still be on their way from the
+  # kernel to the Sender, so the frame reaches the Controller after the barrier
+  # (the cause of a full-suite flake on the LTEP test). Wait for the event
+  # instead: trace the Controller's receives and re-check after each real
+  # (non-system) message, so our own `:sys.get_state/1` calls do not count.
+  defp await_traced_state(pid, predicate, hash, peer_id) do
+    1 = :erlang.trace(pid, true, [:receive])
+
+    try do
+      await_traced_loop(pid, predicate, hash, peer_id)
+    after
+      _ = :erlang.trace(pid, false, [:receive])
+      flush_traces(pid)
+    end
+  end
+
+  defp await_traced_loop(pid, predicate, hash, peer_id) do
+    state = TestSupport.Sync.sync(pid)
+
+    if predicate.(state) do
+      state
+    else
+      receive do
+        {:trace, ^pid, :receive, msg} when not is_tuple(msg) or elem(msg, 0) != :system ->
+          await_traced_loop(pid, predicate, hash, peer_id)
+      after
+        @timeout ->
+          flunk("peer state predicate failed hash=#{inspect(hash)} peer=#{inspect(peer_id)}")
+      end
+    end
+  end
+
+  defp flush_traces(pid) do
+    receive do
+      {:trace, ^pid, _, _} -> flush_traces(pid)
+    after
+      0 -> :ok
+    end
   end
 
   defp await_relay_pex_target(key, endpoint) do
