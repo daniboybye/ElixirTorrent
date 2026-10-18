@@ -1,6 +1,6 @@
 # ElixirTorrent
 
-[![GitHub release](https://img.shields.io/badge/release-0.6.8-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent/releases/tag/0.6.8) [![Changelog](https://img.shields.io/badge/changelog-blue)](https://hexdocs.pm/elixir_torrent/changelog.html) [![Hex.pm](https://img.shields.io/hexpm/v/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent/0.6.8) [![HexDocs](https://img.shields.io/badge/hexdocs-0.6.8-8E44AD)](https://hexdocs.pm/elixir_torrent/0.6.8) [![Hex.pm Downloads](https://img.shields.io/hexpm/dt/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent) [![License](https://img.shields.io/hexpm/l/elixir_torrent.svg)](https://github.com/daniboybye/ElixirTorrent/blob/master/LICENSE)
+[![GitHub release](https://img.shields.io/badge/release-0.7.0-181717?logo=github)](https://github.com/daniboybye/ElixirTorrent/releases/tag/0.7.0) [![Changelog](https://img.shields.io/badge/changelog-blue)](https://hexdocs.pm/elixir_torrent/changelog.html) [![Hex.pm](https://img.shields.io/hexpm/v/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent/0.7.0) [![HexDocs](https://img.shields.io/badge/hexdocs-0.7.0-8E44AD)](https://hexdocs.pm/elixir_torrent/0.7.0) [![Hex.pm Downloads](https://img.shields.io/hexpm/dt/elixir_torrent.svg)](https://hex.pm/packages/elixir_torrent) [![License](https://img.shields.io/hexpm/l/elixir_torrent.svg)](https://github.com/daniboybye/ElixirTorrent/blob/master/LICENSE)
 
 [![build](https://img.shields.io/github/actions/workflow/status/daniboybye/ElixirTorrent/build-and-publish.yml?branch=master&label=build&logo=github)](https://github.com/daniboybye/ElixirTorrent/actions/workflows/build-and-publish.yml) [![codecov](https://codecov.io/gh/daniboybye/ElixirTorrent/branch/master/graph/badge.svg)](https://codecov.io/gh/daniboybye/ElixirTorrent) [![BEPs](https://img.shields.io/badge/BEPs-23%20implemented-E8A33D)](PROTOCOL.md) [![Last commit](https://img.shields.io/github/last-commit/daniboybye/ElixirTorrent/master)](https://github.com/daniboybye/ElixirTorrent/commits/master)
 
@@ -35,7 +35,8 @@ qBittorrent and libtorrent.
   dual-stack via BEP 32/42), peer exchange (BEP 11), and LAN discovery (BEP 14).
   HTTP web seeds (BEP 19) act as a fifth data source.
 - **Magnet links** — metadata fetched from peers over `ut_metadata` (BEP 9/10) and
-  verified against the info hash before a normal session starts.
+  verified against the info hash before a normal session starts; the download then
+  starts from every peer the metadata phase found instead of from scratch.
 - **BitTorrent v2** (BEP 52) — pure-v2 torrents download and resume through their
   SHA-256 Merkle path; hybrid torrents join both swarms on the DHT.
 - **Encryption** — MSE/PE is full and bidirectional, so encryption-only peers connect
@@ -56,7 +57,7 @@ Full per-BEP status, including the known gaps: **[PROTOCOL.md](PROTOCOL.md)**.
 ```elixir
 def deps do
   [
-    {:elixir_torrent, "~> 0.6.8"}
+    {:elixir_torrent, "~> 0.7.0"}
   ]
 end
 ```
@@ -104,7 +105,8 @@ keeps the progress and `remove/2` drops it.
 
 The engine parses the URI, announces to its `tr=` trackers and/or asks the DHT for
 peers, fetches the `info` dictionary over BEP 9, checks `SHA1(bencode(info))` against
-the magnet's hash, and only then starts a normal session.
+the magnet's hash, and only then starts a normal session. That session starts from the
+peers the metadata phase already found, the ones it was connected to first.
 
 A magnet needs **at least one `tr=` tracker or DHT enabled**; a trackerless magnet
 with DHT off returns `{:error, :missing_trackers}`. Other common failures:
@@ -173,7 +175,7 @@ Full reference: [`hexdocs.pm/elixir_torrent/ElixirTorrent.html`](https://hexdocs
 | `stop_all_and_serialize/0` | Graceful stop + persist for every torrent |
 | `remove/2` | Stop and drop from session; optional `delete_data: true` |
 | `get/2` | Low-level field access (prefer `stats/2`) |
-| `version/0` | Version-derived client peer ID prefix (`ET0-6-8`, BEP 20) |
+| `version/0` | Version-derived client peer ID prefix (`ET0-7-0`, BEP 20) |
 
 ## ElixirTorrent Web (desktop app)
 
