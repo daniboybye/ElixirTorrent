@@ -1353,6 +1353,9 @@ defmodule Peer.Controller.State do
   @spec count_block(t(), Torrent.length()) :: t()
   defp count_block(%__MODULE__{} = state, length) do
     now = System.monotonic_time(:millisecond)
+    # Byte-granular source for the torrent's download readout (see
+    # `Torrent.ReceivedBytes`); `downloaded` only moves per verified piece.
+    :ok = Torrent.ReceivedBytes.add(state.hash, length)
 
     %__MODULE__{
       state

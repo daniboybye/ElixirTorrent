@@ -364,13 +364,28 @@ defmodule Peer.ConnectionManagerTest do
       assert discovery_counts(announce_pid) == {1, 1}
     end
 
+    # Torrent.Model reports bytes per millisecond, as a float. The gate used to
+    # accept only integers, so a real readout always counted as "low speed".
     test "does not escalate when download speed clears the low threshold" do
+      fast_per_ms = (@low_speed_bytes_per_sec + 8_000) / 1_000
+
       {_hash, manager_pid, announce_pid} =
-        setup_escalation_scenario(31, download_speed: @low_speed_bytes_per_sec)
+        setup_escalation_scenario(31, download_speed: fast_per_ms)
 
       tick(manager_pid)
 
       assert discovery_counts(announce_pid) == {0, 0}
+    end
+
+    test "escalates when a real (float, per-ms) readout is below the threshold" do
+      slow_per_ms = (@low_speed_bytes_per_sec - 8_000) / 1_000
+
+      {_hash, manager_pid, announce_pid} =
+        setup_escalation_scenario(31, download_speed: slow_per_ms)
+
+      tick(manager_pid)
+
+      assert discovery_counts(announce_pid) == {1, 1}
     end
 
     test "does not escalate once connected reaches target even with dead throughput" do

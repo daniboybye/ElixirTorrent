@@ -1,110 +1,88 @@
 defmodule TorrentModelSpeedTest do
   use ExUnit.Case, async: true
 
-  # `downloaded` advances only when a whole piece completes and verifies, so
-  # differencing it over the 5 s tick is quantized to piece size and read 0 for most
-  # of a slow torrent's life — the UI showed 0 B/s for torrents demonstrably
-  # progressing (PLAN.md #53b). `download_rate/1` therefore averages over a window
-  # long enough to span several pieces. These tests pin that, and the window is
-  # driven by rewinding the stored anchor rather than by sleeping.
+  # The download readout differences `Torrent.ReceivedBytes`, the byte count every
+  # Peer.Controller bumps per accepted block, over a 20 s sliding window. It used to
+  # difference `downloaded`, which moves only per verified piece, so a slow torrent
+  # read 0 while bytes were arriving (PLAN.md #53b). The window's samples live in
+  # the caller's process dictionary, so tests drive time by backdating them rather
+  # than by sleeping, and each test owns a random info-hash's counter.
   @piece_bytes 1024 * 1024
-  @rate_window 60 * 1_000
-  @rate_window_max 10 * 60 * 1_000
+  @rate_window 20 * 1_000
 
-  defp torrent(downloaded, left, speed) do
+  setup do
+    {:ok, _} = Application.ensure_all_started(:elixir_torrent)
+    hash = :crypto.strong_rand_bytes(20)
+    on_exit(fn -> Torrent.ReceivedBytes.delete(hash) end)
+    {:ok, hash: hash}
+  end
+
+  defp torrent(hash, left) do
     %Torrent{
-      hash: :crypto.strong_rand_bytes(20),
+      hash: hash,
       metadata: %{"info" => %{"piece length" => @piece_bytes, "name" => "t"}},
       left: left,
       last_index: 100,
       last_piece_length: @piece_bytes,
-      downloaded: downloaded,
-      speed: %{download: speed, upload: 0}
+      speed: %{download: 0.0, upload: 0}
     }
   end
 
-  defp key(torrent), do: {:speed_rate_window, torrent.hash}
+  defp key(hash), do: {:speed_rate_window, hash}
 
-  # Opens the window and then backdates it, so a full window can be exercised
-  # without waiting a minute.
-  defp open_window(torrent, age_ms, downloaded_at_start) do
-    Torrent.Model.download_rate_for_test(torrent)
-    Process.put(key(torrent), {System.monotonic_time(:millisecond) - age_ms, downloaded_at_start})
-    torrent
+  # Replaces the stored samples with one taken `age_ms` ago at `total` bytes.
+  defp sample_at(hash, age_ms, total) do
+    Process.put(key(hash), [{System.monotonic_time(:millisecond) - age_ms, total}])
   end
 
-  describe "download_rate/1" do
-    test "a matured window reports the average, not a burst" do
-      # 3 MiB over a 60 s window is 3 MiB/60 s — the same figure a hand audit gets
-      # from summing `left` deltas. The old code reported either 0 or the ~209 KB/s
-      # burst of a single piece landing inside one 5 s tick.
-      t = torrent(3 * @piece_bytes, @piece_bytes * 10, 0)
-      open_window(t, @rate_window, 0)
+  test "reports received bytes per millisecond over the window", %{hash: hash} do
+    t = torrent(hash, @piece_bytes * 10)
+    sample_at(hash, @rate_window, 0)
+    # 1.28 MB in 20 s = 64 KB/s, i.e. 64 bytes/ms.
+    :ok = Torrent.ReceivedBytes.add(hash, 1_280_000)
 
-      rate = Torrent.Model.download_rate_for_test(t)
+    assert_in_delta Torrent.Model.download_rate_for_test(t), 64.0, 1.0
+  end
 
-      assert_in_delta rate, 3 * @piece_bytes / @rate_window, 1.0
-    end
+  test "a torrent slower than one piece per window still reads its real rate",
+       %{hash: hash} do
+    # The #53b case: no piece completed, so `downloaded` did not move and the old
+    # readout said 0, while 200 KB arrived over 20 s.
+    t = torrent(hash, @piece_bytes * 10)
+    sample_at(hash, @rate_window, 0)
+    :ok = Torrent.ReceivedBytes.add(hash, 200_000)
 
-    test "a matured window starts a fresh one so the next average is independent" do
-      t = torrent(3 * @piece_bytes, @piece_bytes * 10, 0)
-      open_window(t, @rate_window, 0)
+    assert_in_delta Torrent.Model.download_rate_for_test(t), 10.0, 0.5
+  end
 
-      Torrent.Model.download_rate_for_test(t)
+  test "bytes older than the window stop counting", %{hash: hash} do
+    t = torrent(hash, @piece_bytes * 10)
+    now = System.monotonic_time(:millisecond)
+    :ok = Torrent.ReceivedBytes.add(hash, 5_000_000)
+    # 5 MB arrived long ago; nothing since, across a full window of samples.
+    Process.put(key(hash), [
+      {now - 5_000, 5_000_000},
+      {now - 25_000, 5_000_000},
+      {now - 60_000, 0}
+    ])
 
-      expected = 3 * @piece_bytes
-      assert {_at, ^expected} = Process.get(key(t))
-    end
+    assert Torrent.Model.download_rate_for_test(t) == 0.0
+    samples = Process.get(key(hash))
+    refute Enum.any?(samples, fn {at, _} -> at == now - 60_000 end)
+  end
 
-    test "the readout holds between pieces instead of collapsing to zero" do
-      # The defect itself: every tick between two piece completions used to publish
-      # exactly 0.0 while bytes were arriving normally.
-      t = torrent(@piece_bytes, @piece_bytes * 10, 55.0)
-      open_window(t, 20_000, 0)
+  test "a fresh window reports zero rather than guessing", %{hash: hash} do
+    t = torrent(hash, @piece_bytes * 10)
+    :ok = Torrent.ReceivedBytes.add(hash, 1_000_000)
 
-      assert Torrent.Model.download_rate_for_test(t) > 0
-    end
+    assert Torrent.Model.download_rate_for_test(t) == 0.0
+  end
 
-    test "a moving torrent is held unclamped while its window matures" do
-      # A piece has landed in this window, so the rate must be held exactly, not
-      # pulled down by piece_length/elapsed. Clamping here made a true 100 KB/s read
-      # as 11 KB/s once the window had aged 95 s.
-      t = torrent(@piece_bytes, @piece_bytes * 10, 100.0)
-      open_window(t, 50_000, 0)
+  test "a completed torrent reports zero", %{hash: hash} do
+    t = torrent(hash, 0)
+    sample_at(hash, @rate_window, 0)
+    :ok = Torrent.ReceivedBytes.add(hash, 1_000_000)
 
-      assert Torrent.Model.download_rate_for_test(t) == 100.0
-    end
-
-    test "with nothing arriving the rate is clamped by what the silence proves" do
-      # No piece at all in the window: were the torrent still running this fast, the
-      # first one would already have landed, so the claim is pulled down.
-      absurd = @piece_bytes * 1.0
-      t = torrent(@piece_bytes, @piece_bytes * 10, absurd)
-      open_window(t, 30_000, @piece_bytes)
-
-      rate = Torrent.Model.download_rate_for_test(t)
-
-      assert rate < absurd
-      assert_in_delta rate, @piece_bytes / 30_000, @piece_bytes / 30_000 * 0.2
-    end
-
-    test "a torrent that completes nothing for the maximum window reports zero" do
-      t = torrent(@piece_bytes, @piece_bytes * 10, 55.0)
-      open_window(t, @rate_window_max, @piece_bytes)
-
-      assert Torrent.Model.download_rate_for_test(t) == 0.0
-    end
-
-    test "a completed torrent reports zero" do
-      t = torrent(@piece_bytes * 10, 0, 500.0)
-
-      assert Torrent.Model.download_rate_for_test(t) == 0.0
-    end
-
-    test "a fresh window reports zero rather than guessing" do
-      t = torrent(0, @piece_bytes * 10, 0)
-
-      assert Torrent.Model.download_rate_for_test(t) == 0.0
-    end
+    assert Torrent.Model.download_rate_for_test(t) == 0.0
   end
 end

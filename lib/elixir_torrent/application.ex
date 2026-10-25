@@ -13,6 +13,7 @@ defmodule ElixirTorrentApplication do
       Peer.UtPex.RecentCache,
       Peer.DialStats,
       Peer.Holepunch.Store,
+      Torrent.ReceivedBytes,
       Torrents,
       PeerDiscovery,
       Acceptor,
