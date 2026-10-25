@@ -80,6 +80,10 @@ defmodule Tracker do
   @type source_job ::
           {Fanout.role(), :inet | :inet6, :inet.ip_address() | nil, :inet.ip_address() | nil}
 
+  # What a `source_result` log line names: the tracker, and a thunk for the
+  # event so that it is only worked out when debug logging is on.
+  @type log_label :: {String.t(), (-> String.t())}
+
   @doc false
   @spec fast_fail_request_opts() :: request_opts()
   def fast_fail_request_opts do
@@ -141,9 +145,14 @@ defmodule Tracker do
         |> Enum.filter(&udp_announceable?(&1, sources))
         |> Enum.map(&udp_source_jobs(&1, sources, port))
         |> order_source_jobs()
-        |> run_source_jobs("udp://#{host}:#{port}", hash, opts, fn job ->
-          udp_announce_job(job, port, hash, stats, opts)
-        end)
+        |> run_source_jobs(
+          {"udp://#{host}:#{port}", fn -> event_label(hash, stats) end},
+          hash,
+          opts,
+          fn job ->
+            udp_announce_job(job, port, hash, stats, opts)
+          end
+        )
         |> Enum.map(&elem(&1, 1))
         |> merge_http_announces()
 
@@ -291,7 +300,7 @@ defmodule Tracker do
   # them concurrently, so a dead source never holds back the others.
   @spec run_source_jobs(
           [source_job()],
-          String.t(),
+          log_label(),
           Torrent.hash(),
           request_opts(),
           (source_job() -> Response.t() | Error.t())
@@ -332,16 +341,29 @@ defmodule Tracker do
   # this announce leave from", on a single- and a multi-homed host alike.
   @spec log_source_results(
           [{source_job(), Response.t() | Error.t()}],
-          String.t(),
+          log_label(),
           Torrent.hash()
         ) :: :ok
-  defp log_source_results(pairs, tracker, hash) do
+  defp log_source_results(pairs, {tracker, event}, hash) do
     Enum.each(pairs, fn {{role, family, dest, source}, result} ->
       Logger.debug(fn ->
-        "[tracker_announce] source_result hash=#{Torrent.hex_encoded_hash(hash)} tracker=#{tracker} dest=#{format_dest(dest)} family=#{family} role=#{role} source=#{format_source(source)} #{format_source_result(result)}"
+        "[tracker_announce] source_result hash=#{Torrent.hex_encoded_hash(hash)} tracker=#{tracker} event=#{event.()} dest=#{format_dest(dest)} family=#{family} role=#{role} source=#{format_source(source)} #{format_source_result(result)}"
       end)
     end)
   end
+
+  # For the log only. An `:auto` request reads its event from the model per
+  # announce; read it once more here rather than thread it back out.
+  @spec event_label(Torrent.hash(), stats()) :: String.t()
+  defp event_label(hash, stats) do
+    case resolve_stats(hash, stats) do
+      {:ok, {_uploaded, _downloaded, _left, event}} -> event_name(event)
+      :skip -> "unknown"
+    end
+  end
+
+  @spec event_name(0..3) :: String.t()
+  defp event_name(event), do: Torrent.event_to_string(event) || "none"
 
   @spec format_dest(:inet.ip_address() | nil) :: String.t()
   defp format_dest(nil), do: "unresolved"
@@ -700,9 +722,14 @@ defmodule Tracker do
     |> Enum.filter(&MapSet.member?(tracker_families, &1))
     |> Enum.map(&http_source_jobs(&1, sources, dest_ctx))
     |> order_source_jobs()
-    |> run_source_jobs(http_tracker_label(announce), hash, opts, fn job ->
-      http_announce_job(job, url, opts)
-    end)
+    |> run_source_jobs(
+      {http_tracker_label(announce), fn -> event_name(event) end},
+      hash,
+      opts,
+      fn job ->
+        http_announce_job(job, url, opts)
+      end
+    )
     |> merge_http_source_results()
   end
 

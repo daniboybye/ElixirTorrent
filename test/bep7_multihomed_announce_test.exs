@@ -12,6 +12,8 @@ defmodule Bep7MultihomedAnnounceTest do
   """
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Tracker.{Error, Fanout, Response, UDP}
 
   @hash :crypto.strong_rand_bytes(20)
@@ -297,16 +299,25 @@ defmodule Bep7MultihomedAnnounceTest do
 
       on_exit(fn -> Process.exit(server, :kill) end)
 
-      result =
-        Tracker.request!(
-          "udp://127.0.0.1:#{port}/announce",
-          @hash,
-          @started,
-          # duplicates and the primary listed again must not add announces
-          @fast_fail ++ [announce_sources: %{inet: [@lo1, @lo2, @lo3, @lo2, @lo1], inet6: []}]
-        )
+      {result, log} =
+        with_log(fn ->
+          Tracker.request!(
+            "udp://127.0.0.1:#{port}/announce",
+            @hash,
+            @started,
+            # duplicates and the primary listed again must not add announces
+            @fast_fail ++ [announce_sources: %{inet: [@lo1, @lo2, @lo3, @lo2, @lo1], inet6: []}]
+          )
+        end)
 
       assert %Response{peers: peers} = result
+
+      # The debug evidence the local validation reads: one line per source.
+      assert log =~
+               ~r/source_result .* event=started .* role=primary source=auto result=ok peers=2/
+
+      assert log =~ ~r/source_result .* role=secondary source=127\.0\.0\.2 result=ok peers=2/
+      assert log =~ ~r/source_result .* role=secondary source=127\.0\.0\.3 result=ok peers=2/
 
       assert sorted(peers, &{&1.ip, &1.port}) == [
                {{10, 1, 0, 1}, 6881},
