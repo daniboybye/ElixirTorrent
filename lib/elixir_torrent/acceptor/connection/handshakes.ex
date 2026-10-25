@@ -725,7 +725,7 @@ defmodule Acceptor.Connection.Handshakes do
   end
 
   defp global_ip_at_listen_port?({a, b, c, d}) do
-    Acceptor.all_global_ips().inet == {a, b, c, d}
+    {a, b, c, d} in Acceptor.all_ipv4()
   end
 
   defp global_ip_at_listen_port?({a, b, c, d, _, _, _, _}) do

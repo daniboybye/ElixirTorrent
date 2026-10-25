@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- BEP 7 multi-homed tracker announce. A host with more than one network — a
+  second NIC, a VPN tunnel, tethering, IPv4 plus IPv6 on different interfaces —
+  now announces to each HTTP and UDP tracker from every eligible local address,
+  each on a socket bound to that address, so the tracker lists and serves peers
+  for each of them. Before, only one primary IPv4 and one primary IPv6 address
+  announced. Eligible means the first usable address of each interface that is
+  up, not loopback, link-local, ULA/site-local or IPv4-mapped, at most four per
+  family (`config :elixir_torrent, :tracker, max_sources_per_family: 4`;
+  `multihomed_announce: false` restores the old behaviour). A host with one
+  address per family announces exactly as before.
+- The added announces run concurrently (`max_concurrent_source_announces: 4`),
+  and one that has not answered 15 s (`source_grace_ms`) after another source
+  succeeded is abandoned, so a source the tracker cannot reach never holds back
+  the peers the others found. Each distinct source address carries the
+  `started`/`completed`/`stopped` event once; tier failover (BEP 12) and
+  retry/cooldown (BEP 31) still see one merged answer per tracker.
+- Every announce logs one `[tracker_announce] source_result` debug line per
+  source: tracker, destination, family, role (primary/secondary), bound source
+  and result.
+
+### Fixed
+
+- BEP 15 `connection_id`s are cached per local address as well as local port.
+  Two announce sockets bound to different addresses can get the same ephemeral
+  port, and trackers tie the id to the client's address.
+- Peers a tracker returns at any of our IPv4 addresses on our listen port are
+  recognised as ourselves, not only the primary one.
+
 ## 0.7.0 - 2026-10-18
 
 A magnet release. When a magnet's metadata arrived, the download threw away every
