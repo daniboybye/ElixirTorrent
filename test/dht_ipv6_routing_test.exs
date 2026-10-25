@@ -224,10 +224,21 @@ defmodule DHTIPv6RoutingTest do
                context.state
              )
 
-    assert {:ok, {_server_ip, _server_port, packet}} = :gen_udp.recv(client, 0, 1_000)
-    assert {:ok, {:response, response}} = KRPC.decode(packet)
+    assert {:ok, {:response, response}} = KRPC.decode(recv_reply(client))
     assert response.ip == compact_endpoint(source_ip, source_port)
     response
+  end
+
+  # A first-seen query source also gets our verification ping (see
+  # `DHT.Candidates`) right after the answer; each call above starts from the
+  # same state, so every one leaves one behind. Skip them, we want the answer.
+  defp recv_reply(socket) do
+    assert {:ok, {_server_ip, _server_port, packet}} = :gen_udp.recv(socket, 0, 1_000)
+
+    case KRPC.decode(packet) do
+      {:ok, {:query, %{method: :ping}}} -> recv_reply(socket)
+      _ -> packet
+    end
   end
 
   defp put_query_target(query, :find_node, target), do: Map.put(query, :target, target)

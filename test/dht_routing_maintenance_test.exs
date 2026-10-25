@@ -46,10 +46,26 @@ defmodule DHT.RoutingMaintenanceTest do
       node_id: candidate.id
     }
 
-    assert {:noreply, result} =
+    assert {:noreply, queried} =
              DHT.handle_info(
                {:udp, server, candidate_ip, candidate_port, KRPC.encode_query(query)},
                state
+             )
+
+    # A first-seen query source is only a candidate: we answer it, then ping
+    # it, and only its answer starts the normal insert (ping-before-evict).
+    assert {:ok, {_ip, _port, pong}} = :gen_udp.recv(candidate_socket, 0, 1_000)
+    assert {:ok, {:response, %{transaction_id: "new"}}} = KRPC.decode(pong)
+    assert {:ok, {_ip, _port, verify}} = :gen_udp.recv(candidate_socket, 0, 1_000)
+    assert {:ok, {:query, %{method: :ping, transaction_id: verify_tid}}} = KRPC.decode(verify)
+    refute RoutingTable.find_entry(queried.routing_tables.v4, candidate.id)
+
+    verified = %{transaction_id: verify_tid, node_id: candidate.id}
+
+    assert {:noreply, result} =
+             DHT.handle_info(
+               {:udp, server, candidate_ip, candidate_port, KRPC.encode_response(verified)},
+               queried
              )
 
     assert {:ok, {_ip, _port, ping_packet}} = :gen_udp.recv(incumbent_socket, 0, 1_000)

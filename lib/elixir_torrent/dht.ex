@@ -8,6 +8,7 @@ defmodule DHT do
     * `announce/2` — announce our BitTorrent listen port to closest nodes
     * `seed_node/2` — ping a node learned from a BT PORT message (BEP 5 § extension)
     * `add_node/1` — seed routing table with a known contact
+    * `routing_stats/0` — routing table size and inbound-candidate counters
     * `port/0`, `enabled?/0` — runtime status
 
   DHT failures are isolated: callers receive `{:error, reason}` and downloads continue.
@@ -17,6 +18,7 @@ defmodule DHT do
 
   alias DHT.{
     BEP42,
+    Candidates,
     Compact,
     Config,
     KRPC,
@@ -42,6 +44,11 @@ defmodule DHT do
   @max_pending 256
   @max_announce_tokens 512
   @reannounce_interval_ms 15 * 60 * 1_000
+  # Verification pings for inbound-only query sources (`DHT.Candidates`) may
+  # hold at most this many of the `@max_pending` query slots, so a flood of
+  # strangers never starves our own lookups.
+  @max_candidate_pending div(@max_pending, 4)
+  @routing_stats_log_ms 60 * 1_000
 
   defstruct [
     :socket_v4,
@@ -55,6 +62,7 @@ defmodule DHT do
     lookups: %{},
     announce_tokens: %{},
     announce_timers: %{},
+    candidates: %Candidates{},
     bootstrapped?: false
   ]
 
@@ -158,6 +166,20 @@ defmodule DHT do
 
   def add_node(_), do: :ok
 
+  @doc """
+  Routing table size per family plus the inbound-candidate counters of
+  `DHT.Candidates` (current `candidates`, lifetime `verified`, `unanswered`,
+  `expired`, `dropped_*`, …). `{:error, :disabled}` when the DHT is not running.
+  """
+  @spec routing_stats() :: {:ok, map()} | {:error, term()}
+  def routing_stats do
+    if enabled?(),
+      do: {:ok, GenServer.call(__MODULE__, :routing_stats, 5_000)},
+      else: {:error, :disabled}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
   # --- GenServer ---
 
   @impl GenServer
@@ -190,6 +212,8 @@ defmodule DHT do
 
   @impl GenServer
   def handle_call(:port, _from, %__MODULE__{port: port} = state), do: {:reply, port, state}
+
+  def handle_call(:routing_stats, _from, state), do: {:reply, routing_stats(state), state}
 
   def handle_call({:udp_socket, family}, _from, state),
     do: {:reply, select_socket(state, family), state}
@@ -243,6 +267,12 @@ defmodule DHT do
   def handle_info(:refresh_buckets, state) do
     schedule_refresh(@refresh_ms)
     {:noreply, refresh_stale_buckets(state)}
+  end
+
+  def handle_info(:log_routing_stats, state) do
+    schedule_routing_stats_log()
+    Logger.debug(fn -> "[dht] routing_stats #{format_routing_stats(routing_stats(state))}" end)
+    {:noreply, state}
   end
 
   def handle_info(:persist_routing, state) do
@@ -341,16 +371,20 @@ defmodule DHT do
         ) :: t()
   defp handle_query(state, ip, port, query, request_family) do
     contact = %{id: query.node_id, ip: ip, port: port}
-    state = learn_remote_contact(state, contact, from_query: true)
 
-    case query.method do
-      {:unknown, _method} ->
-        send_error(state, ip, port, query.transaction_id, 204, "Method Unknown")
-        state
+    state =
+      case query.method do
+        {:unknown, _method} ->
+          send_error(state, ip, port, query.transaction_id, 204, "Method Unknown")
+          state
 
-      method when method in [:ping, :find_node, :get_peers, :announce_peer] ->
-        reply_known_query(state, ip, port, query, method, request_family)
-    end
+        method when method in [:ping, :find_node, :get_peers, :announce_peer] ->
+          reply_known_query(state, ip, port, query, method, request_family)
+      end
+
+    # Only after the answer is on the wire: a first-seen source gets a
+    # verification ping, and our reply neither waits on it nor depends on it.
+    observe_query_source(state, contact)
   end
 
   @spec reply_known_query(
@@ -564,9 +598,13 @@ defmodule DHT do
         contact = %{id: response.node_id, ip: ip, port: port}
 
         if BEP42.valid_or_exempt?(response.node_id, ip) do
-          apply_trusted_response(state, pending, ip, port, response, contact)
+          state
+          |> settle_candidate(pending, :verified)
+          |> apply_trusted_response(pending, ip, port, response, contact)
         else
-          reject_untrusted_response(state, pending, ip, response)
+          state
+          |> settle_candidate(pending, :rejected)
+          |> reject_untrusted_response(pending, ip, response)
         end
     end
   end
@@ -1182,6 +1220,96 @@ defmodule DHT do
     %{state | announce_tokens: tokens}
   end
 
+  # --- Inbound query sources (BEP 5 § Routing Table) ---
+
+  # A node we already hold at this exact address refreshes as it always has. A
+  # first-seen source — or a known id claimed from a new address — is only a
+  # candidate: `DHT.Candidates` admits it within its limits and we ping the
+  # address the query came from. Its response then takes the normal path
+  # (`handle_response/4` → `learn_remote_contact/3`, ping-before-evict).
+  @spec observe_query_source(t(), Compact.contact()) :: t()
+  defp observe_query_source(state, contact) do
+    cond do
+      contact.id == state.node_id or not BEP42.valid_or_exempt?(contact.id, contact.ip) ->
+        state
+
+      known_at_address?(state.routing_tables, contact) ->
+        learn_remote_contact(state, contact, from_query: true)
+
+      true ->
+        probe_candidate(state, contact)
+    end
+  end
+
+  @spec known_at_address?(RoutingTables.t(), Compact.contact()) :: boolean()
+  defp known_at_address?(tables, %{id: id, ip: ip, port: port}) do
+    entry =
+      tables
+      |> RoutingTables.table(RoutingTables.family_for(ip))
+      |> RoutingTable.find_entry(id)
+
+    match?(%{ip: ^ip, port: ^port}, entry)
+  end
+
+  @spec probe_candidate(t(), Compact.contact()) :: t()
+  defp probe_candidate(state, contact) do
+    if candidate_pending_count(state) >= @max_candidate_pending do
+      %{state | candidates: Candidates.refuse(state.candidates, :busy)}
+    else
+      case Candidates.admit(state.candidates, contact, System.monotonic_time(:millisecond)) do
+        {:ok, candidates} -> send_candidate_ping(%{state | candidates: candidates}, contact)
+        {:drop, _reason, candidates} -> %{state | candidates: candidates}
+      end
+    end
+  end
+
+  @spec send_candidate_ping(t(), Compact.contact()) :: t()
+  defp send_candidate_ping(state, contact) do
+    pending = %{type: :candidate_ping, node: contact, method: :ping}
+
+    case send_query(state, contact, :ping, [], pending: pending) do
+      {:ok, _tid, new_state} ->
+        new_state
+
+      {:error, _reason, new_state} ->
+        %{
+          new_state
+          | candidates: Candidates.resolve(new_state.candidates, Candidates.key(contact), :unsent)
+        }
+    end
+  end
+
+  @spec candidate_pending_count(t()) :: non_neg_integer()
+  defp candidate_pending_count(state),
+    do: Enum.count(state.pending, &match?({_tid, %{type: :candidate_ping}}, &1))
+
+  @spec settle_candidate(t(), map(), Candidates.outcome()) :: t()
+  defp settle_candidate(state, %{type: :candidate_ping, node: contact}, outcome),
+    do: %{
+      state
+      | candidates: Candidates.resolve(state.candidates, Candidates.key(contact), outcome)
+    }
+
+  defp settle_candidate(state, _pending, _outcome), do: state
+
+  @spec routing_stats(t()) :: map()
+  defp routing_stats(state) do
+    state.candidates
+    |> Candidates.expire(System.monotonic_time(:millisecond))
+    |> Candidates.stats()
+    |> Map.merge(%{
+      routing_v4: RoutingTable.node_count(state.routing_tables.v4),
+      routing_v6: RoutingTable.node_count(state.routing_tables.v6)
+    })
+  end
+
+  @spec format_routing_stats(map()) :: String.t()
+  defp format_routing_stats(stats) do
+    stats
+    |> Enum.sort()
+    |> Enum.map_join(" ", fn {key, value} -> "#{key}=#{value}" end)
+  end
+
   # --- helpers ---
 
   @spec learn_remote_contact(t(), Compact.contact(), keyword()) :: t()
@@ -1360,6 +1488,12 @@ defmodule DHT do
     learn_remote_contact(state, candidate, opts)
   end
 
+  # An unanswered verification ping says nothing about any table entry: the
+  # candidate's id was only claimed, and may be a real node's id spoofed from
+  # another address. Drop the candidate and touch nothing else.
+  defp handle_query_failure(state, %{type: :candidate_ping} = pending),
+    do: settle_candidate(state, pending, :unanswered)
+
   defp handle_query_failure(state, %{node: %{id: id} = contact})
        when is_binary(id) and byte_size(id) == 20 do
     %{state | routing_tables: RoutingTables.mark_query_failed(state.routing_tables, contact)}
@@ -1372,6 +1506,10 @@ defmodule DHT do
   defp handle_query_failure(state, _), do: state
 
   @spec mark_pending_bad(t(), map(), :inet.ip_address()) :: t()
+  # Same reason as the `:candidate_ping` failure clause: a claimed id is no
+  # table entry of ours to punish.
+  defp mark_pending_bad(state, %{type: :candidate_ping}, _source_ip), do: state
+
   defp mark_pending_bad(state, %{node: %{id: id, ip: _ip} = contact}, _source_ip)
        when is_binary(id) and byte_size(id) == 20 do
     %{state | routing_tables: RoutingTables.mark_bad(state.routing_tables, contact)}
@@ -1640,6 +1778,7 @@ defmodule DHT do
     schedule_token_rotate(@token_rotate_ms)
     schedule_refresh(@refresh_ms)
     schedule_persist(@persist_ms)
+    schedule_routing_stats_log()
     :ok
   end
 
@@ -1724,6 +1863,10 @@ defmodule DHT do
 
   @spec schedule_refresh(non_neg_integer()) :: reference()
   defp schedule_refresh(ms), do: Process.send_after(self(), :refresh_buckets, ms)
+
+  @spec schedule_routing_stats_log() :: reference()
+  defp schedule_routing_stats_log,
+    do: Process.send_after(self(), :log_routing_stats, @routing_stats_log_ms)
 
   @spec schedule_persist(non_neg_integer()) :: reference()
   defp schedule_persist(ms), do: Process.send_after(self(), :persist_routing, ms)

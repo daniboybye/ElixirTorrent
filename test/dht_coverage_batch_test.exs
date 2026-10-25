@@ -180,6 +180,11 @@ defmodule DHT.CoverageBatchTest do
                  state
                )
 
+      # The first query's source was a stranger: our verification ping for it
+      # follows the 203 on the wire.
+      assert {:ok, {_ip, _port, verify}} = :gen_udp.recv(client, 0, 1_000)
+      assert {:ok, {:query, %{method: :ping}}} = KRPC.decode(verify)
+
       assert {:ok, {_ip, _port, packet2}} = :gen_udp.recv(client, 0, 1_000)
       assert {:ok, {:error, err2}} = KRPC.decode(packet2)
       assert err2.code == 203
