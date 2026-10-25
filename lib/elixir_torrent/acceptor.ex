@@ -137,12 +137,21 @@ defmodule Acceptor do
           inet: [:inet.ip4_address()],
           inet6: [non_neg_integer()]
         }
+  @type announce_sources :: %{inet: [:inet.ip4_address()], inet6: [:inet.ip6_address()]}
   @type ip_snapshot :: %{
-          inet: :inet.ip4_address() | nil,
-          inet6: :inet.ip6_address() | nil,
-          inet6_all: [:inet.ip6_address()],
-          multicast_interfaces: multicast_interfaces()
+          required(:inet) => :inet.ip4_address() | nil,
+          required(:inet6) => :inet.ip6_address() | nil,
+          required(:inet6_all) => [:inet.ip6_address()],
+          required(:multicast_interfaces) => multicast_interfaces(),
+          optional(:inet_all) => [:inet.ip4_address()],
+          optional(:announce_sources) => announce_sources()
         }
+
+  # BEP 7 multi-homed announce: how many local addresses per family a tracker
+  # announce may leave from (the primary included). One per interface, so a
+  # privacy-extension host with five temporary IPv6 addresses on one NIC still
+  # counts as one source; the cap only bites on hosts with many interfaces.
+  @default_max_sources_per_family 4
 
   # Cached snapshot of getifaddrs-derived addresses. Written by IpCache every
   # 30s; readers hit :persistent_term (~constant time), with a direct compute
@@ -188,20 +197,137 @@ defmodule Acceptor do
         |> Enum.filter(&is_tuple/1)
       end)
 
+    v4_all = Enum.filter(ips, &global_ipv4?/1)
     v6_all = Enum.filter(ips, &global_ipv6?/1)
+    v4 = List.first(v4_all)
+    v6 = List.first(v6_all)
 
     %{
-      inet: Enum.find(ips, &global_ipv4?/1),
-      inet6: List.first(v6_all),
+      inet: v4,
+      inet6: v6,
+      inet_all: v4_all,
       inet6_all: v6_all,
-      multicast_interfaces: multicast_interfaces_from(ifs)
+      multicast_interfaces: multicast_interfaces_from(ifs),
+      announce_sources: announce_sources_from(ifs, v4, v6)
     }
   end
 
   def compute_all_global_ips({:error, reason}) do
     Logger.warning("getifaddrs failed: #{inspect(reason)}")
-    %{inet: nil, inet6: nil, inet6_all: [], multicast_interfaces: %{inet: [], inet6: []}}
+
+    %{
+      inet: nil,
+      inet6: nil,
+      inet_all: [],
+      inet6_all: [],
+      multicast_interfaces: %{inet: [], inet6: []},
+      announce_sources: %{inet: [], inet6: []}
+    }
   end
+
+  @doc """
+  The local addresses a tracker announce leaves from, per family (BEP 7).
+
+  The first entry of each list is the primary address (`primary_ips/0`), so a
+  host with one address per family announces exactly as it always has. Every
+  further entry is the first announce-eligible address of *another* interface
+  that is up — a second NIC, a VPN tunnel, tethering — capped at
+  `:max_sources_per_family` (default #{@default_max_sources_per_family}) under
+  `config :elixir_torrent, :tracker`. `multihomed_announce: false` there
+  reduces the lists to the primary addresses.
+
+  Read from the `IpCache` snapshot, so an interface that comes or goes shows up
+  within one refresh (30 s); nothing here holds a socket.
+  """
+  @spec announce_sources() :: announce_sources()
+  def announce_sources do
+    snapshot = all_global_ips()
+
+    sources =
+      Map.get_lazy(snapshot, :announce_sources, fn ->
+        %{inet: List.wrap(snapshot.inet), inet6: List.wrap(snapshot.inet6)}
+      end)
+
+    config = Application.get_env(:elixir_torrent, :tracker, [])
+
+    limit =
+      if Keyword.get(config, :multihomed_announce, true),
+        do: max_sources_per_family(config),
+        else: 1
+
+    %{inet: Enum.take(sources.inet, limit), inet6: Enum.take(sources.inet6, limit)}
+  end
+
+  @spec max_sources_per_family(keyword()) :: pos_integer()
+  defp max_sources_per_family(config) do
+    case Keyword.get(config, :max_sources_per_family, @default_max_sources_per_family) do
+      n when is_integer(n) and n >= 1 -> n
+      _ -> @default_max_sources_per_family
+    end
+  end
+
+  # Pure so the rules run against a synthetic interface list. The primary
+  # address leads its family whatever interface it is on (that is the address
+  # every other subsystem advertises); then one address per remaining interface,
+  # in `getifaddrs` order. The primary is taken as given — a host whose only
+  # IPv6 is a ULA keeps announcing it as before — but an *additional* source
+  # must be one a public tracker can answer: a ULA, a deprecated site-local or
+  # an IPv4-mapped address is a source the tracker would record and nobody
+  # could reach.
+  @doc false
+  @spec announce_sources_from(
+          [{charlist(), keyword()}],
+          :inet.ip4_address() | nil,
+          :inet.ip6_address() | nil
+        ) :: announce_sources()
+  def announce_sources_from(ifs, primary_v4, primary_v6) do
+    %{
+      inet: family_sources(ifs, primary_v4, &global_ipv4?/1),
+      inet6: family_sources(ifs, primary_v6, &extra_ipv6_source?/1)
+    }
+  end
+
+  @spec family_sources(
+          [{charlist(), keyword()}],
+          :inet.ip_address() | nil,
+          (:inet.ip_address() -> boolean())
+        ) :: [:inet.ip_address()]
+  defp family_sources(_ifs, nil, _eligible?), do: []
+
+  defp family_sources(ifs, primary, eligible?) do
+    extras =
+      Enum.flat_map(ifs, fn {_ifname, props} ->
+        addresses = Enum.filter(Keyword.get_values(props, :addr), &is_tuple/1)
+
+        cond do
+          primary in addresses -> []
+          not announce_interface?(Keyword.get(props, :flags, [])) -> []
+          true -> List.wrap(Enum.find(addresses, eligible?))
+        end
+      end)
+
+    Enum.uniq([primary | extras])
+  end
+
+  # A loopback interface owns nothing a tracker could reach, and an interface
+  # that is down owns addresses no packet can leave from.
+  @spec announce_interface?(list()) :: boolean()
+  defp announce_interface?(flags), do: :up in flags and :loopback not in flags
+
+  @spec extra_ipv6_source?(:inet.ip_address()) :: boolean()
+  defp extra_ipv6_source?({s1, _s2, _s3, _s4, _s5, _s6, _s7, _s8} = ip) when is_integer(s1) do
+    case ip do
+      # fc00::/7 unique local, fec0::/10 deprecated site-local
+      _ when s1 in 0xFC00..0xFDFF -> false
+      _ when s1 in 0xFEC0..0xFEFF -> false
+      # ::ffff:0:0/96 IPv4-mapped and ::/96 IPv4-compatible
+      {0, 0, 0, 0, 0, 0xFFFF, _, _} -> false
+      {0, 0, 0, 0, 0, 0, _, _} -> false
+      _ -> global_ipv6?(ip)
+    end
+  end
+
+  defp extra_ipv6_source?(_ip), do: false
 
   @doc false
   @spec multicast_interfaces() :: multicast_interfaces()
@@ -494,6 +620,63 @@ defmodule Acceptor do
     end
   end
 
+  @doc """
+  Whether a socket bound to `source` has a route to `dest`.
+
+  The question `announce_source_ip/3` cannot ask: it probes the route the
+  *stack* would choose, while an additional BEP 7 source is bound on purpose
+  to an address that is not the stack's choice. A datagram socket bound to
+  `source` is `connect`ed to `dest` — a route lookup, **no packet is sent**.
+  It fails when the address has gone (interface removed since the last
+  `IpCache` refresh), when the family is off, or when no route leaves from that
+  source. A loopback destination is reachable only from a loopback source, and
+  a loopback source reaches nothing else, whatever the stack would allow.
+  """
+  @spec source_reaches?(:inet.ip_address(), :inet.ip_address(), :inet.port_number()) ::
+          boolean()
+  def source_reaches?(source, dest, port)
+      when tuple_size(source) in [4, 8] and tuple_size(source) == tuple_size(dest) do
+    if loopback_ip?(source) == loopback_ip?(dest) do
+      bound_route_probe(source, dest, port)
+    else
+      false
+    end
+  end
+
+  def source_reaches?(_source, _dest, _port), do: false
+
+  @spec bound_route_probe(:inet.ip_address(), :inet.ip_address(), :inet.port_number()) ::
+          boolean()
+  defp bound_route_probe(source, dest, port) do
+    family = if tuple_size(source) == 4, do: :inet, else: :inet6
+
+    case :gen_udp.open(0, [:binary, family, {:active, false}, {:ip, source}]) do
+      {:ok, socket} ->
+        try do
+          case :gen_udp.connect(socket, dest, probe_port(port)) do
+            :ok ->
+              true
+
+            {:error, reason} ->
+              Logger.debug(
+                "[acceptor] source_route_probe_failed source=#{format_ip(source)} dest=#{format_ip(dest)} reason=#{inspect(reason)}"
+              )
+
+              false
+          end
+        after
+          :gen_udp.close(socket)
+        end
+
+      {:error, reason} ->
+        Logger.debug(
+          "[acceptor] source_route_probe_no_socket source=#{format_ip(source)} reason=#{inspect(reason)}"
+        )
+
+        false
+    end
+  end
+
   @spec same_family?(:inet.ip_address(), :inet.ip_address()) :: boolean()
   defp same_family?(a, b) when is_tuple(a) and is_tuple(b),
     do: tuple_size(a) == tuple_size(b)
@@ -530,9 +713,21 @@ defmodule Acceptor do
   defp this_host_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
 
   defp this_host_ip?(ip) do
-    %{inet: v4, inet6_all: v6_all} = all_global_ips()
-    ip == v4 or ip in v6_all
+    %{inet6_all: v6_all} = snapshot = all_global_ips()
+    ip in all_ipv4(snapshot) or ip in v6_all
   end
+
+  @doc """
+  Every global IPv4 address of this host, the primary first.
+
+  A multi-homed announce (`announce_sources/0`) makes trackers echo each of
+  them back as a peer, so self-connection checks need all of them, not just
+  `primary_ips/0`. Snapshots written before `inet_all` existed fall back to the
+  primary address.
+  """
+  @spec all_ipv4(ip_snapshot()) :: [:inet.ip4_address()]
+  def all_ipv4(snapshot \\ all_global_ips()),
+    do: Map.get_lazy(snapshot, :inet_all, fn -> List.wrap(snapshot.inet) end)
 
   @doc false
   @spec ipv4_binary() :: <<_::32>> | nil

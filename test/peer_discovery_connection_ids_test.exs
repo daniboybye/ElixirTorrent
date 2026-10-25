@@ -18,8 +18,10 @@ defmodule PeerDiscoveryConnectionIdsTest do
       {:ok, socket} =
         :gen_udp.open(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
 
-      {:ok, local_port} = :inet.port(socket)
-      key = {{127, 0, 0, 1}, 6881, local_port}
+      # Keyed by the local address too: a multi-homed announce binds one socket
+      # per source address, and two of them may share an ephemeral port.
+      {:ok, {local_ip, local_port}} = :inet.sockname(socket)
+      key = {{127, 0, 0, 1}, 6881, local_ip, local_port}
 
       on_exit(fn -> :gen_udp.close(socket) end)
 

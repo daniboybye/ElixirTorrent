@@ -3,7 +3,7 @@ defmodule Tracker do
   HTTP and UDP (BEP 15) tracker announce/scrape client with multi-homed source IP selection.
   """
 
-  alias __MODULE__.{Error, Response, UDP}
+  alias __MODULE__.{Error, Fanout, Response, UDP}
 
   require Logger
 
@@ -61,10 +61,24 @@ defmodule Tracker do
   def model_not_ready_error,
     do: %Error{reason: :model_not_ready, retry_in: @model_not_ready_retry_sec}
 
+  # `announce_sources` replaces `Acceptor.announce_sources/0` for one request
+  # (tests inject a synthetic address list through it) and `source_grace_ms`
+  # the `Tracker.Fanout` grace window; `source_role` is set internally on the
+  # requests a multi-homed announce adds.
   @type request_opts :: [
           max_udp_attempts: 0..8,
-          http_timeout_ms: pos_integer()
+          http_timeout_ms: pos_integer(),
+          announce_sources: Acceptor.announce_sources(),
+          source_grace_ms: non_neg_integer(),
+          source_role: Fanout.role()
         ]
+
+  # One announce of a multi-homed request: who it is for (`:primary` is the
+  # announce the engine always made, `:secondary` one BEP 7 adds per further
+  # local address), the family, the tracker address (`nil` when the HTTP path
+  # did not resolve it) and the source to bind (`nil` = let the route choose).
+  @type source_job ::
+          {Fanout.role(), :inet | :inet6, :inet.ip_address() | nil, :inet.ip_address() | nil}
 
   @doc false
   @spec fast_fail_request_opts() :: request_opts()
@@ -121,14 +135,17 @@ defmodule Tracker do
   defp udp_announce_responses(host, port, hash, stats, opts) do
     case resolve_hosts(host) do
       {:ok, hosts} ->
-        source_ips = Acceptor.primary_ips()
+        sources = announce_sources(opts)
 
-        responses =
-          hosts
-          |> Enum.filter(&udp_announceable?(&1, source_ips))
-          |> Enum.map(&udp_announce_on_host(&1, source_ips, port, hash, stats, opts))
-
-        merge_http_announces(responses)
+        hosts
+        |> Enum.filter(&udp_announceable?(&1, sources))
+        |> Enum.map(&udp_source_jobs(&1, sources, port))
+        |> order_source_jobs()
+        |> run_source_jobs("udp://#{host}:#{port}", hash, opts, fn job ->
+          udp_announce_job(job, port, hash, stats, opts)
+        end)
+        |> Enum.map(&elem(&1, 1))
+        |> merge_http_announces()
 
       {:error, reason} ->
         # resolve_hosts failures are DNS-class (:nxdomain / timeout / …). Dead
@@ -144,33 +161,195 @@ defmodule Tracker do
   # family to bind — or when it is loopback, which needs no source of ours at
   # all and would otherwise be skipped on a machine that is offline or has no
   # global address of that family.
-  @spec udp_announceable?({:inet.ip_address(), :inet | :inet6}, map()) :: boolean()
-  defp udp_announceable?({ip, family}, source_ips),
-    do: Acceptor.loopback_ip?(ip) or Map.get(source_ips, family) != nil
+  @spec udp_announceable?({:inet.ip_address(), :inet | :inet6}, Acceptor.announce_sources()) ::
+          boolean()
+  defp udp_announceable?({ip, family}, sources),
+    do: Acceptor.loopback_ip?(ip) or primary_source(sources, family) != nil
 
-  @spec udp_announce_on_host(
+  # BEP 7 wants the tracker to see the datagram arrive from the address we
+  # announce, but a bound source is only valid if the route to *this*
+  # destination leaves through an interface that owns it. For the primary
+  # address `announce_source_ip/3` asks the routing table (see `Acceptor`); it
+  # drops the bind for loopback and swaps in the routed address when our
+  # preferred one lives on an interface that does not reach the tracker (VPN,
+  # second NIC, tethering). Every further address of the family is added by
+  # `secondary_source_jobs/5`.
+  @spec udp_source_jobs(
           {:inet.ip_address(), :inet | :inet6},
-          map(),
+          Acceptor.announce_sources(),
+          :inet.port_number()
+        ) :: [source_job()]
+  defp udp_source_jobs({ip, family}, sources, port) do
+    source_ip = Acceptor.announce_source_ip(ip, port, primary_source(sources, family))
+
+    [
+      {:primary, family, ip, source_ip}
+      | secondary_source_jobs(family, ip, port, source_ip, extra_sources(sources, family))
+    ]
+  end
+
+  @spec udp_announce_job(
+          source_job(),
           :inet.port_number(),
           Torrent.hash(),
           stats(),
           request_opts()
         ) :: Response.t() | Error.t()
-  defp udp_announce_on_host({ip, family}, source_ips, port, hash, stats, opts) do
-    # BEP 7 wants the tracker to see the datagram arrive from the address we
-    # announce, but a bound source is only valid if the route to *this*
-    # destination leaves through an interface that owns it. `announce_source_ip/3`
-    # asks the routing table (see `Acceptor`); it drops the bind for loopback
-    # and swaps in the routed address when our preferred one lives on an
-    # interface that does not reach the tracker (VPN, second NIC, tethering).
-    source_ip = Acceptor.announce_source_ip(ip, port, Map.get(source_ips, family))
-
+  defp udp_announce_job({:primary, family, ip, source_ip}, port, hash, stats, opts) do
     source_ip
     |> udp_announce_bound({ip, family}, port, hash, stats, opts)
     |> retry_unbound_source(source_ip, fn ->
       udp_announce_bound(nil, {ip, family}, port, hash, stats, opts)
     end)
   end
+
+  # No unbound retry for an added source: unbound is the primary's route, which
+  # the primary job already announces from. Retrying would send the same event
+  # twice from one address.
+  defp udp_announce_job({:secondary, family, ip, source_ip}, port, hash, stats, opts) do
+    udp_announce_bound(
+      source_ip,
+      {ip, family},
+      port,
+      hash,
+      stats,
+      Keyword.put(opts, :source_role, :secondary)
+    )
+  end
+
+  # ---------------------------------------------------------------------------
+  # BEP 7 multi-homed announce
+  #
+  # Each tracker address gets one announce per local source: the primary
+  # address of the family (exactly the announce made before multi-homing) plus
+  # one per further eligible address from `Acceptor.announce_sources/0`. Every
+  # source is a separate peer endpoint to the tracker, so each one carries the
+  # request's event (`started`/`completed`/`stopped`) once — a `stopped` that
+  # skipped an address would leave it listed until the tracker times it out.
+  # Two sources that would leave from the same address are one source: the
+  # tracker cannot tell them apart, and the event would reach it twice.
+  # Whatever the source count, `PeerDiscovery.Announce` sees one merged result
+  # per tracker URL, so its event bookkeeping, BEP 31 retry/cooldown and BEP 12
+  # tier logic run once per tracker, as before.
+  # ---------------------------------------------------------------------------
+
+  @spec announce_sources(request_opts()) :: Acceptor.announce_sources()
+  defp announce_sources(opts) do
+    case Keyword.fetch(opts, :announce_sources) do
+      {:ok, %{} = sources} -> Map.merge(%{inet: [], inet6: []}, sources)
+      :error -> Acceptor.announce_sources()
+    end
+  end
+
+  @spec primary_source(Acceptor.announce_sources(), :inet | :inet6) :: :inet.ip_address() | nil
+  defp primary_source(sources, family), do: List.first(Map.get(sources, family, []))
+
+  @spec extra_sources(Acceptor.announce_sources(), :inet | :inet6) :: [:inet.ip_address()]
+  defp extra_sources(sources, family), do: Enum.drop(Map.get(sources, family, []), 1)
+
+  # An added source is announced only to a resolved tracker address it has a
+  # route to (`Acceptor.source_reaches?/3`, no packet sent), and only when it
+  # would not leave from the address the primary job already uses. An
+  # unbound primary leaves from whatever the route picks; ask the route which
+  # address that is, so a source equal to it is not announced twice.
+  @spec secondary_source_jobs(
+          :inet | :inet6,
+          :inet.ip_address() | nil,
+          :inet.port_number(),
+          :inet.ip_address() | nil,
+          [:inet.ip_address()]
+        ) :: [source_job()]
+  defp secondary_source_jobs(_family, nil, _port, _primary_source, _extras), do: []
+  defp secondary_source_jobs(_family, _dest, _port, _primary_source, []), do: []
+
+  defp secondary_source_jobs(family, dest, port, primary_source, extras) do
+    taken = primary_source || Acceptor.route_source_ip(dest, port)
+
+    extras
+    |> Enum.reject(&(&1 == taken))
+    |> Enum.uniq()
+    |> Enum.filter(&Acceptor.source_reaches?(&1, dest, port))
+    |> Enum.map(&{:secondary, family, dest, &1})
+  end
+
+  # Primaries first, in the order they were always sent; secondaries after.
+  # `merge_http_announces/1` prefers the first error when every announce
+  # failed, and a primary's error is the tracker's real answer, so callers
+  # merge the primaries' results ahead of the secondaries'.
+  @spec order_source_jobs([[source_job()]]) :: [source_job()]
+  defp order_source_jobs(jobs_per_dest) do
+    {primaries, secondaries} =
+      jobs_per_dest
+      |> List.flatten()
+      |> Enum.split_with(&match?({:primary, _family, _dest, _source}, &1))
+
+    primaries ++ secondaries
+  end
+
+  # A single-homed host (no secondary job) runs its announces one after
+  # another, exactly as before multi-homing. Otherwise `Tracker.Fanout` runs
+  # them concurrently, so a dead source never holds back the others.
+  @spec run_source_jobs(
+          [source_job()],
+          String.t(),
+          Torrent.hash(),
+          request_opts(),
+          (source_job() -> Response.t() | Error.t())
+        ) :: [{source_job(), Response.t() | Error.t()}]
+  defp run_source_jobs(jobs, tracker, hash, opts, fun) do
+    results =
+      if Enum.all?(jobs, &match?({:primary, _family, _dest, _source}, &1)) do
+        Enum.map(jobs, fun)
+      else
+        Fanout.run(Enum.map(jobs, &{elem(&1, 0), &1}), fun, fanout_opts(opts))
+      end
+
+    pairs = Enum.zip(jobs, results)
+    log_source_results(pairs, tracker, hash)
+    pairs
+  end
+
+  # A malformed setting falls back to the default: a concurrency of 0 would
+  # start nothing and wait forever.
+  @spec fanout_opts(request_opts()) :: keyword()
+  defp fanout_opts(opts) do
+    config = Application.get_env(:elixir_torrent, :tracker, [])
+    max_concurrency = Keyword.get(config, :max_concurrent_source_announces)
+    grace_ms = Keyword.get(opts, :source_grace_ms, Keyword.get(config, :source_grace_ms))
+
+    [
+      max_concurrency:
+        if(is_integer(max_concurrency) and max_concurrency >= 1,
+          do: max_concurrency,
+          else: Fanout.default_max_concurrency()
+        ),
+      grace_ms:
+        if(is_integer(grace_ms) and grace_ms >= 0, do: grace_ms, else: Fanout.default_grace_ms())
+    ]
+  end
+
+  # One debug line per source announce: the evidence for "which addresses did
+  # this announce leave from", on a single- and a multi-homed host alike.
+  @spec log_source_results(
+          [{source_job(), Response.t() | Error.t()}],
+          String.t(),
+          Torrent.hash()
+        ) :: :ok
+  defp log_source_results(pairs, tracker, hash) do
+    Enum.each(pairs, fn {{role, family, dest, source}, result} ->
+      Logger.debug(fn ->
+        "[tracker_announce] source_result hash=#{Torrent.hex_encoded_hash(hash)} tracker=#{tracker} dest=#{format_dest(dest)} family=#{family} role=#{role} source=#{format_source(source)} #{format_source_result(result)}"
+      end)
+    end)
+  end
+
+  @spec format_dest(:inet.ip_address() | nil) :: String.t()
+  defp format_dest(nil), do: "unresolved"
+  defp format_dest(ip), do: Acceptor.format_ip(ip)
+
+  @spec format_source_result(Response.t() | Error.t()) :: String.t()
+  defp format_source_result(%Response{peers: peers}), do: "result=ok peers=#{length(peers)}"
+  defp format_source_result(%Error{reason: reason}), do: "result=error reason=#{inspect(reason)}"
 
   @spec udp_announce_bound(
           :inet.ip_address() | nil,
@@ -507,39 +686,80 @@ defmodule Tracker do
 
     url = append_query(announce, query)
 
-    %{inet: ip4, inet6: ip6, inet6_all: v6_all} = Acceptor.all_global_ips()
+    %{inet6_all: v6_all} = Acceptor.all_global_ips()
+    sources = announce_sources(opts)
     {tracker_families, dest_ctx} = http_tracker_endpoints(announce)
-    ipv4_announce = if MapSet.member?(tracker_families, :inet), do: ip4
 
-    v6_announces =
-      if MapSet.member?(tracker_families, :inet6), do: Acceptor.announcable_ipv6(), else: []
-
-    if ip4 || ip6 do
+    if sources.inet != [] or sources.inet6 != [] do
       Logger.debug(
-        "[tracker_announce] http_endpoints hash=#{Torrent.hex_encoded_hash(hash)} ipv4=#{if ip4, do: Acceptor.format_ip(ip4), else: "none"} ipv6_announce=#{Enum.map_join(v6_announces, ",", &Acceptor.format_ip/1)} ipv6_all=#{Enum.map_join(v6_all, ",", &Acceptor.format_ip/1)}"
+        "[tracker_announce] http_endpoints hash=#{Torrent.hex_encoded_hash(hash)} ipv4=#{format_sources(sources.inet)} ipv6_announce=#{format_sources(sources.inet6)} ipv6_all=#{Enum.map_join(v6_all, ",", &Acceptor.format_ip/1)}"
       )
     end
 
-    []
-    |> maybe_http_announce(url, :inet, ipv4_announce, dest_ctx, opts)
-    |> http_announce_ipv6(url, v6_announces, dest_ctx, opts)
+    [:inet, :inet6]
+    |> Enum.filter(&MapSet.member?(tracker_families, &1))
+    |> Enum.map(&http_source_jobs(&1, sources, dest_ctx))
+    |> order_source_jobs()
+    |> run_source_jobs(http_tracker_label(announce), hash, opts, fn job ->
+      http_announce_job(job, url, opts)
+    end)
+    |> merge_http_source_results()
+  end
+
+  # The IPv4 announce has always gone out first and the merge has always seen
+  # the IPv6 result first; keep both, then the secondaries.
+  @spec merge_http_source_results([{source_job(), Response.t() | Error.t()}]) ::
+          Response.t() | Error.t()
+  defp merge_http_source_results(pairs) do
+    {primaries, secondaries} =
+      Enum.split_with(pairs, &match?({{:primary, _family, _dest, _source}, _result}, &1))
+
+    (Enum.reverse(primaries) ++ secondaries)
+    |> Enum.map(&elem(&1, 1))
     |> merge_http_announces()
   end
 
-  # BEP 7 announces once per announceable IPv6 address, each bound to that
-  # address (subject to the route check in `http_source_bind/3`).
-  @spec http_announce_ipv6(
-          list(Response.t() | Error.t()),
-          binary(),
-          [:inet.ip6_address()],
-          dest_ctx(),
-          request_opts()
-        ) :: list(Response.t() | Error.t())
-  defp http_announce_ipv6(acc, url, v6_announces, dest_ctx, opts) do
-    Enum.reduce(v6_announces, acc, fn ip6_addr, announces ->
-      [http_announce(url, :inet6, http_source_bind(dest_ctx, :inet6, ip6_addr), opts) | announces]
-    end)
+  @spec http_source_jobs(:inet | :inet6, Acceptor.announce_sources(), dest_ctx()) ::
+          [source_job()]
+  defp http_source_jobs(family, sources, {dests, port, _loopback?} = dest_ctx) do
+    case primary_source(sources, family) do
+      nil ->
+        []
+
+      primary ->
+        dest = Map.get(dests, family)
+        source = http_source_bind(dest_ctx, family, primary)
+
+        [
+          {:primary, family, dest, source}
+          | secondary_source_jobs(family, dest, port, source, extra_sources(sources, family))
+        ]
+    end
   end
+
+  @spec http_announce_job(source_job(), binary(), request_opts()) :: Response.t() | Error.t()
+  defp http_announce_job({:primary, family, _dest, source}, url, opts),
+    do: http_announce(url, family, source, opts)
+
+  # As on UDP: an added source never retries unbound.
+  defp http_announce_job({:secondary, family, _dest, source}, url, opts),
+    do: http_announce_bound(url, family, source, opts)
+
+  # Host and port only: the query of a private tracker carries its passkey.
+  @spec http_tracker_label(binary()) :: String.t()
+  defp http_tracker_label(announce) do
+    case URI.parse(announce) do
+      %URI{scheme: scheme, host: host, port: port} when is_binary(host) ->
+        "#{scheme}://#{host}:#{port}"
+
+      _ ->
+        "http"
+    end
+  end
+
+  @spec format_sources([:inet.ip_address()]) :: String.t()
+  defp format_sources([]), do: "none"
+  defp format_sources(ips), do: Enum.map_join(ips, ",", &Acceptor.format_ip/1)
 
   @spec append_query(binary(), binary()) :: binary()
   defp append_query(url, encoded_query) do
@@ -733,21 +953,6 @@ defmodule Tracker do
   end
 
   defp connection_id_expired?(_), do: false
-
-  @spec maybe_http_announce(
-          list(Response.t() | Error.t()),
-          binary(),
-          :inet | :inet6,
-          any(),
-          dest_ctx(),
-          request_opts()
-        ) ::
-          list(Response.t() | Error.t())
-  defp maybe_http_announce(acc, _url, _family, nil, _dest_ctx, _opts), do: acc
-
-  defp maybe_http_announce(acc, url, family, ip, dest_ctx, opts) do
-    [http_announce(url, family, http_source_bind(dest_ctx, family, ip), opts) | acc]
-  end
 
   # `source == nil` from here down means "no source bind"; the diagnostics
   # render it as `auto` rather than printing an address the socket is not using.
@@ -1331,7 +1536,10 @@ defmodule Tracker do
 
   defp do_udp_announce(socket, ip, port, connection_id, hash, announce_stats, family, opts) do
     transaction_id = generate_transaction_id()
-    packet = encode_udp_announce(connection_id, transaction_id, hash, announce_stats, family)
+
+    packet =
+      encode_udp_announce(connection_id, transaction_id, hash, announce_stats, family, opts)
+
     max_attempts = Keyword.get(opts, :max_udp_attempts, @udp_max_backoff_attempt)
 
     request_opts =
@@ -1398,7 +1606,7 @@ defmodule Tracker do
        }) do
     case fetch_connection_id(socket, ip, port, opts) do
       {:ok, id} ->
-        {:ok, encode_udp_announce(id, transaction_id, hash, announce_stats, family)}
+        {:ok, encode_udp_announce(id, transaction_id, hash, announce_stats, family, opts)}
 
       %Error{} = error ->
         error
@@ -1560,16 +1768,18 @@ defmodule Tracker do
           <<_::32>>,
           Torrent.hash(),
           {non_neg_integer(), non_neg_integer(), non_neg_integer(), 0..3},
-          :inet | :inet6
+          :inet | :inet6,
+          request_opts()
         ) :: iodata()
   defp encode_udp_announce(
          connection_id,
          transaction_id,
          hash,
          {uploaded, downloaded, left, event},
-         family
+         family,
+         opts
        ) do
-    ip_field = udp_announce_ip_field(family)
+    ip_field = udp_announce_ip_field(family, Keyword.get(opts, :source_role, :primary))
 
     UDP.encode_announce(connection_id, transaction_id, hash, Peer.id(),
       uploaded: uploaded,
@@ -1584,10 +1794,13 @@ defmodule Tracker do
   end
 
   # BEP 15 § Announce — IPv6 clients set ip_field to 0; tracker learns address from packet source.
-  @spec udp_announce_ip_field(:inet | :inet6) :: <<_::32>>
-  defp udp_announce_ip_field(:inet6), do: <<0::32>>
+  # An added BEP 7 source does the same on IPv4: the primary address in the
+  # field would make the tracker record the primary for this announce too.
+  @spec udp_announce_ip_field(:inet | :inet6, Fanout.role()) :: <<_::32>>
+  defp udp_announce_ip_field(:inet6, _role), do: <<0::32>>
+  defp udp_announce_ip_field(:inet, :secondary), do: <<0::32>>
 
-  defp udp_announce_ip_field(:inet) do
+  defp udp_announce_ip_field(:inet, :primary) do
     case Acceptor.ipv4_binary() do
       <<a, b, c, d>> -> <<a, b, c, d>>
       _ -> <<0::32>>
@@ -1600,10 +1813,11 @@ defmodule Tracker do
           <<_::32>>,
           Torrent.hash(),
           {non_neg_integer(), non_neg_integer(), non_neg_integer(), 0..3},
-          :inet | :inet6
+          :inet | :inet6,
+          request_opts()
         ) :: iodata()
-  def encode_udp_announce_for_test(connection_id, transaction_id, hash, stats, family) do
-    encode_udp_announce(connection_id, transaction_id, hash, stats, family)
+  def encode_udp_announce_for_test(connection_id, transaction_id, hash, stats, family, opts \\ []) do
+    encode_udp_announce(connection_id, transaction_id, hash, stats, family, opts)
   end
 
   # HTTP trackers typically return:

@@ -292,7 +292,8 @@ defmodule TrackerUDPLoopbackTest do
         send(observer, {:retry_server, :announce, connection_id, next_announce_count})
 
         if next_announce_count == 1 and cache_state == :expired do
-          key = {{127, 0, 0, 1}, tracker_port, client_port}
+          # The announce to a loopback tracker is unbound (see `Acceptor`).
+          key = {{127, 0, 0, 1}, tracker_port, {0, 0, 0, 0}, client_port}
           send(PeerDiscovery.ConnectionIds, {:timeout, key})
           :sys.get_state(PeerDiscovery.ConnectionIds)
         end

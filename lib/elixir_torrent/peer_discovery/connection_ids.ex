@@ -45,8 +45,7 @@ defmodule PeerDiscovery.ConnectionIds do
   @spec handle_cast({:invalidate, port(), :inet.ip_address(), :inet.port_number()}, State.t()) ::
           {:noreply, State.t()}
   def handle_cast({:invalidate, socket, ip, port}, %State{} = state) do
-    {:ok, local_port} = :inet.port(socket)
-    key = {ip, port, local_port}
+    key = connection_id_cache_key(socket, ip, port)
     {:noreply, update_in(state, [Access.key!(:ids)], &Map.delete(&1, key))}
   end
 
@@ -54,8 +53,11 @@ defmodule PeerDiscovery.ConnectionIds do
           {:reply, {:ok, Tracker.connection_id()} | Tracker.Error.t() | :error, State.t()}
           | {:noreply, State.t()}
   def handle_call([socket, ip, port], from, %State{} = state) do
-    # Some UDP trackers appear to bind connection_id validity to the client's source port.
-    # We open new UDP sockets over time, so cache connection_ids per (tracker endpoint, local port).
+    # Some UDP trackers appear to bind connection_id validity to the client's source port,
+    # and every tracker binds it to the source address (BEP 15 derives it from the client's
+    # IP). We open new UDP sockets over time, and a BEP 7 multi-homed announce binds one per
+    # local address — two of them may get the same ephemeral port — so cache connection_ids
+    # per (tracker endpoint, local address, local port).
     key = connection_id_cache_key(socket, ip, port)
 
     case Map.fetch(state.ids, key) do
@@ -71,10 +73,10 @@ defmodule PeerDiscovery.ConnectionIds do
   end
 
   @spec connection_id_cache_key(port(), :inet.ip_address(), :inet.port_number()) ::
-          {:inet.ip_address(), :inet.port_number(), :inet.port_number()}
+          {:inet.ip_address(), :inet.port_number(), :inet.ip_address(), :inet.port_number()}
   defp connection_id_cache_key(socket, ip, port) do
-    {:ok, local_port} = :inet.port(socket)
-    {ip, port, local_port}
+    {:ok, {local_ip, local_port}} = :inet.sockname(socket)
+    {ip, port, local_ip, local_port}
   end
 
   @spec enqueue_connection_id_waiter(State.t(), term(), GenServer.from()) :: State.t()
