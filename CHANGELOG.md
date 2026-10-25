@@ -21,8 +21,8 @@
   `started`/`completed`/`stopped` event once; tier failover (BEP 12) and
   retry/cooldown (BEP 31) still see one merged answer per tracker.
 - Every announce logs one `[tracker_announce] source_result` debug line per
-  source: tracker, destination, family, role (primary/secondary), bound source
-  and result.
+  source: tracker, event, destination, family, role (primary/secondary), bound
+  source and result.
 
 ### Fixed
 
