@@ -478,13 +478,18 @@ defmodule Peer.ConnectionManager do
     end
   end
 
+  # `Torrent.Model` reports the download rate in bytes per millisecond, usually as
+  # a float. The guard used to accept only integers, so the real (float) readout
+  # never matched and every downloading torrent counted as "low speed" whatever it
+  # was doing: escalated discovery below 50 peers and the snub path at 12+ stayed
+  # on for torrents running at MB/s.
   defp low_download_speed?(hash) do
     case Torrent.get(hash, :speed) do
-      %{download: speed} when is_integer(speed) -> speed < @low_speed_bytes_per_sec
+      %{download: per_ms} when is_number(per_ms) -> per_ms * 1_000 < @low_speed_bytes_per_sec
       _ -> true
     end
   catch
-    _ -> true
+    :exit, _ -> true
   end
 
   @spec seeding?(Torrent.hash()) :: boolean()

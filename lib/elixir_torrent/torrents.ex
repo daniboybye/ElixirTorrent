@@ -124,7 +124,8 @@ defmodule Torrents do
          download_root <-
            if(delete_data?, do: Torrent.Removal.download_root(hash), else: File.cwd!()),
          :ok <- stop_pid(pid),
-         :ok <- Torrent.Session.delete(hash) do
+         :ok <- Torrent.Session.delete(hash),
+         :ok <- Torrent.ReceivedBytes.delete(hash) do
       maybe_delete_data(paths, download_root, delete_data?)
     end
   end
