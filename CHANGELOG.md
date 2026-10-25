@@ -23,6 +23,22 @@
 - Every announce logs one `[tracker_announce] source_result` debug line per
   source: tracker, event, destination, family, role (primary/secondary), bound
   source and result.
+- `DHT.routing_stats/0` returns the DHT routing table size per family and the
+  inbound-candidate counters below; the same numbers are logged every minute as
+  a `[dht] routing_stats` debug line.
+
+### Changed
+
+- BEP 5: a DHT node seen only as the source of an inbound query no longer
+  enters the routing table on that query alone. Its query is answered as
+  before (the answer goes out first, the check never delays it); then it is
+  pinged at the address the query came from, and only a valid answer to that
+  ping inserts it, through the usual BEP 42 check and ping-before-evict. A node
+  already in the table at that address refreshes as before. A node id claimed
+  from a new address is checked the same way, and its silence no longer counts
+  against the node that really holds that id. The check is bounded: at most 64
+  waiting candidates, 2 per source IP, 30 s each, 16 new pings per second, and
+  never more than a quarter of the DHT's in-flight query slots.
 
 ### Fixed
 

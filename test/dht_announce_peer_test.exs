@@ -165,8 +165,7 @@ defmodule DHT.AnnouncePeerTest do
                state
              )
 
-    assert {:ok, {_server_ip, _server_port, response_packet}} =
-             :gen_udp.recv(context.client, 0, 1_000)
+    response_packet = recv_reply(context.client)
 
     decoded =
       case expect do
@@ -182,5 +181,16 @@ defmodule DHT.AnnouncePeerTest do
       end
 
     {decoded, new_state}
+  end
+
+  # A first-seen query source also gets our verification ping (see
+  # `DHT.Candidates`) right after the answer; skip it, we want the answer.
+  defp recv_reply(socket) do
+    assert {:ok, {_server_ip, _server_port, packet}} = :gen_udp.recv(socket, 0, 1_000)
+
+    case KRPC.decode(packet) do
+      {:ok, {:query, %{method: :ping}}} -> recv_reply(socket)
+      _ -> packet
+    end
   end
 end

@@ -117,10 +117,23 @@ defmodule DHT.BEP42InboundTest do
     arbitrary_id = :binary.copy(<<0x11>>, 20)
     query = %{method: :ping, transaction_id: "lo", node_id: arbitrary_id}
 
-    assert {:noreply, result} =
+    assert {:noreply, queried} =
              DHT.handle_info(
                {:udp, context.socket, {10, 0, 0, 7}, 6_881, KRPC.encode_query(query)},
                context.state
+             )
+
+    # Exempt from BEP 42, so it becomes a candidate (an invalid public id
+    # would not even get that far) and is verified by answering our ping.
+    refute good_entry?(queried.routing_tables, arbitrary_id)
+
+    assert [{tid, %{type: :candidate_ping}}] = Map.to_list(queried.pending)
+    response = %{transaction_id: tid, node_id: arbitrary_id}
+
+    assert {:noreply, result} =
+             DHT.handle_info(
+               {:udp, context.socket, {10, 0, 0, 7}, 6_881, KRPC.encode_response(response)},
+               queried
              )
 
     assert good_entry?(result.routing_tables, arbitrary_id)
