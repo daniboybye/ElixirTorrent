@@ -185,6 +185,10 @@ defmodule Peer.MSE do
   the other.
   """
   @spec new_cipher(binary()) :: cipher()
+  # RC4 is mandated by the MSE/PE wire spec: the other peer speaks it, so we cannot
+  # pick a stronger cipher. It only obfuscates traffic against ISP shaping; it is
+  # not a confidentiality layer.
+  # sobelow_skip ["Crypto.WeakCipher"]
   def new_cipher(key) when is_binary(key) do
     case backend() do
       :crypto ->
