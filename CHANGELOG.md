@@ -5,12 +5,14 @@
 ### Added
 
 - BEP 7 multi-homed tracker announce. A host with more than one network — a
-  second NIC, a VPN tunnel, tethering, IPv4 plus IPv6 on different interfaces —
+  second NIC, tethering, IPv4 plus IPv6 on different interfaces —
   now announces to each HTTP and UDP tracker from every eligible local address,
   each on a socket bound to that address, so the tracker lists and serves peers
   for each of them. Before, only one primary IPv4 and one primary IPv6 address
   announced. Eligible means the first usable address of each interface that is
-  up, not loopback, link-local, ULA/site-local or IPv4-mapped, at most four per
+  up, not loopback, point-to-point (a VPN or Tailscale tunnel binds and
+  connects anywhere, but its datagrams leave from the default interface),
+  link-local, ULA/site-local or IPv4-mapped, at most four per
   family (`config :elixir_torrent, :tracker, max_sources_per_family: 4`;
   `multihomed_announce: false` restores the old behaviour). A host with one
   address per family announces exactly as before.

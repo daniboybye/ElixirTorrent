@@ -64,7 +64,7 @@ defmodule Bep7MultihomedAnnounceTest do
              }
     end
 
-    test "a second NIC and a VPN add one source each, primary first" do
+    test "a second NIC adds one source, a point-to-point tunnel adds none" do
       gua_wifi = {0x2001, 0xDB8, 0xAAAA, 0, 0, 0, 0, 0x10}
       gua_vpn = {0x2001, 0xDB8, 0xBBBB, 0, 0, 0, 0, 0x20}
 
@@ -84,8 +84,10 @@ defmodule Bep7MultihomedAnnounceTest do
 
       snapshot = Acceptor.compute_all_global_ips({:ok, ifs})
 
-      assert snapshot.announce_sources.inet == [{192, 168, 1, 15}, {10, 0, 0, 7}, {100, 64, 3, 9}]
-      assert snapshot.announce_sources.inet6 == [gua_wifi, gua_vpn]
+      # tun0 can bind and connect to anything, yet its datagrams leave through
+      # the default interface with a source no tracker can answer.
+      assert snapshot.announce_sources.inet == [{192, 168, 1, 15}, {10, 0, 0, 7}]
+      assert snapshot.announce_sources.inet6 == [gua_wifi]
 
       assert snapshot.inet_all == [
                {192, 168, 1, 15},
