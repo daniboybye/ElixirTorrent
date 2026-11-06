@@ -310,9 +310,16 @@ defmodule Acceptor do
   end
 
   # A loopback interface owns nothing a tracker could reach, and an interface
-  # that is down owns addresses no packet can leave from.
+  # that is down owns addresses no packet can leave from. A point-to-point
+  # tunnel (Tailscale, WireGuard, a VPN client) is no extra source either: the
+  # kernel lets a socket bind to its address and `connect` to any destination,
+  # so the route probe passes, yet the datagram leaves through the default
+  # interface with a source the tracker cannot answer. When the tunnel really
+  # is the route to a tracker, the primary job already takes its address
+  # (`announce_source_ip/3`).
   @spec announce_interface?(list()) :: boolean()
-  defp announce_interface?(flags), do: :up in flags and :loopback not in flags
+  defp announce_interface?(flags),
+    do: :up in flags and :loopback not in flags and :pointtopoint not in flags
 
   @spec extra_ipv6_source?(:inet.ip_address()) :: boolean()
   defp extra_ipv6_source?({s1, _s2, _s3, _s4, _s5, _s6, _s7, _s8} = ip) when is_integer(s1) do
