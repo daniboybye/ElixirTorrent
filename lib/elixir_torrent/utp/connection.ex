@@ -931,6 +931,26 @@ defmodule UTP.Connection do
   # answers.
   defp check_idle_timeout(%{closed: true} = state, _now), do: state
 
+  # An inbound SYN spawns a server connection that answers with ST_STATE and then
+  # waits for the peer's first ST_STATE/ST_DATA. A peer that sends only the SYN (a
+  # scanner, a broken stack, a spoofed source) never follows up, so nothing is in
+  # flight and no owner exists to watch it: measured on a 8-hour node, 63 such
+  # `:syn_recv` connections with no owner, the oldest 7.7 h silent. Reap them once
+  # a silent handshake has outlived the idle timeout.
+  defp check_idle_timeout(%{role: :server, phase: :syn_recv} = state, now) do
+    idle_for = now - max(state.activity.last_send_ms, state.activity.last_recv_ms)
+
+    if idle_for >= @idle_timeout_ms do
+      Logger.debug(
+        "[utp] syn_recv_timeout peer=#{inspect({state.peer_ip, state.peer_port})} idle_ms=#{idle_for}"
+      )
+
+      shutdown(state, :idle_timeout)
+    else
+      state
+    end
+  end
+
   defp check_idle_timeout(state, now) do
     stalled? = state.peer_wnd == 0 or (state.fin_sent and is_nil(state.eof_seq))
     idle_for = now - max(state.activity.last_send_ms, state.activity.last_recv_ms)
