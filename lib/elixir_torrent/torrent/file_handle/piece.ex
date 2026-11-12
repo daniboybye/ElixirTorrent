@@ -272,8 +272,13 @@ defmodule Torrent.FileHandle.Piece do
   defp do_read(offset, length, [{pid, _} | files], data) do
     # Raw fds require an integer offset (they reject the `{:bof, N}` form that
     # non-raw file_io_server handles accept).
-    {:ok, block} = :file.pread(pid, offset, length)
-    do_read(0, length - byte_size(block), files, [data, block])
+    # A file shorter than the layout expects (truncated or replaced behind our
+    # back) answers a bare `:eof`; report it instead of crashing the owner of
+    # the raw fds, which would also kill every other read it was serving.
+    case :file.pread(pid, offset, length) do
+      {:ok, block} -> do_read(0, length - byte_size(block), files, [data, block])
+      _ -> :error
+    end
   end
 
   defp buffer_write(%__MODULE__{pending_writes: pending} = piece, begin, block) do

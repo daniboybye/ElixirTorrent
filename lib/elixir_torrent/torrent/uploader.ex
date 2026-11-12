@@ -34,14 +34,20 @@ defmodule Torrent.Uploader do
         name = {begin, length, index, peer_id, hash}
         Registry.register(Registry, name, nil)
 
-        {:ok, block} = FileHandle.read(hash, index, begin, length)
-
-        case deliver_callback(callback, block) do
-          :cancelled -> :ok
-          _ -> Model.uploaded_subpiece(hash, length)
+        # BEP 3 lets us simply not answer a request: if the bytes are unreadable
+        # the peer asks again or moves on.
+        with {:ok, block} <- FileHandle.read(hash, index, begin, length) do
+          deliver(hash, length, callback, block)
         end
       end
     )
+  end
+
+  defp deliver(hash, length, callback, block) do
+    case deliver_callback(callback, block) do
+      :cancelled -> :ok
+      _ -> Model.uploaded_subpiece(hash, length)
+    end
   end
 
   # The peer this block is for can disappear at any point: it disconnects, trips
