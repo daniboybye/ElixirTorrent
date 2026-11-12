@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 - 2026-11-12
+
+A network release. Trackers now see every network the host has, not just the primary
+address, and the DHT only keeps nodes that answer us. The download speed readout
+follows the bytes that actually arrive, and two resource leaks are closed: uTP
+handshakes that never finished, and a storage crash on a truncated file.
 
 ### Added
 
@@ -42,8 +47,37 @@
   waiting candidates, 2 per source IP, 30 s each, 16 new pings per second, and
   never more than a quarter of the DHT's in-flight query slots.
 
+### Performance
+
+- A seeding torrent dials gently: one batch of at most 8 endpoints at the normal
+  cadence, never to a peer already known to be a seed. Before, the seed's zero
+  download speed counted as starving, so every seeding torrent kept three batches
+  and about 40 endpoints in flight on a 1 s tick for hours (14 seeding torrents:
+  dial tasks 39 to 3, uTP connections 132 to 6, processes 1280 to 830).
+
 ### Fixed
 
+- The download speed readout counted verified pieces, so with 1 MiB pieces a
+  64 KB/s torrent read anywhere from 12 to 157 KB/s, and one slower than a piece
+  per window read 0 while bytes were arriving. It now measures received bytes over
+  a 20 s sliding window.
+- Every downloading torrent counted as slow in the connection manager (its speed
+  check compared a float in bytes per millisecond against an integer), so
+  discovery escalated below 50 peers and the snub path ran above 12 peers at any
+  speed. It now compares bytes per second against the 32 KiB/s threshold.
+- A read past the end of a truncated file crashed the piece process that owns the
+  file handles, and every other read in flight with it (five crashes in one
+  instant on a live node). The read now fails cleanly and the upload simply does
+  not answer that request; the peer asks again or moves on.
+- An inbound uTP handshake whose peer sent only the SYN stayed in `syn_recv`
+  forever, with no owner and nothing to time it out (63 of them, the oldest 7.7 h
+  old, on a live node). It is now closed after 30 s of silence.
+- Point-to-point interfaces (VPN or Tailscale tunnels) are no longer used as extra
+  BEP 7 announce sources: their datagrams leave through the default interface, so
+  every added announce timed out.
+- `ssl_verify_fun` is updated to 1.1.9 (EEF-CVE-2026-117666), and hackney, quic,
+  h2 and webtransport to their current releases (clears five `hex.audit`
+  advisories).
 - BEP 15 `connection_id`s are cached per local address as well as local port.
   Two announce sockets bound to different addresses can get the same ephemeral
   port, and trackers tie the id to the client's address.
