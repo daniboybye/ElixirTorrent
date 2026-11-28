@@ -11,6 +11,31 @@
   these kept slots reserved for a dead process, and after a few of them no direct
   metadata fetch could run until a restart.
 
+## 0.8.1 - 2026-11-28
+
+A maintenance release. Adding several magnet links, or cancelling some, could
+leave the client unable to fetch metadata directly until a restart; it no longer
+does. The toolchain and the network dependencies are refreshed, including a
+security fix in `idna`.
+
+### Fixed
+
+- With several magnets pending, a metadata fetch round that waited more than
+  30 s for free connection slots crashed, but stayed in the queue and was later
+  granted slots that nobody would release. A round now waits as long as it needs,
+  and one that dies or gives up leaves the queue.
+- Cancelling a magnet while it was fetching metadata never returned its
+  connection slots. The connection limiter now monitors its callers and takes the
+  slots back when one dies. Either leak, repeated a few times, stopped all direct
+  metadata fetches until a restart.
+
+### Changed
+
+- Built and tested on Erlang/OTP 29.1.3.
+- `idna` 8.0.0 fixes EEF-CVE-2026-117678 (super-linear CPU time on long punycode
+  labels). `quic` 3.3.2, `hackney` 4.12.4, `h2` 0.18.3, `webtransport` 0.5.13 and
+  `certifi` 2.19.0 are the current releases.
+
 ## 0.8.0 - 2026-11-12
 
 A network release. Trackers now see every network the host has, not just the primary
