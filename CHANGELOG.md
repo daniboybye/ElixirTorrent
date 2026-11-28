@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Magnet metadata fetches no longer lose connection slots. Waiting for a free
+  slot has no 30 s deadline any more, so with several magnets pending a fetch
+  round queues instead of crashing. Slots are also returned when a round is
+  killed, and a caller that gives up is removed from the queue. Before, each of
+  these kept slots reserved for a dead process, and after a few of them no direct
+  metadata fetch could run until a restart.
+
 ## 0.8.0 - 2026-11-12
 
 A network release. Trackers now see every network the host has, not just the primary
